@@ -1,4 +1,6 @@
-# Connector SDK
+# Connector framework
+
+> **Note on naming.** This document was previously titled "Connector SDK". For v0.1 and v0.2 the connector mechanism is an **internal framework** — part of the Omniscience monorepo, not a published PyPI package. Adding a new connector = PR against Omniscience. See [ADR 0002](../decisions/0002-connector-framework-vs-sdk.md) for the reasoning and revisit triggers.
 
 How to add a new source type to Omniscience.
 
@@ -93,10 +95,43 @@ Planned:
 - `k8s` — Cluster resources as structured documents.
 - `terraform` — State files + tf modules.
 
+## AgenticConnector — LLM-driven discovery
+
+Some sources cannot be fully described declaratively. Examples:
+
+- **Kubernetes** — which resource kinds matter? Deployments and ConfigMaps yes; transient events no; Secrets never. The right subset depends on the cluster.
+- **Databases** — index schemas, comments, saved queries. Skip transactional row data. Which tables are reference vs transactional?
+- **Selective log ingestion** — ingest error/warn from specific services only; summarize rather than embed raw lines.
+
+For these, we define **`AgenticConnector`** — a connector whose `discover()` phase is **LLM-driven**:
+
+```python
+class AgenticConnector(Connector, Protocol):
+    """A connector whose discovery phase is LLM-driven.
+
+    Overrides `discover()` to run an agent that inspects the source, decides
+    what to include, and yields DocumentRefs. Everything else (fetch, webhook)
+    is unchanged.
+    """
+
+    agent_config: ClassVar[AgentConfig]
+    """Default agent config: instructions, model, max_iterations."""
+
+    async def discover(
+        self, config: BaseModel, secrets: dict[str, str]
+    ) -> AsyncIterator[DocumentRef]:
+        """Runs an agent with MCP tools that expose the source's API.
+        Agent yields DocumentRefs as it decides what to index."""
+```
+
+The agent under the hood uses **LangGraph** ([ADR 0003](../decisions/0003-agent-framework-langgraph-primary.md)). CrewAI and PydanticAI adapters land in v0.2.
+
+Agentic connectors are **not** the default — regular (declarative) `Connector` is. Use `AgenticConnector` only when declarative discovery cannot express the right scope.
+
 ## Writing a new connector
 
 1. Create package: `packages/connectors/omniscience_connectors/<name>/`
-2. Implement `Connector` protocol
+2. Implement `Connector` protocol (or `AgenticConnector` if LLM-driven discovery is needed)
 3. Register in connector registry (`packages/connectors/omniscience_connectors/__init__.py`)
 4. Add contract tests (see `tests/connectors/contract_tests.py`)
 5. Add docs: `docs/connectors/<name>.md` — required config, minimum scopes, caveats

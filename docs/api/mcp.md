@@ -55,6 +55,13 @@ Primary retrieval. Hybrid vector + BM25 + filter.
         "indexed_at": "2026-04-16T10:32:15Z",
         "doc_version": 7
       },
+      "lineage": {
+        "ingestion_run_id": "ir_01HXYZ...",
+        "embedding_model": "text-embedding-004",
+        "embedding_provider": "google-ai",
+        "parser_version": "treesitter-python-0.21+oms-0.4.2",
+        "chunker_strategy": "code_symbol"
+      },
       "metadata": {
         "language": "python",
         "symbol": "authenticate_token",

@@ -15,9 +15,11 @@ Pre-v0.1 — scaffolding. See [docs/roadmap.md](docs/roadmap.md).
 - [Roadmap](docs/roadmap.md) — milestones M0 → M6
 - [MCP API](docs/api/mcp.md) — tool contracts (primary interface)
 - [REST API](docs/api/rest.md) — secondary interface
-- [Connector SDK](docs/api/connector-sdk.md) — how to add a source
+- [Connector framework](docs/api/connector-sdk.md) — how to add a source
 - [Database schema](docs/schema.md)
+- [Freshness & lineage](docs/freshness-and-lineage.md) — trust model for AI clients
 - [Architecture decisions](docs/decisions/)
+- Integrations: [Claude Code](docs/integrations/claude-code.md) · [Cursor](docs/integrations/cursor.md) · [multiqlti](docs/integrations/multiqlti.md) · [LangGraph](docs/integrations/langgraph.md) · [CrewAI](docs/integrations/crewai.md) · [PydanticAI](docs/integrations/pydantic-ai.md)
 
 ## License
 

@@ -116,6 +116,25 @@ Single `docker-compose.yml` brings up:
 
 Helm chart available for Kubernetes.
 
+### Managed Postgres
+
+Nothing in Omniscience requires the built-in Postgres. Any Postgres 14+ with pgvector works:
+
+- **AWS RDS for PostgreSQL** — pgvector available as a managed extension
+- **Google Cloud SQL** — pgvector extension supported
+- **Supabase / Neon / Crunchy Bridge** — pgvector first-class
+- **Aurora PostgreSQL** — pgvector supported
+
+Set `DATABASE_URL` to the external instance; drop the `postgres` service from Compose. Daily `pg_dump` backup sidecar can be similarly disabled in favor of the managed provider's backup mechanism.
+
+## Agent layer (for AgenticConnector only)
+
+Most of Omniscience is deterministic. The exception is **AgenticConnector** — a connector variant whose `discover()` phase uses an LLM to decide what to index (see [ADR 0003](decisions/0003-agent-framework-langgraph-primary.md)).
+
+- **v0.1**: LangGraph, with pluggable LLM provider (Gemini, Claude, Ollama)
+- **v0.2**: CrewAI and PydanticAI adapters added
+- **Layer B** (external users calling Omniscience from their agent code): uses MCP directly, no Omniscience-side abstraction — see [integrations/](integrations/)
+
 ## Data flow: a source update
 
 ```
