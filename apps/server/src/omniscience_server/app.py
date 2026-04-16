@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlparse, urlunparse
 
 import structlog
 from fastapi import FastAPI
@@ -29,6 +30,18 @@ from omniscience_server.middleware import TracingMiddleware
 from omniscience_server.routes import health_router
 
 log = structlog.get_logger(__name__)
+
+
+def _redact_url(url: str) -> str:
+    """Strip credentials from a URL for safe logging."""
+    parsed = urlparse(url)
+    if parsed.password:
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        redacted = parsed._replace(netloc=f"{parsed.username}:***@{host}")
+        return urlunparse(redacted)
+    return url
 
 
 @asynccontextmanager
@@ -48,11 +61,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # --- Placeholder: Postgres connection (Wave 2, issue #2) ---
     # TODO(wave-2, issue-#2): Replace with real asyncpg pool / SQLAlchemy engine.
-    log.info("postgres_connect_placeholder", url=settings.database_url)
+    log.info("postgres_connect_placeholder", url=_redact_url(settings.database_url))
 
     # --- Placeholder: NATS JetStream connection (Wave 2, issue #3) ---
     # TODO(wave-2, issue-#3): Replace with real nats-py connection + stream setup.
-    log.info("nats_connect_placeholder", url=settings.nats_url)
+    log.info("nats_connect_placeholder", url=_redact_url(settings.nats_url))
 
     yield
 

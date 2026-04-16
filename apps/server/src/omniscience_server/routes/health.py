@@ -14,7 +14,8 @@ from __future__ import annotations
 from typing import Literal
 
 import structlog
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
+from starlette.responses import JSONResponse
 
 log = structlog.get_logger(__name__)
 
@@ -50,28 +51,25 @@ def _aggregate_status(checks: dict[str, CheckStatus]) -> CheckStatus:
 
 
 @router.get("/health")
-async def health() -> dict[str, object]:
+async def health(request: Request) -> JSONResponse:
     """Return the health of the service and its dependencies.
 
-    Response shape::
-
-        {
-            "status": "healthy" | "degraded" | "unhealthy",
-            "checks": {
-                "postgres": "healthy" | "degraded" | "unhealthy" | "unchecked",
-                "nats":     "healthy" | "degraded" | "unhealthy" | "unchecked"
-            },
-            "version": "0.1.0"
-        }
+    Returns HTTP 503 when status is unhealthy, 200 otherwise.
     """
+    settings = request.app.state.settings
     checks: dict[str, CheckStatus] = {
         "postgres": await _check_postgres(),
         "nats": await _check_nats(),
     }
     overall = _aggregate_status(checks)
     log.info("health_check", status=overall, checks=checks)
-    return {
-        "status": overall,
-        "checks": checks,
-        "version": "0.1.0",
-    }
+
+    status_code = 503 if overall == "unhealthy" else 200
+    return JSONResponse(
+        content={
+            "status": overall,
+            "checks": checks,
+            "version": settings.app_version,
+        },
+        status_code=status_code,
+    )

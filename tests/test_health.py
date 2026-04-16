@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from httpx import AsyncClient
+from omniscience_server.routes.health import _aggregate_status
 
 
 @pytest.mark.asyncio
 async def test_health_returns_200(client: AsyncClient) -> None:
-    """GET /health returns HTTP 200."""
+    """GET /health returns HTTP 200 when all checks are healthy or unchecked."""
     response = await client.get("/health")
     assert response.status_code == 200
 
@@ -35,8 +38,8 @@ async def test_health_checks_keys(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_health_version(client: AsyncClient) -> None:
-    """GET /health returns the expected version string."""
+async def test_health_version_from_settings(client: AsyncClient) -> None:
+    """GET /health returns the version from Settings, not a hardcoded string."""
     response = await client.get("/health")
     assert response.json()["version"] == "0.1.0"
 
@@ -47,6 +50,55 @@ async def test_health_status_valid_value(client: AsyncClient) -> None:
     response = await client.get("/health")
     status = response.json()["status"]
     assert status in {"healthy", "degraded", "unhealthy"}
+
+
+@pytest.mark.asyncio
+async def test_health_returns_503_when_unhealthy(client: AsyncClient) -> None:
+    """GET /health returns HTTP 503 when a dependency is unhealthy."""
+    with patch(
+        "omniscience_server.routes.health._check_postgres",
+        new_callable=AsyncMock,
+        return_value="unhealthy",
+    ):
+        response = await client.get("/health")
+        assert response.status_code == 503
+        assert response.json()["status"] == "unhealthy"
+
+
+@pytest.mark.asyncio
+async def test_health_returns_200_when_degraded(client: AsyncClient) -> None:
+    """GET /health returns HTTP 200 when a dependency is degraded."""
+    with patch(
+        "omniscience_server.routes.health._check_nats",
+        new_callable=AsyncMock,
+        return_value="degraded",
+    ):
+        response = await client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "degraded"
+
+
+# --- _aggregate_status unit tests ---
+
+
+@pytest.mark.parametrize(
+    ("checks", "expected"),
+    [
+        ({"a": "healthy", "b": "healthy"}, "healthy"),
+        ({"a": "unchecked", "b": "unchecked"}, "healthy"),
+        ({"a": "healthy", "b": "unchecked"}, "healthy"),
+        ({"a": "degraded", "b": "healthy"}, "degraded"),
+        ({"a": "healthy", "b": "degraded"}, "degraded"),
+        ({"a": "unhealthy", "b": "healthy"}, "unhealthy"),
+        ({"a": "unhealthy", "b": "degraded"}, "unhealthy"),
+    ],
+)
+def test_aggregate_status(checks: dict[str, str], expected: str) -> None:  # type: ignore[type-arg]
+    """_aggregate_status correctly prioritizes unhealthy > degraded > healthy."""
+    assert _aggregate_status(checks) == expected  # type: ignore[arg-type]
+
+
+# --- /metrics tests ---
 
 
 @pytest.mark.asyncio

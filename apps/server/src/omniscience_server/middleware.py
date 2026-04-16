@@ -27,7 +27,7 @@ def _resolve_path_template(request: Request) -> str:
         match, _ = route.matches(request.scope)
         if match == Match.FULL:
             return str(getattr(route, "path", request.url.path))
-    return request.url.path
+    return "unmatched"
 
 
 class TracingMiddleware(BaseHTTPMiddleware):
