@@ -81,13 +81,35 @@ Single source of truth. No separate vector DB.
 
 ### 4. Retrieval service (`packages/retrieval/`)
 
-Hybrid search:
+Hybrid search — **staged**, see [ADR 0004](decisions/0004-retrieval-strategy-staged.md).
+
+#### v0.1 — Hybrid baseline
 
 1. **Vector** — pgvector HNSW top-K
 2. **BM25-like** — tsvector ranking
 3. **Merge** — reciprocal rank fusion
 4. **Filter** — ACL, source subset, freshness cap
-5. **Re-rank** (v0.3) — cross-encoder optional
+
+#### v0.2 — Adaptive retrieval
+
+Add structural strategies using edges already present in source data (no LLM extraction):
+
+- **Code**: imports, calls, class inheritance — from tree-sitter output
+- **Infrastructure**: DEPENDS_ON from Terraform state, k8s ownerReferences, Helm chart deps
+- **Docs**: markdown links, ADR supersedes
+- **Cross-source entity linking**: resource-name matching across connectors
+
+Storage: same Postgres, new `entities` + `edges` tables. Queries via recursive CTEs or Apache AGE (Cypher). **No separate graph database.**
+
+Callers (or an internal `"auto"` classifier) select the strategy per query via the `retrieval_strategy` parameter.
+
+#### v0.3+ — Full GraphRAG (optional, triggered by evidence)
+
+LLM-extracted entities + community detection — only if v0.2 structural coverage leaves clear gaps on text-heavy sources (ADRs, post-mortems, wikis).
+
+#### v0.3 — Re-ranking
+
+Cross-encoder second pass over top-N to boost precision. Cheap quality win.
 
 Returns chunks with citations and provenance.
 
@@ -115,6 +137,25 @@ Single `docker-compose.yml` brings up:
 - `caddy` — TLS termination
 
 Helm chart available for Kubernetes.
+
+### Managed Postgres
+
+Nothing in Omniscience requires the built-in Postgres. Any Postgres 14+ with pgvector works:
+
+- **AWS RDS for PostgreSQL** — pgvector available as a managed extension
+- **Google Cloud SQL** — pgvector extension supported
+- **Supabase / Neon / Crunchy Bridge** — pgvector first-class
+- **Aurora PostgreSQL** — pgvector supported
+
+Set `DATABASE_URL` to the external instance; drop the `postgres` service from Compose. Daily `pg_dump` backup sidecar can be similarly disabled in favor of the managed provider's backup mechanism.
+
+## Agent layer (for AgenticConnector only)
+
+Most of Omniscience is deterministic. The exception is **AgenticConnector** — a connector variant whose `discover()` phase uses an LLM to decide what to index (see [ADR 0003](decisions/0003-agent-framework-langgraph-primary.md)).
+
+- **v0.1**: LangGraph, with pluggable LLM provider (Gemini, Claude, Ollama)
+- **v0.2**: CrewAI and PydanticAI adapters added
+- **Layer B** (external users calling Omniscience from their agent code): uses MCP directly, no Omniscience-side abstraction — see [integrations/](integrations/)
 
 ## Data flow: a source update
 

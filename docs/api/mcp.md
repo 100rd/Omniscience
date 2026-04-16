@@ -20,7 +20,7 @@ Tokens are scoped: `search`, `sources:read`, `sources:write`, `admin`. See [sche
 
 ### `search`
 
-Primary retrieval. Hybrid vector + BM25 + filter.
+Primary retrieval. Hybrid vector + BM25 + filter in v0.1; additional strategies in v0.2+.
 
 **Input**:
 
@@ -33,6 +33,22 @@ Primary retrieval. Hybrid vector + BM25 + filter.
 | `max_age_seconds` | int (optional) | Only return chunks whose `indexed_at` is within this age |
 | `filters` | object (optional) | Metadata filters (`language=python`, `path_prefix=apps/server/`, ...) |
 | `include_tombstoned` | bool (default false) | Include removed documents |
+| `retrieval_strategy` | enum (default `"hybrid"`) | `"hybrid"` (v0.1), `"structural"`, `"keyword"`, `"auto"` — see below |
+
+### Retrieval strategies
+
+The `retrieval_strategy` parameter lets the caller choose how retrieval works. In v0.1, only `"hybrid"` is implemented; other values are part of the v0.2 plan and documented here for contract stability. See [ADR 0004](../decisions/0004-retrieval-strategy-staged.md) for rationale.
+
+| Value | Behavior | Status |
+|---|---|---|
+| `"hybrid"` (default) | Vector (pgvector HNSW) + BM25 (tsvector), merged via reciprocal rank fusion. Good for ~70–80% of typical queries | v0.1 |
+| `"structural"` | Graph-first. Interpret query as "find entities and traverse" using the structural graph (code imports, infra DEPENDS_ON, doc cross-refs). Falls back to hybrid if graph finds nothing | v0.2 |
+| `"keyword"` | BM25-only. For exact-name lookup (function names, error strings, service names) | v0.1 (via `filters` today; explicit strategy in v0.2) |
+| `"auto"` | A lightweight classifier picks the strategy for you. Use this when you don't want to reason about query shape | v0.2 |
+
+The **caller is often best-placed to choose**: a code-aware agent asking *"what depends on X"* knows to pass `"structural"`. `"auto"` exists for callers that don't want to decide.
+
+In v0.1, requests with `retrieval_strategy` other than `"hybrid"` are accepted with a warning and downgraded to `"hybrid"`. This preserves the API contract so clients written for v0.2 continue to work against v0.1 deployments.
 
 **Output**:
 
@@ -54,6 +70,13 @@ Primary retrieval. Hybrid vector + BM25 + filter.
         "title": "auth.py",
         "indexed_at": "2026-04-16T10:32:15Z",
         "doc_version": 7
+      },
+      "lineage": {
+        "ingestion_run_id": "ir_01HXYZ...",
+        "embedding_model": "text-embedding-004",
+        "embedding_provider": "google-ai",
+        "parser_version": "treesitter-python-0.21+oms-0.4.2",
+        "chunker_strategy": "code_symbol"
       },
       "metadata": {
         "language": "python",

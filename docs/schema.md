@@ -62,12 +62,21 @@ Chunked, embedded content used at retrieval.
 | `text_tsv` | tsvector | Generated column, language-aware |
 | `embedding` | vector(768) | Dim parameterized via migration |
 | `symbol` | text | For code: function/class FQN; nullable |
-| `metadata` | jsonb | Anything useful for filters (line_range, section_path, ...) |
+| **`ingestion_run_id`** | uuid fk → ingestion_runs | Which ingestion run produced this chunk — lineage |
+| **`embedding_model`** | text | e.g., `bge-large-en-v1.5`, `text-embedding-004` — lineage |
+| **`embedding_provider`** | text | e.g., `ollama`, `google-ai`, `openai` — lineage |
+| **`parser_version`** | text | Parser identifier + hash, e.g., `treesitter-python-0.21+oms-0.4.2` — lineage |
+| **`chunker_strategy`** | text | e.g., `code_symbol`, `markdown_section`, `fixed_window` — lineage |
+| `metadata` | jsonb | Anything else useful for filters (line_range, section_path, ...) |
 
 Indexes:
 - `(document_id, ord)`
 - GIN on `text_tsv`
 - HNSW on `embedding` (`vector_cosine_ops`, `m=16, ef_construction=64`)
+- `embedding_model` + `embedding_provider` — for targeted re-embed after model change
+- `parser_version` — for targeted reindex after parser bug-fix
+
+Lineage fields matter for operational answers: "which chunks predate the parser fix?", "is this chunk embedded with the current model?", "which ingestion run produced this?". See [freshness-and-lineage.md](freshness-and-lineage.md).
 
 ### `ingestion_runs`
 
