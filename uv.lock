@@ -1205,7 +1205,10 @@ source = { editable = "apps/server" }
 dependencies = [
     { name = "fastapi" },
     { name = "mcp" },
+    { name = "omniscience-connectors" },
     { name = "omniscience-core" },
+    { name = "omniscience-embeddings" },
+    { name = "omniscience-index" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -1213,7 +1216,10 @@ dependencies = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.111.0" },
     { name = "mcp", specifier = ">=1.0.0" },
+    { name = "omniscience-connectors", editable = "packages/connectors" },
     { name = "omniscience-core", editable = "packages/core" },
+    { name = "omniscience-embeddings", editable = "packages/embeddings" },
+    { name = "omniscience-index", editable = "packages/index" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30.0" },
 ]
 
