@@ -15,9 +15,9 @@ Registry::
 
     from omniscience_connectors import ConnectorRegistry, get_connector
 
-Built-in connectors (``git``, ``fs``) will be registered here in subsequent
-issues.  Third-party connectors call :func:`get_connector` after registering
-against the shared registry.
+Built-in connectors (``git``, ``fs``) are registered below and available
+immediately on import.  Third-party connectors call :func:`get_connector`
+after registering against the shared registry.
 """
 
 from omniscience_connectors.base import (
@@ -27,17 +27,26 @@ from omniscience_connectors.base import (
     WebhookHandler,
     WebhookPayload,
 )
+from omniscience_connectors.fs.connector import FsConnector
+from omniscience_connectors.git.connector import GitConnector
 from omniscience_connectors.registry import (
     ConnectorRegistry,
     NotFoundError,
+    _registry,
     get_connector,
 )
+
+# Register built-in connectors in the shared module-level registry
+_registry.register(GitConnector)
+_registry.register(FsConnector)
 
 __all__ = [
     "Connector",
     "ConnectorRegistry",
     "DocumentRef",
     "FetchedDocument",
+    "FsConnector",
+    "GitConnector",
     "NotFoundError",
     "WebhookHandler",
     "WebhookPayload",
