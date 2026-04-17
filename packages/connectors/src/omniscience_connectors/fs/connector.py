@@ -169,9 +169,7 @@ class FsConnector(Connector):
 
         # Safety: prevent path traversal
         if not _path_is_within(root, file_path):
-            raise ValueError(
-                f"Path {ref.uri!r} is outside the configured root {cfg.root_path!r}"
-            )
+            raise ValueError(f"Path {ref.uri!r} is outside the configured root {cfg.root_path!r}")
 
         stat = file_path.stat()
         if stat.st_size > cfg.max_file_size_bytes:
