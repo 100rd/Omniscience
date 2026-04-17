@@ -1,12 +1,11 @@
 """Health check endpoint.
 
 Returns a structured JSON payload describing the liveness of each
-infrastructure dependency.  Placeholder check functions return ``healthy``
-until real connections are wired in Wave 2.
+infrastructure dependency.
 
-Wave 2 references:
-  - Postgres connection: issue #2 (database layer)
-  - NATS connection: issue #3 (NATS JetStream integration)
+Wave 2 status:
+  - Postgres connection: placeholder (issue #2, database layer)
+  - NATS connection: real ping via NatsConnection.is_connected (issue #3)
 """
 
 from __future__ import annotations
@@ -15,6 +14,7 @@ from typing import Literal
 
 import structlog
 from fastapi import APIRouter, Request
+from omniscience_core.queue import NatsConnection
 from starlette.responses import JSONResponse
 
 log = structlog.get_logger(__name__)
@@ -32,12 +32,18 @@ async def _check_postgres() -> CheckStatus:
     return "unchecked"
 
 
-async def _check_nats() -> CheckStatus:
-    """Verify NATS JetStream connectivity.
+async def _check_nats(nats_conn: NatsConnection | None) -> CheckStatus:
+    """Verify NATS JetStream connectivity via the live connection object.
 
-    TODO(wave-2, issue-#3): Replace with a real nats-py connection check.
+    Returns:
+        ``"healthy"`` when the connection is open and confirmed connected.
+        ``"unhealthy"`` when a connection object exists but is disconnected.
+        ``"unchecked"`` when the connection has not been initialised yet
+        (e.g. during testing without a real NATS server).
     """
-    return "unchecked"
+    if nats_conn is None:
+        return "unchecked"
+    return "healthy" if nats_conn.is_connected else "unhealthy"
 
 
 def _aggregate_status(checks: dict[str, CheckStatus]) -> CheckStatus:
@@ -57,9 +63,11 @@ async def health(request: Request) -> JSONResponse:
     Returns HTTP 503 when status is unhealthy, 200 otherwise.
     """
     settings = request.app.state.settings
+    nats_conn: NatsConnection | None = getattr(request.app.state, "nats", None)
+
     checks: dict[str, CheckStatus] = {
         "postgres": await _check_postgres(),
-        "nats": await _check_nats(),
+        "nats": await _check_nats(nats_conn),
     }
     overall = _aggregate_status(checks)
     log.info("health_check", status=overall, checks=checks)
