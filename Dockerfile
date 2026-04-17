@@ -30,6 +30,9 @@ RUN uv sync --frozen --no-dev
 COPY packages/ packages/
 COPY apps/     apps/
 
+# Re-sync to install workspace packages now that source is available.
+RUN uv sync --frozen --no-dev
+
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 # Minimal image: no build tools, runs as a non-root user.
