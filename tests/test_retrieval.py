@@ -256,7 +256,11 @@ class TestRetrievalServiceHybrid:
             (chunk_t, doc, src),
         ]
 
-        service, _ = _make_service(vector_rows=vec_rows, text_rows=txt_rows, enriched_rows=enriched)
+        service, _ = _make_service(
+            vector_rows=vec_rows,
+            text_rows=txt_rows,
+            enriched_rows=enriched,
+        )
         result = await service.search(SearchRequest(query="auth", top_k=10))
 
         chunk_ids = {h.chunk_id for h in result.hits}
@@ -287,7 +291,11 @@ class TestRetrievalServiceHybrid:
         src = _make_source()
         enriched = [(_make_chunk(chunk_id=i), doc, src) for i in ids]
 
-        service, _ = _make_service(vector_rows=vec_rows, text_rows=txt_rows, enriched_rows=enriched)
+        service, _ = _make_service(
+            vector_rows=vec_rows,
+            text_rows=txt_rows,
+            enriched_rows=enriched,
+        )
         result = await service.search(SearchRequest(query="x", top_k=10))
 
         scores = [h.score for h in result.hits]
@@ -304,7 +312,11 @@ class TestRetrievalServiceStats:
         src = _make_source()
         enriched = [(_make_chunk(chunk_id=ids[0]), doc, src)]
 
-        service, _ = _make_service(vector_rows=vec_rows, text_rows=txt_rows, enriched_rows=enriched)
+        service, _ = _make_service(
+            vector_rows=vec_rows,
+            text_rows=txt_rows,
+            enriched_rows=enriched,
+        )
         result = await service.search(SearchRequest(query="test"))
 
         stats = result.query_stats
@@ -323,7 +335,11 @@ class TestRetrievalServiceStats:
         src = _make_source()
         enriched = [(_make_chunk(chunk_id=cid), doc, src)]
 
-        service, _ = _make_service(vector_rows=vec_rows, text_rows=txt_rows, enriched_rows=enriched)
+        service, _ = _make_service(
+            vector_rows=vec_rows,
+            text_rows=txt_rows,
+            enriched_rows=enriched,
+        )
         result = await service.search(SearchRequest(query="dupe"))
 
         assert result.query_stats.total_matches_before_filters == 1
