@@ -41,20 +41,32 @@ def upgrade() -> None:
     # Step 2: Enumerations
     # ------------------------------------------------------------------
     source_type = postgresql.ENUM(
-        "git", "fs", "confluence", "notion", "slack",
-        "jira", "grafana", "k8s", "terraform",
+        "git",
+        "fs",
+        "confluence",
+        "notion",
+        "slack",
+        "jira",
+        "grafana",
+        "k8s",
+        "terraform",
         name="source_type",
     )
     source_type.create(op.get_bind(), checkfirst=True)
 
     source_status = postgresql.ENUM(
-        "active", "paused", "error",
+        "active",
+        "paused",
+        "error",
         name="source_status",
     )
     source_status.create(op.get_bind(), checkfirst=True)
 
     ingestion_run_status = postgresql.ENUM(
-        "running", "ok", "partial", "error",
+        "running",
+        "ok",
+        "partial",
+        "error",
         name="ingestion_run_status",
     )
     ingestion_run_status.create(op.get_bind(), checkfirst=True)
@@ -68,8 +80,15 @@ def upgrade() -> None:
         sa.Column(
             "type",
             sa.Enum(
-                "git", "fs", "confluence", "notion", "slack",
-                "jira", "grafana", "k8s", "terraform",
+                "git",
+                "fs",
+                "confluence",
+                "notion",
+                "slack",
+                "jira",
+                "grafana",
+                "k8s",
+                "terraform",
                 name="source_type",
                 create_type=False,
             ),
@@ -132,7 +151,10 @@ def upgrade() -> None:
         sa.Column(
             "status",
             sa.Enum(
-                "running", "ok", "partial", "error",
+                "running",
+                "ok",
+                "partial",
+                "error",
                 name="ingestion_run_status",
                 create_type=False,
             ),
@@ -181,9 +203,7 @@ def upgrade() -> None:
             server_default=sa.text("NOW()"),
         ),
         sa.Column("tombstoned_at", sa.DateTime(timezone=True), nullable=True),
-        sa.UniqueConstraint(
-            "source_id", "external_id", name="uq_documents_source_external"
-        ),
+        sa.UniqueConstraint("source_id", "external_id", name="uq_documents_source_external"),
     )
     op.create_index("ix_documents_indexed_at", "documents", ["indexed_at"])
     op.create_index(

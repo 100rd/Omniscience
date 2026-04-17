@@ -112,8 +112,15 @@ class TestSourceModel:
 
     def test_all_source_types_exist(self) -> None:
         expected = {
-            "git", "fs", "confluence", "notion", "slack",
-            "jira", "grafana", "k8s", "terraform",
+            "git",
+            "fs",
+            "confluence",
+            "notion",
+            "slack",
+            "jira",
+            "grafana",
+            "k8s",
+            "terraform",
         }
         assert {t.value for t in SourceType} == expected
 
@@ -206,10 +213,7 @@ class TestContentHashDedup:
     def test_bom_stripped_before_hashing(self) -> None:
         with_bom = "\ufeffhello world"
         without_bom = "hello world"
-        assert (
-            _sha256(_normalize_content(with_bom))
-            == _sha256(_normalize_content(without_bom))
-        )
+        assert _sha256(_normalize_content(with_bom)) == _sha256(_normalize_content(without_bom))
 
     def test_multiple_blank_lines_collapsed(self) -> None:
         with_extra = "line 1\n\n\n\nline 2"
