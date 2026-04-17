@@ -180,9 +180,7 @@ class TestQueueProducer:
         producer = QueueProducer(js)
 
         with pytest.raises(RuntimeError, match="nats down"):
-            await producer.publish(
-                "ingest.changes.git", _SamplePayload(source_id="a", doc_id="b")
-            )
+            await producer.publish("ingest.changes.git", _SamplePayload(source_id="a", doc_id="b"))
 
 
 # ---------------------------------------------------------------------------
@@ -500,9 +498,7 @@ class TestMetricsIncrements:
     async def test_consumed_counter_increments_on_delivered(self) -> None:
         """Consumed counter must increment with status=delivered for normal messages."""
         subject = "ingest.changes.consumed_metric_test_2"
-        consumer, psub = _make_consumer(
-            subject=subject, durable="consumed-durable-2"
-        )
+        consumer, psub = _make_consumer(subject=subject, durable="consumed-durable-2")
         raw = _make_raw_msg(subject=subject, num_delivered=1)
 
         before = _get_counter_value(
