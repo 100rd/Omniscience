@@ -5,10 +5,15 @@ description = "Hybrid retrieval service (vector + BM25 + RRF) for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
     "omniscience-core",
+    "omniscience-embeddings",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
+    "pgvector>=0.3.0",
 ]
 
 [tool.uv.sources]
 omniscience-core = { workspace = true }
+omniscience-embeddings = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
