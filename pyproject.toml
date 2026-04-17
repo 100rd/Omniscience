@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Self-hosted knowledge retrieval service with MCP-first API"
 requires-python = ">=3.12"
 license = "Apache-2.0"
+dependencies = [
+    "nats-py>=2.14.0",
+]
 
 [tool.uv.workspace]
 members = [
@@ -32,6 +35,9 @@ dev = [
     "pre-commit>=3.7.1",
     "omniscience-core",
     "omniscience-server",
+    "omniscience-embeddings",
+    "tenacity>=9.1.4",
+    "respx>=0.23.1",
 ]
 
 [tool.ruff]
