@@ -153,7 +153,7 @@ class RetrievalService:
             stmt = stmt.where(combined)
 
         result = await session.execute(stmt)
-        return cast(list[Any], result.all())
+        return cast("list[Any]", result.all())
 
     def _build_hits(
         self,
