@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from omniscience_server.ingestion.events import DocumentChangeEvent
@@ -95,8 +95,6 @@ def _make_index_writer(upsert_action: str = "created") -> MagicMock:
 def _make_session_factory() -> MagicMock:
     """Return a minimal async session factory mock."""
     session = AsyncMock()
-    session.__aenter__ = AsyncMock(return_value=session)
-    session.__aexit__ = AsyncMock(return_value=False)
     session.begin = MagicMock(return_value=session)
     session.add = MagicMock()
     session.flush = AsyncMock()
@@ -106,7 +104,6 @@ def _make_session_factory() -> MagicMock:
 
     factory = MagicMock()
     factory.return_value = session
-    factory.__call__ = MagicMock(return_value=session)
     return factory
 
 
@@ -130,8 +127,18 @@ def _get_counter_value(counter: Any, labels: dict[str, str]) -> float:
 
 
 def _get_histogram_count(histogram: Any, labels: dict[str, str]) -> float:
+    """Return the observation count for a Histogram with given labels."""
     try:
-        return histogram.labels(**labels)._count.get()  # type: ignore[no-any-return]
+        from prometheus_client import REGISTRY
+
+        metric_name = histogram._name + "_count"
+        for metric in REGISTRY.collect():
+            for sample in metric.samples:
+                if sample.name == metric_name and all(
+                    sample.labels.get(k) == v for k, v in labels.items()
+                ):
+                    return float(sample.value)
+        return 0.0
     except Exception:
         return 0.0
 
@@ -213,14 +220,13 @@ class TestIngestionPipelineHashDedup:
         assert result.action == "unchanged"
 
     @pytest.mark.asyncio
-    async def test_unchanged_content_skips_no_further_work(self) -> None:
-        """When action is 'unchanged', embed was still called (hash check is in writer)."""
+    async def test_unchanged_content_still_calls_embed(self) -> None:
+        """Embed is still called — dedup is resolved inside upsert_document."""
         writer = _make_index_writer(upsert_action="unchanged")
         provider = _make_embedding_provider()
         pipeline = _make_pipeline(embedding_provider=provider, index_writer=writer)
         event = _make_event(action="updated")
         await pipeline.run(event, config=None, secrets={})
-        # Embed is still called — dedup is resolved inside upsert_document
         provider.embed.assert_awaited_once()
 
 
@@ -375,6 +381,10 @@ class TestRunTracker:
         """Build a RunTracker with a mock session factory.
 
         Returns (tracker, session_mock, run_mock).
+
+        The factory is called as async with factory() as session, so
+        factory() must return an async context manager.  Inside that
+        context, session.begin() is also used as an async CM.
         """
         from omniscience_core.db.models import IngestionRun, IngestionRunStatus
 
@@ -390,13 +400,13 @@ class TestRunTracker:
             run_obj.status = IngestionRunStatus.running
             run_obj.finished_at = None
 
-        session = AsyncMock()
-        session.__aenter__ = AsyncMock(return_value=session)
-        session.__aexit__ = AsyncMock(return_value=False)
-        cm = MagicMock()
-        cm.__aenter__ = AsyncMock(return_value=session)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        session.begin = MagicMock(return_value=cm)
+        # inner begin() CM — returned by session.begin()
+        begin_cm = MagicMock()
+        begin_cm.__aenter__ = AsyncMock(return_value=None)
+        begin_cm.__aexit__ = AsyncMock(return_value=False)
+
+        session = MagicMock()
+        session.begin = MagicMock(return_value=begin_cm)
         session.add = MagicMock()
         session.flush = AsyncMock()
 
@@ -404,7 +414,12 @@ class TestRunTracker:
         scalar_result.scalar_one_or_none = MagicMock(return_value=run_obj)
         session.execute = AsyncMock(return_value=scalar_result)
 
-        factory = MagicMock(return_value=session)
+        # outer factory() CM
+        factory_cm = MagicMock()
+        factory_cm.__aenter__ = AsyncMock(return_value=session)
+        factory_cm.__aexit__ = AsyncMock(return_value=False)
+
+        factory = MagicMock(return_value=factory_cm)
         tracker = RunTracker(factory)
         return tracker, session, run_obj
 
@@ -469,7 +484,7 @@ class TestRunTracker:
 
 
 # ---------------------------------------------------------------------------
-# IngestionWorker tests
+# IngestionWorker helpers
 # ---------------------------------------------------------------------------
 
 
@@ -477,14 +492,12 @@ def _make_queue_consumer(
     events: list[DocumentChangeEvent] | None = None,
 ) -> MagicMock:
     """Return a mock QueueConsumer that yields one message per event then stops."""
-    from omniscience_core.queue.messages import Message
-
     consumer = MagicMock()
 
-    async def _iter() -> Any:  # type: ignore[return]
-        for event in events or []:
-            msg: Message[DocumentChangeEvent] = MagicMock(spec=Message)
-            msg.payload = event
+    async def _iter() -> Any:
+        for evt in events or []:
+            msg = MagicMock()
+            msg.payload = evt
             msg.ack = AsyncMock()
             msg.nak = AsyncMock()
             yield msg
@@ -522,23 +535,16 @@ def _make_worker(
     return worker, queue_consumer
 
 
+# ---------------------------------------------------------------------------
+# IngestionWorker tests
+# ---------------------------------------------------------------------------
+
+
 class TestIngestionWorkerHappyPath:
     @pytest.mark.asyncio
-    async def test_worker_acks_successful_message(self) -> None:
+    async def test_worker_process_document_returns_created(self) -> None:
         event = _make_event(action="created")
         worker, _ = _make_worker(events=[event])
-
-        # Patch run tracker to avoid DB calls
-        worker._run_tracker.start = AsyncMock(return_value=uuid.uuid4())
-        worker._run_tracker.record_new = AsyncMock()
-        worker._run_tracker.finish = AsyncMock()
-
-        msg_mock = MagicMock()
-        msg_mock.payload = event
-        msg_mock.ack = AsyncMock()
-        msg_mock.nak = AsyncMock()
-
-        # Run process_document directly
         result = await worker.process_document(event)
         assert result.action == "created"
 
@@ -564,7 +570,6 @@ class TestIngestionWorkerHappyPath:
         events = [_make_event(action="created"), _make_event(action="updated")]
         writer = _make_index_writer()
 
-        # Route action=updated to upsert_action=updated
         async def _upsert(**kwargs: Any) -> Any:
             result = MagicMock()
             result.action = "created"
@@ -573,13 +578,15 @@ class TestIngestionWorkerHappyPath:
 
         writer.upsert_document = AsyncMock(side_effect=_upsert)
         worker, _ = _make_worker(events=events, writer=writer)
-        worker._run_tracker.start = AsyncMock(return_value=uuid.uuid4())
-        worker._run_tracker.record_new = AsyncMock()
-        worker._run_tracker.record_updated = AsyncMock()
-        worker._run_tracker.finish = AsyncMock()
 
-        await worker.start()
-        # Both events processed → upsert called twice
+        with (
+            patch.object(worker._run_tracker, "start", AsyncMock(return_value=uuid.uuid4())),
+            patch.object(worker._run_tracker, "record_new", AsyncMock()),
+            patch.object(worker._run_tracker, "record_updated", AsyncMock()),
+            patch.object(worker._run_tracker, "finish", AsyncMock()),
+        ):
+            await worker.start()
+
         assert writer.upsert_document.await_count == 2
 
 
@@ -590,37 +597,34 @@ class TestIngestionWorkerErrors:
         connector.fetch = AsyncMock(side_effect=RuntimeError("fetch failed"))
         event = _make_event()
 
-        from omniscience_core.queue.messages import Message
-
-        msg_mock = MagicMock(spec=Message)
+        msg_mock = MagicMock()
         msg_mock.payload = event
         msg_mock.ack = AsyncMock()
         msg_mock.nak = AsyncMock()
 
         consumer = MagicMock()
 
-        async def _iter() -> Any:  # type: ignore[return]
+        async def _iter() -> Any:
             yield msg_mock
 
         consumer.__aiter__ = MagicMock(return_value=_iter())
         consumer.stop = MagicMock()
 
-        registry = _make_connector_registry(connector)
-        provider = _make_embedding_provider()
-        writer = _make_index_writer()
-
         worker = IngestionWorker(
             queue_consumer=consumer,
-            connector_registry=registry,
-            embedding_provider=provider,
-            index_writer=writer,
+            connector_registry=_make_connector_registry(connector),
+            embedding_provider=_make_embedding_provider(),
+            index_writer=_make_index_writer(),
             session_factory=_make_session_factory(),
         )
-        worker._run_tracker.start = AsyncMock(return_value=uuid.uuid4())
-        worker._run_tracker.record_error = AsyncMock()
-        worker._run_tracker.finish = AsyncMock()
 
-        await worker.start()
+        with (
+            patch.object(worker._run_tracker, "start", AsyncMock(return_value=uuid.uuid4())),
+            patch.object(worker._run_tracker, "record_error", AsyncMock()),
+            patch.object(worker._run_tracker, "finish", AsyncMock()),
+        ):
+            await worker.start()
+
         msg_mock.nak.assert_awaited_once()
         msg_mock.ack.assert_not_awaited()
 
@@ -630,16 +634,14 @@ class TestIngestionWorkerErrors:
         provider.embed = AsyncMock(side_effect=RuntimeError("embedding down"))
         event = _make_event()
 
-        from omniscience_core.queue.messages import Message
-
-        msg_mock = MagicMock(spec=Message)
+        msg_mock = MagicMock()
         msg_mock.payload = event
         msg_mock.ack = AsyncMock()
         msg_mock.nak = AsyncMock()
 
         consumer = MagicMock()
 
-        async def _iter() -> Any:  # type: ignore[return]
+        async def _iter() -> Any:
             yield msg_mock
 
         consumer.__aiter__ = MagicMock(return_value=_iter())
@@ -652,11 +654,14 @@ class TestIngestionWorkerErrors:
             index_writer=_make_index_writer(),
             session_factory=_make_session_factory(),
         )
-        worker._run_tracker.start = AsyncMock(return_value=uuid.uuid4())
-        worker._run_tracker.record_error = AsyncMock()
-        worker._run_tracker.finish = AsyncMock()
 
-        await worker.start()
+        with (
+            patch.object(worker._run_tracker, "start", AsyncMock(return_value=uuid.uuid4())),
+            patch.object(worker._run_tracker, "record_error", AsyncMock()),
+            patch.object(worker._run_tracker, "finish", AsyncMock()),
+        ):
+            await worker.start()
+
         msg_mock.nak.assert_awaited_once()
 
 
@@ -672,13 +677,15 @@ class TestIngestionWorkerGracefulStop:
         run_id = uuid.uuid4()
         worker, _ = _make_worker(events=[])
         worker._run_id = run_id
-        worker._run_tracker.finish = AsyncMock()
-        await worker.stop()
-        worker._run_tracker.finish.assert_awaited_once_with(run_id, had_errors=False)
+
+        with patch.object(worker._run_tracker, "finish", AsyncMock()) as mock_finish:
+            await worker.stop()
+            mock_finish.assert_awaited_once_with(run_id, had_errors=False)
 
     @pytest.mark.asyncio
     async def test_stop_does_not_call_finish_if_run_not_started(self) -> None:
         worker, _ = _make_worker(events=[])
-        worker._run_tracker.finish = AsyncMock()
-        await worker.stop()
-        worker._run_tracker.finish.assert_not_awaited()
+
+        with patch.object(worker._run_tracker, "finish", AsyncMock()) as mock_finish:
+            await worker.stop()
+            mock_finish.assert_not_awaited()

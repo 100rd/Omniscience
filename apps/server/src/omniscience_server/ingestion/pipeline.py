@@ -11,10 +11,15 @@ regardless of whether the run succeeded or produced an error.
 
 Wave-5 note: ``parse`` and ``chunk`` are intentional placeholders.
 Real parsers/chunkers will be wired in when Wave 5 lands.
+
+IndexWriter note: ``IndexWriterProtocol`` is the interface contract for the
+parallel issue-11 implementation (``omniscience_index.IndexWriter``).
+The real integration happens when both branches are merged.
 """
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any, Protocol, runtime_checkable
 from uuid import UUID
@@ -22,7 +27,6 @@ from uuid import UUID
 import structlog
 from omniscience_connectors.base import Connector, DocumentRef, FetchedDocument
 from omniscience_embeddings.base import EmbeddingProvider
-from omniscience_index.hashing import compute_content_hash
 
 from omniscience_server.ingestion.events import DocumentChangeEvent, ProcessResult
 from omniscience_server.ingestion.metrics import (
@@ -31,6 +35,39 @@ from omniscience_server.ingestion.metrics import (
 )
 
 log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Local content hash (mirrors omniscience_index.hashing — merged in issue-11)
+# ---------------------------------------------------------------------------
+
+
+def _compute_content_hash(text: str) -> str:
+    """Return SHA-256 hex digest of *text* after cosmetic normalisation.
+
+    Normalisation steps match ``omniscience_index.hashing.compute_content_hash``
+    so hashes are compatible once the branches are merged.
+
+    Steps:
+    1. Strip leading BOM (U+FEFF).
+    2. Strip trailing whitespace per line.
+    3. Collapse consecutive blank lines to one.
+    """
+    text = text.lstrip("\ufeff")
+    lines = [line.rstrip() for line in text.splitlines()]
+
+    normalised: list[str] = []
+    blank_run = 0
+    for line in lines:
+        if line == "":
+            blank_run += 1
+        else:
+            if blank_run > 0:
+                normalised.append("")
+            blank_run = 0
+            normalised.append(line)
+
+    return hashlib.sha256("\n".join(normalised).encode()).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -70,7 +107,11 @@ class _RawChunk:
     """Minimal chunk produced by the placeholder chunker stage."""
 
     def __init__(
-        self, text: str, embedding: list[float], embedding_model: str, embedding_provider: str
+        self,
+        text: str,
+        embedding: list[float],
+        embedding_model: str,
+        embedding_provider: str,
     ) -> None:
         self.ord = 0
         self.text = text
@@ -215,7 +256,7 @@ class IngestionPipeline:
         """Return True if content is unchanged (caller should skip re-indexing)."""
         t0 = time.monotonic()
         try:
-            _new_hash = compute_content_hash(content_text)
+            _new_hash = _compute_content_hash(content_text)
             bound.debug("stage_hash_check_ok", content_hash=_new_hash[:16])
             # Hash comparison against stored value happens inside index writer's
             # upsert_document (it reads the existing row).  Here we just record
@@ -286,7 +327,7 @@ class IngestionPipeline:
     ) -> str:
         t0 = time.monotonic()
         try:
-            content_hash = compute_content_hash(content_text)
+            content_hash = _compute_content_hash(content_text)
             chunks = [
                 _RawChunk(
                     text=text,
