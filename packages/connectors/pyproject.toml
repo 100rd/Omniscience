@@ -5,6 +5,7 @@ description = "Source connector framework and built-in connectors for Omniscienc
 requires-python = ">=3.12"
 dependencies = [
     "omniscience-core",
+    "pydantic>=2.7.0",
 ]
 
 [tool.uv.sources]
