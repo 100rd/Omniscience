@@ -30,7 +30,6 @@ from starlette.responses import Response
 
 from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.middleware import TracingMiddleware
-from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.routes import health_router, tokens_router
 
 log = structlog.get_logger(__name__)
@@ -134,12 +133,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Middleware (applied in reverse registration order by Starlette)
     app.add_middleware(TracingMiddleware)
 
-    # Exception handlers for spec-compliant error responses
-    register_error_handlers(app)
-
     # Routers
     app.include_router(health_router)
     app.include_router(tokens_router)
-    app.include_router(api_v1_router)
 
     return app
