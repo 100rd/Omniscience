@@ -1,0 +1,37 @@
+{{- if .Values.postgres.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "omniscience.fullname" . }}-postgres
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.postgres.storageSize | quote }}
+  {{- if .Values.postgres.storageClass }}
+  storageClassName: {{ .Values.postgres.storageClass | quote }}
+  {{- end }}
+---
+{{- end }}
+{{- if .Values.nats.enabled }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "omniscience.fullname" . }}-nats
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+    app.kubernetes.io/component: nats
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .Values.nats.storageSize | quote }}
+  {{- if .Values.nats.storageClass }}
+  storageClassName: {{ .Values.nats.storageClass | quote }}
+  {{- end }}
+{{- end }}

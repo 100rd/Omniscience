@@ -1,0 +1,140 @@
+# Default values for omniscience.
+# Override per environment: helm upgrade --install omniscience ./helm/omniscience -f values-prod.yaml
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/100rd/omniscience
+  pullPolicy: IfNotPresent
+  # Overridden by CI: --set image.tag=$GIT_SHA
+  tag: "latest"
+
+imagePullSecrets: []
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+replicaCount: 1
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 250m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# ── Service ───────────────────────────────────────────────────────────────────
+service:
+  type: ClusterIP
+  port: 8000
+
+# ── Ingress ───────────────────────────────────────────────────────────────────
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: omniscience.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  # - secretName: omniscience-tls
+  #   hosts:
+  #     - omniscience.example.com
+
+# ── Application config (non-secret) ──────────────────────────────────────────
+config:
+  # Log level: DEBUG, INFO, WARNING, ERROR
+  logLevel: INFO
+  # Ollama endpoint (used when embeddings.provider=ollama)
+  ollamaUrl: ""
+  # OpenAI/Voyage endpoint override (optional)
+  openaiBaseUrl: ""
+  # Embeddings provider: ollama | openai | voyage
+  embeddingsProvider: ollama
+  # Embedding model name
+  embeddingModel: nomic-embed-text
+  # MCP server transport: stdio | streamable-http
+  mcpTransport: streamable-http
+  # Freshness SLO default (seconds)
+  freshnessSloSeconds: 3600
+  # CORS origins (comma-separated)
+  corsOrigins: ""
+
+# ── Secrets (values are base64-encoded by default in Secret template) ─────────
+secrets:
+  # PostgreSQL password — REQUIRED; override via --set secrets.postgresPassword=...
+  postgresPassword: ""
+  # API bearer token for REST + MCP auth
+  apiToken: ""
+  # OpenAI / Voyage API key (leave empty if using Ollama)
+  openaiApiKey: ""
+
+# ── PostgreSQL ────────────────────────────────────────────────────────────────
+postgres:
+  # Set to false to use an external managed database (RDS, CloudSQL, etc.)
+  enabled: true
+  image: pgvector/pgvector:pg16
+  database: omniscience
+  user: omniscience
+  # Storage size for the PostgreSQL PVC
+  storageSize: 20Gi
+  storageClass: ""
+  # Override full DATABASE_URL (disables the internal postgres service)
+  externalUrl: ""
+
+# ── NATS ──────────────────────────────────────────────────────────────────────
+nats:
+  # Set to false to use an external NATS cluster
+  enabled: true
+  image: nats:2.10-alpine
+  # Storage size for the NATS JetStream PVC
+  storageSize: 5Gi
+  storageClass: ""
+  # Override full NATS_URL (disables the internal nats service)
+  externalUrl: ""
+
+# ── Pod settings ──────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  fsGroup: 1000
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 5
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 8000
+  initialDelaySeconds: 5
+  periodSeconds: 5
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+# ── Node placement ────────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}

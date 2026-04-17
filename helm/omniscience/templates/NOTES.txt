@@ -1,0 +1,38 @@
+Omniscience {{ .Chart.AppVersion }} has been installed.
+
+Release:   {{ .Release.Name }}
+Namespace: {{ .Release.Namespace }}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Check rollout status:
+
+   kubectl rollout status deployment/{{ include "omniscience.fullname" . }} \
+     -n {{ .Release.Namespace }}
+
+2. Verify the health endpoint:
+
+{{- if .Values.ingress.enabled }}
+{{- range .Values.ingress.hosts }}
+   curl https://{{ .host }}/health
+{{- end }}
+{{- else }}
+   kubectl port-forward svc/{{ include "omniscience.fullname" . }} 8000:8000 \
+     -n {{ .Release.Namespace }}
+
+   curl http://localhost:8000/health
+{{- end }}
+
+3. Connect an MCP client (streamable-http):
+
+   url: http://{{ include "omniscience.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:8000/mcp
+
+4. Run an ad-hoc search via CLI:
+
+   kubectl exec -it deploy/{{ include "omniscience.fullname" . }} \
+     -n {{ .Release.Namespace }} -- \
+     omniscience search "your query here"
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Documentation: https://github.com/100rd/Omniscience
