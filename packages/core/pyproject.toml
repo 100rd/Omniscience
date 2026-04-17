@@ -12,6 +12,10 @@ dependencies = [
     "opentelemetry-exporter-otlp>=1.25.0",
     "opentelemetry-instrumentation-fastapi>=0.46b0",
     "prometheus-client>=0.20.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
+    "alembic>=1.13.0",
+    "pgvector>=0.3.0",
 ]
 
 [build-system]
