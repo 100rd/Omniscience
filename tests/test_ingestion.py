@@ -127,12 +127,17 @@ def _get_counter_value(counter: Any, labels: dict[str, str]) -> float:
 
 
 def _get_histogram_count(histogram: Any, labels: dict[str, str]) -> float:
-    """Return the _count sample value for a Histogram with given labels."""
+    """Return the observation count for a Histogram with given labels."""
     try:
-        samples = histogram.labels(**labels)._samples()
-        for sample in samples:
-            if sample.name == "_count":
-                return float(sample.value)
+        from prometheus_client import REGISTRY
+
+        metric_name = histogram._name + "_count"
+        for metric in REGISTRY.collect():
+            for sample in metric.samples:
+                if sample.name == metric_name and all(
+                    sample.labels.get(k) == v for k, v in labels.items()
+                ):
+                    return float(sample.value)
         return 0.0
     except Exception:
         return 0.0
