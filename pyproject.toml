@@ -37,6 +37,7 @@ dev = [
     "omniscience-connectors",
     "omniscience-server",
     "omniscience-embeddings",
+    "omniscience-index",
     "tenacity>=9.1.4",
     "respx>=0.23.1",
 ]

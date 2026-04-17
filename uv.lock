@@ -1053,6 +1053,7 @@ dev = [
     { name = "omniscience-connectors" },
     { name = "omniscience-core" },
     { name = "omniscience-embeddings" },
+    { name = "omniscience-index" },
     { name = "omniscience-server" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -1073,6 +1074,7 @@ dev = [
     { name = "omniscience-connectors", editable = "packages/connectors" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
+    { name = "omniscience-index", editable = "packages/index" },
     { name = "omniscience-server", editable = "apps/server" },
     { name = "pre-commit", specifier = ">=3.7.1" },
     { name = "pytest", specifier = ">=8.2.2" },
@@ -1170,11 +1172,17 @@ name = "omniscience-index"
 version = "0.1.0"
 source = { editable = "packages/index" }
 dependencies = [
+    { name = "asyncpg" },
     { name = "omniscience-core" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "omniscience-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "omniscience-core", editable = "packages/core" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
+]
 
 [[package]]
 name = "omniscience-parsers"
