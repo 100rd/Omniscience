@@ -27,7 +27,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from omniscience_server.middleware import TracingMiddleware
-from omniscience_server.routes import health_router
+from omniscience_server.routes import health_router, tokens_router
 
 log = structlog.get_logger(__name__)
 
@@ -119,5 +119,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Routers
     app.include_router(health_router)
+    app.include_router(tokens_router)
 
     return app

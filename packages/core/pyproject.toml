@@ -17,6 +17,7 @@ dependencies = [
     "alembic>=1.13.0",
     "pgvector>=0.3.0",
     "nats-py>=2.7.0",
+    "argon2-cffi>=23.1.0",
 ]
 
 [build-system]
