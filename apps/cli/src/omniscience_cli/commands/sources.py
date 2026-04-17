@@ -58,9 +58,7 @@ def sources_add(
 
 @app.command("list")
 def sources_list(
-    source_type: Annotated[
-        str | None, typer.Option("--type", "-t", help="Filter by type")
-    ] = None,
+    source_type: Annotated[str | None, typer.Option("--type", "-t", help="Filter by type")] = None,
     status: Annotated[str | None, typer.Option(help="Filter by status")] = None,
     as_json: Annotated[bool, typer.Option("--json", help="Output as JSON")] = False,
 ) -> None:
