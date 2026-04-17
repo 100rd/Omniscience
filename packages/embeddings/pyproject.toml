@@ -4,6 +4,8 @@ version = "0.1.0"
 description = "Pluggable embedding providers for Omniscience (Ollama, OpenAI, Voyage, Cohere)"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.27.0",
+    "tenacity>=8.3.0",
     "omniscience-core",
 ]
 
