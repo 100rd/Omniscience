@@ -5,6 +5,7 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - configures structured logging
   - initialises OpenTelemetry
   - connects to NATS JetStream and ensures streams are provisioned
+  - initialises the ingestion worker (placeholder — not consuming yet)
   - mounts the Prometheus metrics ASGI app at /metrics
   - adds TracingMiddleware
   - registers all route groups
@@ -68,6 +69,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await nats_conn.connect(settings)
     await ensure_streams(nats_conn.jetstream)
     app.state.nats = nats_conn
+
+    # --- Ingestion worker (placeholder — not consuming yet) ---
+    # TODO(issue-6): Wire real connector registry, embedding provider, index writer,
+    # and session factory here, then call ``asyncio.create_task(worker.start())``.
+    # The worker is intentionally not started until all dependencies are available.
+    log.info("ingestion_worker_placeholder", status="not_started")
+    app.state.ingestion_worker = None
 
     yield
 

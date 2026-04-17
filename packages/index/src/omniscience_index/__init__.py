@@ -1,6 +1,11 @@
-"""Index layer — placeholder for Wave 2 (issue #3).
+"""Omniscience index layer: atomic document + chunk upsert into PostgreSQL/pgvector."""
 
-Will include SQLAlchemy 2 models, Alembic migrations, and the index-writer
-that upserts documents, chunks, and embeddings into PostgreSQL + pgvector.
-See docs/schema.md for the full table definitions.
-"""
+from omniscience_index.hashing import compute_content_hash
+from omniscience_index.writer import ChunkData, IndexWriter, UpsertResult
+
+__all__ = [
+    "ChunkData",
+    "IndexWriter",
+    "UpsertResult",
+    "compute_content_hash",
+]

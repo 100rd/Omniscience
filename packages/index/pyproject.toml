@@ -5,6 +5,8 @@ description = "PostgreSQL + pgvector index layer for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
     "omniscience-core",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "asyncpg>=0.29.0",
 ]
 
 [tool.uv.sources]
