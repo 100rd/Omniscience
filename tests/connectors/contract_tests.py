@@ -85,7 +85,7 @@ class ConnectorContractTests(abc.ABC):
     async def test_validate_raises_with_invalid_config(self) -> None:
         """validate() must raise for bad config or bad secrets."""
         connector = self.make_connector()
-        with pytest.raises(Exception):  # noqa: B017 — any exception is a contract pass
+        with pytest.raises(Exception):
             await connector.validate(self.invalid_config(), self.secrets())
 
     # ------------------------------------------------------------------

@@ -1142,12 +1142,14 @@ source = { editable = "packages/connectors" }
 dependencies = [
     { name = "omniscience-core" },
     { name = "pydantic" },
+    { name = "watchfiles" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "omniscience-core", editable = "packages/core" },
     { name = "pydantic", specifier = ">=2.7.0" },
+    { name = "watchfiles", specifier = ">=0.21.0" },
 ]
 
 [[package]]
