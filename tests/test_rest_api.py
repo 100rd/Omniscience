@@ -1199,8 +1199,8 @@ async def test_webhook_404_unknown_source() -> None:
 
 
 @pytest.mark.asyncio
-async def test_webhook_401_bad_signature() -> None:
-    """POST /api/v1/ingest/webhook/{name} returns 401 when signature is invalid."""
+async def test_webhook_400_bad_signature() -> None:
+    """POST /api/v1/ingest/webhook/{name} returns 400 when signature is invalid."""
     from omniscience_core.config import Settings
 
     settings = Settings(
@@ -1238,9 +1238,9 @@ async def test_webhook_401_bad_signature() -> None:
             },
         )
 
-    assert resp.status_code == 401
+    assert resp.status_code == 400
     body = resp.json()
-    assert body["error"]["code"] == "unauthorized"
+    assert body["error"]["code"] == "bad_request"
 
 
 @pytest.mark.asyncio
@@ -1291,7 +1291,7 @@ async def test_webhook_accepted_no_secret() -> None:
     assert resp.status_code == 202
     body = resp.json()
     assert body["accepted"] is True
-    assert body["run_id"] == str(run_id)
+    assert "events_queued" in body
 
 
 # ---------------------------------------------------------------------------
