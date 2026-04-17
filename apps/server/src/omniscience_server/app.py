@@ -28,6 +28,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from omniscience_server.middleware import TracingMiddleware
+from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.routes import health_router, tokens_router
 
 log = structlog.get_logger(__name__)
@@ -107,15 +108,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     """
     resolved = settings or Settings()
 
+    # Disable Swagger UI in production; enable in dev/test
+    is_dev = str(resolved.environment).lower() in ("development", "dev", "test")
+
     app = FastAPI(
         title="Omniscience",
         description="Self-hosted knowledge retrieval service with MCP-first API",
         version=resolved.app_version,
         lifespan=_lifespan,
-        # Disable default /docs redirect to avoid confusion with /metrics
-        docs_url="/api/docs",
-        redoc_url="/api/redoc",
-        openapi_url="/api/openapi.json",
+        # OpenAPI served at /api/v1/openapi.json; UI only in dev
+        docs_url="/api/docs" if is_dev else None,
+        redoc_url="/api/redoc" if is_dev else None,
+        openapi_url="/api/v1/openapi.json",
     )
     app.state.settings = resolved
 
@@ -125,8 +129,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # Middleware (applied in reverse registration order by Starlette)
     app.add_middleware(TracingMiddleware)
 
+    # Exception handlers for spec-compliant error responses
+    register_error_handlers(app)
+
     # Routers
     app.include_router(health_router)
     app.include_router(tokens_router)
+    app.include_router(api_v1_router)
 
     return app
