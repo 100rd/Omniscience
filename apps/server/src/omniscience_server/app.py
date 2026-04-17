@@ -4,8 +4,7 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - reads Settings from the environment
   - configures structured logging
   - initialises OpenTelemetry
-  - registers a lifespan handler that logs placeholder connection setup
-    for Postgres and NATS (real connections wired in Wave 2)
+  - connects to NATS JetStream and ensures streams are provisioned
   - mounts the Prometheus metrics ASGI app at /metrics
   - adds TracingMiddleware
   - registers all route groups
@@ -21,6 +20,7 @@ import structlog
 from fastapi import FastAPI
 from omniscience_core.config import Settings
 from omniscience_core.logging import configure_logging
+from omniscience_core.queue import NatsConnection, ensure_streams
 from omniscience_core.telemetry import init_telemetry
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
@@ -46,7 +46,7 @@ def _redact_url(url: str) -> str:
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Application lifespan: startup tasks → yield → shutdown tasks."""
+    """Application lifespan: startup tasks -> yield -> shutdown tasks."""
     settings: Settings = app.state.settings
 
     configure_logging(settings.log_level)
@@ -63,15 +63,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # TODO(wave-2, issue-#2): Replace with real asyncpg pool / SQLAlchemy engine.
     log.info("postgres_connect_placeholder", url=_redact_url(settings.database_url))
 
-    # --- Placeholder: NATS JetStream connection (Wave 2, issue #3) ---
-    # TODO(wave-2, issue-#3): Replace with real nats-py connection + stream setup.
-    log.info("nats_connect_placeholder", url=_redact_url(settings.nats_url))
+    # --- NATS JetStream connection ---
+    nats_conn = NatsConnection()
+    await nats_conn.connect(settings)
+    await ensure_streams(nats_conn.jetstream)
+    app.state.nats = nats_conn
 
     yield
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
-    # TODO(wave-2): Close Postgres pool and NATS connection here.
+    # TODO(wave-2): Close Postgres pool here.
+    await nats_conn.disconnect()
 
 
 async def _metrics_endpoint(request: Request) -> Response:
@@ -108,7 +111,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = resolved
 
-    # Metrics endpoint — mounted before middleware so scrapes don't hit TracingMiddleware
+    # Metrics endpoint - mounted before middleware so scrapes don't hit TracingMiddleware
     app.add_route("/metrics", _metrics_endpoint, include_in_schema=False)
 
     # Middleware (applied in reverse registration order by Starlette)
