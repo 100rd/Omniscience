@@ -7,6 +7,7 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - connects to NATS JetStream and ensures streams are provisioned
   - initialises the ingestion worker (placeholder — not consuming yet)
   - mounts the Prometheus metrics ASGI app at /metrics
+  - mounts the MCP ASGI app at /mcp (streamable-http transport)
   - adds TracingMiddleware
   - registers all route groups
 """
@@ -27,6 +28,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
 
+from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.middleware import TracingMiddleware
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.routes import health_router, tokens_router
@@ -125,6 +127,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # Metrics endpoint - mounted before middleware so scrapes don't hit TracingMiddleware
     app.add_route("/metrics", _metrics_endpoint, include_in_schema=False)
+
+    # MCP streamable-http endpoint
+    app.mount("/mcp", create_mcp_asgi_app(app))
 
     # Middleware (applied in reverse registration order by Starlette)
     app.add_middleware(TracingMiddleware)
