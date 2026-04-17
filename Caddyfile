@@ -1,7 +1,3 @@
-{
-    auto_https off
-}
-
-:80 {
+{$CADDY_DOMAIN:localhost} {
     reverse_proxy app:8000
 }

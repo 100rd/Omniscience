@@ -10,7 +10,7 @@ services:
       nats:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -33,6 +33,28 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    restart: unless-stopped
+
+  pgbackup:
+    image: postgres:16-alpine
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+    volumes:
+      - pgbackups:/backups
+    entrypoint: >
+      sh -c "
+        while true; do
+          TIMESTAMP=$$(date +%Y%m%d_%H%M%S);
+          pg_dump -h postgres -U omniscience -d omniscience -Fc -f /backups/omniscience_$${TIMESTAMP}.dump;
+          echo \"Backup created: omniscience_$${TIMESTAMP}.dump\";
+          find /backups -name '*.dump' -mtime +7 -delete;
+          echo 'Old backups pruned (>7 days)';
+          sleep 86400;
+        done
+      "
+    depends_on:
+      postgres:
+        condition: service_healthy
     restart: unless-stopped
 
   nats:
@@ -60,6 +82,39 @@ services:
     volumes:
       - ollama_data:/root/.ollama
 
+  prometheus:
+    image: prom/prometheus:v2.52.0
+    profiles:
+      - monitoring
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheusdata:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    profiles:
+      - monitoring
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+    volumes:
+      - grafanadata:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
   caddy:
     image: caddy:2-alpine
     profiles:
@@ -67,13 +122,21 @@ services:
     ports:
       - "80:80"
       - "443:443"
+    environment:
+      CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
+    depends_on:
+      app:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   pgdata:
+  pgbackups:
   natsdata:
   ollama_data:
+  prometheusdata:
+  grafanadata:
   caddy_data:

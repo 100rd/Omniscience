@@ -1,0 +1,17 @@
+apiVersion: v2
+name: omniscience
+description: Omniscience — universal context retrieval for AI agents
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - omniscience
+  - mcp
+  - rag
+  - ai
+  - retrieval
+home: https://github.com/100rd/Omniscience
+sources:
+  - https://github.com/100rd/Omniscience
+maintainers:
+  - name: Omniscience maintainers
