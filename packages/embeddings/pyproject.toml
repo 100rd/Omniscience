@@ -1,0 +1,18 @@
+[project]
+name = "omniscience-embeddings"
+version = "0.1.0"
+description = "Pluggable embedding providers for Omniscience (Ollama, OpenAI, Voyage, Cohere)"
+requires-python = ">=3.12"
+dependencies = [
+    "omniscience-core",
+]
+
+[tool.uv.sources]
+omniscience-core = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omniscience_embeddings"]
