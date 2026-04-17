@@ -21,6 +21,7 @@ from urllib.parse import urlparse, urlunparse
 import structlog
 from fastapi import FastAPI
 from omniscience_core.config import Settings
+from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.logging import configure_logging
 from omniscience_core.queue import NatsConnection, ensure_streams
 from omniscience_core.telemetry import init_telemetry
@@ -63,9 +64,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment=settings.environment,
     )
 
-    # --- Placeholder: Postgres connection (Wave 2, issue #2) ---
-    # TODO(wave-2, issue-#2): Replace with real asyncpg pool / SQLAlchemy engine.
-    log.info("postgres_connect_placeholder", url=_redact_url(settings.database_url))
+    # --- Postgres connection ---
+    engine = create_async_engine(settings)
+    session_factory = create_session_factory(engine)
+    app.state.db_engine = engine
+    app.state.db_session_factory = session_factory
+    log.info("postgres_connected", url=_redact_url(settings.database_url))
 
     # --- NATS JetStream connection ---
     nats_conn = NatsConnection()
@@ -84,7 +88,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
-    # TODO(wave-2): Close Postgres pool here.
+    await engine.dispose()
     await nats_conn.disconnect()
 
 

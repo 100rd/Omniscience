@@ -24,10 +24,16 @@ if config.config_file_name is not None:
 # Import models so autogenerate can detect them
 # ---------------------------------------------------------------------------
 
-# Side-effect import — registers all mapped classes onto Base.metadata
-from omniscience_core.db.models import Base  # noqa: E402
-
-target_metadata = Base.metadata
+# NOTE: We intentionally do NOT import models here.  Importing models
+# registers PostgreSQL ENUM types on SQLAlchemy MetaData, and the
+# before_create event on those types fires unconditional CREATE TYPE
+# during op.create_table — even when the migration itself already created
+# them.  This causes "type already exists" errors.
+#
+# Trade-off: autogenerate (`alembic revision --autogenerate`) won't work.
+# All migrations must be written manually.  Re-enable the import when
+# SQLAlchemy/Alembic supports `checkfirst=True` in the table event path.
+target_metadata = None
 
 
 # ---------------------------------------------------------------------------
