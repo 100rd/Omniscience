@@ -4,7 +4,17 @@ version = "0.1.0"
 description = "Document parsers and chunkers for Omniscience ingestion pipeline"
 requires-python = ">=3.12"
 dependencies = [
+    "markdown-it-py>=3.0.0",
     "omniscience-core",
+    "pydantic>=2.7.0",
+    "python-frontmatter>=1.1.0",
+    "tree-sitter>=0.22.0",
+    "tree-sitter-go>=0.25.0",
+    "tree-sitter-java>=0.23.5",
+    "tree-sitter-javascript>=0.25.0",
+    "tree-sitter-python>=0.25.0",
+    "tree-sitter-rust>=0.24.2",
+    "tree-sitter-typescript>=0.23.2",
 ]
 
 [tool.uv.sources]

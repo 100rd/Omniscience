@@ -17,12 +17,12 @@ members = [
 [tool.uv.sources]
 omniscience-core       = { workspace = true }
 omniscience-connectors = { workspace = true }
-omniscience-parsers    = { workspace = true }
 omniscience-embeddings = { workspace = true }
 omniscience-index      = { workspace = true }
 omniscience-retrieval  = { workspace = true }
 omniscience-server     = { workspace = true }
 omniscience-cli        = { workspace = true }
+omniscience-parsers = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -40,6 +40,7 @@ dev = [
     "omniscience-index",
     "tenacity>=9.1.4",
     "respx>=0.23.1",
+    "omniscience-parsers",
 ]
 
 [tool.ruff]
