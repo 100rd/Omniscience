@@ -279,9 +279,7 @@ async def test_middleware_extracts_bearer_token() -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/protected", headers={"Authorization": f"Bearer {plaintext}"}
-        )
+        response = await client.get("/protected", headers={"Authorization": f"Bearer {plaintext}"})
 
     assert response.status_code == 200
     assert response.json()["prefix"] == prefix
@@ -346,9 +344,7 @@ async def test_middleware_rejects_expired_token() -> None:
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get(
-            "/protected", headers={"Authorization": f"Bearer {plaintext}"}
-        )
+        response = await client.get("/protected", headers={"Authorization": f"Bearer {plaintext}"})
 
     assert response.status_code == 401
 
