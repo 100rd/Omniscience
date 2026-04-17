@@ -77,23 +77,7 @@ def upgrade() -> None:
     op.create_table(
         "sources",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True),
-        sa.Column(
-            "type",
-            sa.Enum(
-                "git",
-                "fs",
-                "confluence",
-                "notion",
-                "slack",
-                "jira",
-                "grafana",
-                "k8s",
-                "terraform",
-                name="source_type",
-                create_type=False,
-            ),
-            nullable=False,
-        ),
+        sa.Column("type", postgresql.ENUM(name="source_type", create_type=False), nullable=False),
         sa.Column("name", sa.Text(), nullable=False),
         sa.Column(
             "config",
@@ -104,7 +88,7 @@ def upgrade() -> None:
         sa.Column("secrets_ref", sa.Text(), nullable=True),
         sa.Column(
             "status",
-            sa.Enum("active", "paused", "error", name="source_status", create_type=False),
+            postgresql.ENUM(name="source_status", create_type=False),
             nullable=False,
             server_default="active",
         ),
@@ -150,14 +134,7 @@ def upgrade() -> None:
         sa.Column("finished_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column(
             "status",
-            sa.Enum(
-                "running",
-                "ok",
-                "partial",
-                "error",
-                name="ingestion_run_status",
-                create_type=False,
-            ),
+            postgresql.ENUM(name="ingestion_run_status", create_type=False),
             nullable=False,
             server_default="running",
         ),
