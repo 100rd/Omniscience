@@ -1076,6 +1076,7 @@ dev = [
     { name = "omniscience-embeddings" },
     { name = "omniscience-index" },
     { name = "omniscience-parsers" },
+    { name = "omniscience-retrieval" },
     { name = "omniscience-server" },
     { name = "pre-commit" },
     { name = "pytest" },
@@ -1098,6 +1099,7 @@ dev = [
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
     { name = "omniscience-index", editable = "packages/index" },
     { name = "omniscience-parsers", editable = "packages/parsers" },
+    { name = "omniscience-retrieval", editable = "packages/retrieval" },
     { name = "omniscience-server", editable = "apps/server" },
     { name = "pre-commit", specifier = ">=3.7.1" },
     { name = "pytest", specifier = ">=8.2.2" },
@@ -1245,11 +1247,21 @@ name = "omniscience-retrieval"
 version = "0.1.0"
 source = { editable = "packages/retrieval" }
 dependencies = [
+    { name = "asyncpg" },
     { name = "omniscience-core" },
+    { name = "omniscience-embeddings" },
+    { name = "pgvector" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "omniscience-core", editable = "packages/core" }]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "omniscience-core", editable = "packages/core" },
+    { name = "omniscience-embeddings", editable = "packages/embeddings" },
+    { name = "pgvector", specifier = ">=0.3.0" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
+]
 
 [[package]]
 name = "omniscience-server"
