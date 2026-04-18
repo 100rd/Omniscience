@@ -40,6 +40,9 @@ from omniscience_connectors.registry import (
 _registry.register(GitConnector)
 _registry.register(FsConnector)
 
+# Public alias for the shared registry instance (git + fs pre-registered).
+default_registry: ConnectorRegistry = _registry
+
 __all__ = [
     "Connector",
     "ConnectorRegistry",
@@ -50,5 +53,6 @@ __all__ = [
     "NotFoundError",
     "WebhookHandler",
     "WebhookPayload",
+    "default_registry",
     "get_connector",
 ]

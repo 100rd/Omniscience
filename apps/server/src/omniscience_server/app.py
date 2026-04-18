@@ -4,8 +4,8 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - reads Settings from the environment
   - configures structured logging
   - initialises OpenTelemetry
-  - connects to NATS JetStream and ensures streams are provisioned
-  - initialises the ingestion worker (placeholder — not consuming yet)
+  - connects to Postgres, NATS JetStream, embedding provider
+  - starts the ingestion worker (consumes document change events)
   - mounts the Prometheus metrics ASGI app at /metrics
   - mounts the MCP ASGI app at /mcp (streamable-http transport)
   - adds TracingMiddleware
@@ -14,23 +14,29 @@ Create the ASGI application by calling ``create_app()``.  The factory:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse, urlunparse
 
 import structlog
 from fastapi import FastAPI
+from omniscience_connectors import default_registry as connector_registry
 from omniscience_core.config import Settings
 from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.logging import configure_logging
 from omniscience_core.queue import NatsConnection, ensure_streams
+from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
+from omniscience_index import IndexWriter
 from omniscience_retrieval import RetrievalService
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
 
+from omniscience_server.ingestion.events import DocumentChangeEvent
+from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.middleware import TracingMiddleware
 from omniscience_server.rest import api_v1_router, register_error_handlers
@@ -97,10 +103,33 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.retrieval_service = retrieval_service
     log.info("retrieval_service_ready")
 
+    # --- Ingestion worker ---
+    index_writer = IndexWriter(session_factory)
+    consumer: QueueConsumer[DocumentChangeEvent] = QueueConsumer(
+        js=nats_conn.jetstream,
+        stream="INGEST_CHANGES",
+        subject="ingest.changes.*",
+        durable="omniscience-ingestion-worker",
+        payload_type=DocumentChangeEvent,
+        dlq_subject="ingest.dlq.ingestion",
+    )
+    worker = IngestionWorker(
+        queue_consumer=consumer,
+        connector_registry=connector_registry,
+        embedding_provider=embedding_provider,
+        index_writer=index_writer,
+        session_factory=session_factory,
+    )
+    worker_task = asyncio.create_task(worker.start())
+    app.state.ingestion_worker = worker
+    log.info("ingestion_worker_started")
+
     yield
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
+    await worker.stop()
+    worker_task.cancel()
     await embedding_provider.close()
     await engine.dispose()
     await nats_conn.disconnect()
