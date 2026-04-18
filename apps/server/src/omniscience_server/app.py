@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urlunparse
 
 import structlog
 from fastapi import FastAPI
-from omniscience_connectors import _registry as connector_registry
+from omniscience_connectors import default_registry as connector_registry
 from omniscience_core.config import Settings
 from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.logging import configure_logging
