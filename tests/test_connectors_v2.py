@@ -255,9 +255,7 @@ class TestConfluenceDiscover:
     @respx.mock
     @pytest.mark.asyncio
     async def test_discover_handles_api_error_gracefully(self) -> None:
-        respx.get(f"{_CONFLUENCE_BASE}/rest/api/content").mock(
-            return_value=httpx.Response(403)
-        )
+        respx.get(f"{_CONFLUENCE_BASE}/rest/api/content").mock(return_value=httpx.Response(403))
         connector = ConfluenceConnector()
         config = ConfluenceConfig(base_url=_CONFLUENCE_BASE, space_keys=["DOCS"])
         secrets = {"email": "u@x.com", "api_token": "tok"}
@@ -340,14 +338,16 @@ class TestConfluenceWebhook:
 
     async def test_parse_page_created_event(self) -> None:
         handler = ConfluenceWebhookHandler()
-        payload = json.dumps({
-            "webhookEvent": "page_created",
-            "page": {
-                "id": "789",
-                "title": "New Page",
-                "space": {"key": "TEAM"},
-            },
-        }).encode()
+        payload = json.dumps(
+            {
+                "webhookEvent": "page_created",
+                "page": {
+                    "id": "789",
+                    "title": "New Page",
+                    "space": {"key": "TEAM"},
+                },
+            }
+        ).encode()
         result = await handler.parse_payload(payload, {})
         assert result.source_name == "confluence"
         assert len(result.affected_refs) == 1
@@ -650,9 +650,7 @@ class TestSlackValidate:
     @pytest.mark.asyncio
     async def test_validate_success(self) -> None:
         respx.post("https://slack.com/api/auth.test").mock(
-            return_value=httpx.Response(
-                200, json={"ok": True, "user": "bot", "team": "myteam"}
-            )
+            return_value=httpx.Response(200, json={"ok": True, "user": "bot", "team": "myteam"})
         )
         connector = SlackConnector()
         config = SlackConfig(channel_ids=["C123"])
@@ -701,9 +699,7 @@ class TestSlackDiscover:
             return_value=httpx.Response(200, json=self._history_response())
         )
         respx.get("https://slack.com/api/conversations.info").mock(
-            return_value=httpx.Response(
-                200, json={"ok": True, "channel": {"name": "general"}}
-            )
+            return_value=httpx.Response(200, json={"ok": True, "channel": {"name": "general"}})
         )
 
         connector = SlackConnector()
@@ -769,9 +765,7 @@ class TestSlackFetch:
         thread_ts = "1609459200.000000"
         root_message = {
             "ok": True,
-            "messages": [
-                {"user": "U1", "ts": thread_ts, "text": "Root message"}
-            ],
+            "messages": [{"user": "U1", "ts": thread_ts, "text": "Root message"}],
         }
         replies = {
             "ok": True,
@@ -861,15 +855,17 @@ class TestSlackWebhook:
 
     async def test_parse_message_event(self) -> None:
         handler = SlackWebhookHandler()
-        payload = json.dumps({
-            "type": "event_callback",
-            "event": {
-                "type": "message",
-                "channel": "C123",
-                "ts": "1609459200.000000",
-                "thread_ts": "1609459200.000000",
-            },
-        }).encode()
+        payload = json.dumps(
+            {
+                "type": "event_callback",
+                "event": {
+                    "type": "message",
+                    "channel": "C123",
+                    "ts": "1609459200.000000",
+                    "thread_ts": "1609459200.000000",
+                },
+            }
+        ).encode()
         result = await handler.parse_payload(payload, {})
         assert result.source_name == "slack"
         assert len(result.affected_refs) == 1
@@ -1017,9 +1013,7 @@ class TestJiraValidate:
     @respx.mock
     @pytest.mark.asyncio
     async def test_validate_unauthorized_raises(self) -> None:
-        respx.get(f"{_JIRA_BASE}/rest/api/3/myself").mock(
-            return_value=httpx.Response(401)
-        )
+        respx.get(f"{_JIRA_BASE}/rest/api/3/myself").mock(return_value=httpx.Response(401))
         connector = JiraConnector()
         config = JiraConfig(base_url=_JIRA_BASE)
         with pytest.raises(PermissionError):
@@ -1206,14 +1200,16 @@ class TestJiraWebhook:
 
     async def test_parse_issue_created(self) -> None:
         handler = JiraWebhookHandler()
-        payload = json.dumps({
-            "webhookEvent": "jira:issue_created",
-            "issue": {
-                "id": "10001",
-                "key": "PROJ-1",
-                "fields": {"updated": "2024-01-01T00:00:00.000+0000"},
-            },
-        }).encode()
+        payload = json.dumps(
+            {
+                "webhookEvent": "jira:issue_created",
+                "issue": {
+                    "id": "10001",
+                    "key": "PROJ-1",
+                    "fields": {"updated": "2024-01-01T00:00:00.000+0000"},
+                },
+            }
+        ).encode()
         result = await handler.parse_payload(payload, {})
         assert result.source_name == "jira"
         assert len(result.affected_refs) == 1

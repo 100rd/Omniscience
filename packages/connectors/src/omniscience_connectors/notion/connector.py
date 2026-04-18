@@ -189,9 +189,7 @@ def _page_title(page: dict[str, Any]) -> str:
     return str(page.get("id", ""))
 
 
-def _page_metadata(
-    page: dict[str, Any], include_properties: list[str]
-) -> dict[str, Any]:
+def _page_metadata(page: dict[str, Any], include_properties: list[str]) -> dict[str, Any]:
     """Extract selected properties as metadata."""
     meta: dict[str, Any] = {
         "page_id": page.get("id", ""),
@@ -244,9 +242,7 @@ class NotionConnector(Connector):
         async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
             resp = await client.get(f"{_NOTION_API_BASE}/users/me")
             if resp.status_code == 401:
-                raise PermissionError(
-                    "Notion authentication failed — check integration_token."
-                )
+                raise PermissionError("Notion authentication failed — check integration_token.")
             resp.raise_for_status()
 
     async def discover(
@@ -432,9 +428,7 @@ class NotionConnector(Connector):
         return blocks
 
 
-def _page_to_ref(
-    page: dict[str, Any], include_properties: list[str]
-) -> DocumentRef | None:
+def _page_to_ref(page: dict[str, Any], include_properties: list[str]) -> DocumentRef | None:
     """Convert a Notion page API response to a DocumentRef."""
     page_id = page.get("id", "")
     if not page_id:

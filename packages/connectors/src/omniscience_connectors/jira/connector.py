@@ -33,10 +33,7 @@ logger = logging.getLogger(__name__)
 _PAGE_SIZE = 50
 
 # Jira field names requested during discover (kept under line length limit)
-_DISCOVER_FIELDS = (
-    "summary,status,priority,issuetype,updated,created,"
-    "assignee,reporter,labels"
-)
+_DISCOVER_FIELDS = "summary,status,priority,issuetype,updated,created,assignee,reporter,labels"
 
 
 class JiraConfig(BaseModel):
@@ -90,7 +87,7 @@ class JiraWebhookHandler(WebhookHandler):
             return not secret
         if not sig_header.startswith("sha256="):
             return False
-        provided_hex = sig_header[len("sha256="):]
+        provided_hex = sig_header[len("sha256=") :]
         expected_hex = hmac.new(secret.encode(), payload, "sha256").hexdigest()
         return hmac.compare_digest(expected_hex, provided_hex)
 
@@ -114,9 +111,7 @@ class JiraWebhookHandler(WebhookHandler):
             issue_key = str(issue_data.get("key", ""))
             if issue_id:
                 fields = issue_data.get("fields", {})
-                updated_raw = (
-                    fields.get("updated", "") if isinstance(fields, dict) else ""
-                )
+                updated_raw = fields.get("updated", "") if isinstance(fields, dict) else ""
                 # sha1 used only as a compact fingerprint, not for security
                 external_id = hashlib.sha1(  # noqa: S324
                     f"{issue_id}:{updated_raw}".encode()
@@ -160,8 +155,7 @@ def _build_auth_headers(secrets: dict[str, str]) -> dict[str, str]:
         return {"Authorization": f"Basic {creds}"}
 
     raise ValueError(
-        "Jira secrets must contain either 'pat' (Server) "
-        "or both 'api_token' and 'email' (Cloud)."
+        "Jira secrets must contain either 'pat' (Server) or both 'api_token' and 'email' (Cloud)."
     )
 
 
@@ -236,9 +230,7 @@ def _adf_to_markdown(node: dict[str, Any], depth: int = 0) -> str:
     if node_type == "orderedList":
         lines: list[str] = []
         for i, item in enumerate(content, start=1):
-            inner = "".join(
-                _adf_to_markdown(c, depth + 1) for c in item.get("content", [])
-            )
+            inner = "".join(_adf_to_markdown(c, depth + 1) for c in item.get("content", []))
             lines.append(f"{i}. {inner.strip()}\n")
         return "".join(lines) + "\n"
 
@@ -327,9 +319,7 @@ class JiraConnector(Connector):
         async with httpx.AsyncClient(headers=headers, timeout=15.0) as client:
             resp = await client.get(f"{base}/rest/api/3/myself")
             if resp.status_code == 401:
-                raise PermissionError(
-                    "Jira authentication failed — check api_token/email or pat."
-                )
+                raise PermissionError("Jira authentication failed — check api_token/email or pat.")
             resp.raise_for_status()
 
     async def discover(
@@ -354,9 +344,7 @@ class JiraConnector(Connector):
                     "fields": _DISCOVER_FIELDS,
                 }
                 try:
-                    resp = await client.get(
-                        f"{base}/rest/api/3/search", params=params
-                    )
+                    resp = await client.get(f"{base}/rest/api/3/search", params=params)
                     resp.raise_for_status()
                 except httpx.HTTPStatusError as exc:
                     logger.warning(
@@ -391,9 +379,7 @@ class JiraConnector(Connector):
 
         issue_key = ref.metadata.get("issue_key", "")
         if not issue_key:
-            raise ValueError(
-                f"DocumentRef missing 'issue_key' in metadata: {ref.uri!r}"
-            )
+            raise ValueError(f"DocumentRef missing 'issue_key' in metadata: {ref.uri!r}")
 
         async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
             # Fetch full issue with all fields
@@ -502,9 +488,9 @@ def _issue_to_markdown(
     updated = str(fields.get("updated", ""))
 
     # Description — can be ADF (dict) or plain string
-    description_raw = fields.get("description") or (
-        issue.get("renderedFields", {}) or {}
-    ).get("description", "")
+    description_raw = fields.get("description") or (issue.get("renderedFields", {}) or {}).get(
+        "description", ""
+    )
     if isinstance(description_raw, dict):
         description = _adf_to_markdown(description_raw).strip()
     else:

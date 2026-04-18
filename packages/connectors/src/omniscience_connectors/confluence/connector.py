@@ -162,6 +162,7 @@ def storage_to_markdown(storage_html: str) -> str:
 # HTTP helpers
 # ---------------------------------------------------------------------------
 
+
 def _build_auth_headers(secrets: dict[str, str]) -> dict[str, str]:
     """Build HTTP Authorization headers from secrets.
 
@@ -217,7 +218,7 @@ class ConfluenceWebhookHandler(WebhookHandler):
         sig_header = lower.get(self._SIG_HEADER, "")
         if not sig_header.startswith("sha256="):
             return False
-        provided_hex = sig_header[len("sha256="):]
+        provided_hex = sig_header[len("sha256=") :]
         expected_hex = hmac.new(secret.encode(), payload, "sha256").hexdigest()
         return hmac.compare_digest(expected_hex, provided_hex)
 
@@ -303,18 +304,14 @@ class ConfluenceConnector(Connector):
         url = f"{base}/rest/api/content"
 
         spaces_to_query = (
-            cfg.space_keys
-            if cfg.space_keys
-            else await self._list_space_keys(base, headers)
+            cfg.space_keys if cfg.space_keys else await self._list_space_keys(base, headers)
         )
 
         for space_key in spaces_to_query:
             for content_type in cfg.content_types:
                 cql = f'type="{content_type}" AND space="{space_key}"'
                 if cfg.include_labels:
-                    label_clause = " OR ".join(
-                        f'label="{lbl}"' for lbl in cfg.include_labels
-                    )
+                    label_clause = " OR ".join(f'label="{lbl}"' for lbl in cfg.include_labels)
                     cql += f" AND ({label_clause})"
 
                 start = 0
@@ -346,9 +343,7 @@ class ConfluenceConnector(Connector):
                             item_labels: list[str] = [
                                 lbl["name"]
                                 for lbl in (
-                                    item.get("metadata", {})
-                                    .get("labels", {})
-                                    .get("results", [])
+                                    item.get("metadata", {}).get("labels", {}).get("results", [])
                                 )
                             ]
                             # Apply exclude label filter
@@ -408,9 +403,7 @@ class ConfluenceConnector(Connector):
 
         content_id = ref.metadata.get("content_id", "")
         if not content_id:
-            raise ValueError(
-                f"DocumentRef is missing 'content_id' in metadata: {ref.uri!r}"
-            )
+            raise ValueError(f"DocumentRef is missing 'content_id' in metadata: {ref.uri!r}")
 
         url = f"{base}/rest/api/content/{content_id}"
         async with httpx.AsyncClient(headers=headers, timeout=30.0) as client:
@@ -418,9 +411,7 @@ class ConfluenceConnector(Connector):
             resp.raise_for_status()
 
         data = resp.json()
-        storage_html: str = (
-            data.get("body", {}).get("storage", {}).get("value", "")
-        )
+        storage_html: str = data.get("body", {}).get("storage", {}).get("value", "")
         title: str = data.get("title", "")
 
         markdown = f"# {title}\n\n{storage_to_markdown(storage_html)}"

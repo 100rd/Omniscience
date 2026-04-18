@@ -184,9 +184,7 @@ class SlackConnector(Connector):
             data = resp.json()
             if not data.get("ok"):
                 error = data.get("error", "unknown")
-                raise PermissionError(
-                    f"Slack authentication failed ({error}) — check bot_token."
-                )
+                raise PermissionError(f"Slack authentication failed ({error}) — check bot_token.")
 
     async def discover(
         self,
@@ -198,9 +196,7 @@ class SlackConnector(Connector):
         headers = _auth_headers(secrets)
         oldest = _oldest_ts(cfg.max_age_days)
 
-        channels = (
-            cfg.channel_ids if cfg.channel_ids else await self._list_channels(headers)
-        )
+        channels = cfg.channel_ids if cfg.channel_ids else await self._list_channels(headers)
 
         for channel_id in channels:
             async for ref in self._discover_channel(channel_id, oldest, headers):
@@ -234,9 +230,7 @@ class SlackConnector(Connector):
         reply_text = ""
         if cfg.include_threads:
             replies = await self._fetch_replies(channel_id, thread_ts, headers)
-            reply_lines = [
-                _message_to_markdown(m) for m in replies if m.get("ts") != thread_ts
-            ]
+            reply_lines = [_message_to_markdown(m) for m in replies if m.get("ts") != thread_ts]
             if reply_lines:
                 reply_text = "\n\n".join(reply_lines)
 
@@ -277,9 +271,7 @@ class SlackConnector(Connector):
                 if cursor:
                     params["cursor"] = cursor
 
-                resp = await client.get(
-                    f"{_SLACK_API_BASE}/conversations.list", params=params
-                )
+                resp = await client.get(f"{_SLACK_API_BASE}/conversations.list", params=params)
                 data = resp.json()
                 if not data.get("ok"):
                     logger.warning(
@@ -415,9 +407,7 @@ class SlackConnector(Connector):
                 if cursor:
                     params["cursor"] = cursor
 
-                resp = await client.get(
-                    f"{_SLACK_API_BASE}/conversations.replies", params=params
-                )
+                resp = await client.get(f"{_SLACK_API_BASE}/conversations.replies", params=params)
                 data = resp.json()
                 if not data.get("ok"):
                     break
