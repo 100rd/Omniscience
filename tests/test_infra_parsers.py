@@ -317,9 +317,7 @@ class TestTerraformParserHCL:
     def test_interpolation_reference_captured(self) -> None:
         doc = self.parser.parse(_TF_WITH_INTERPOLATION, "main.tf")
         attach = next(
-            s
-            for s in doc.sections
-            if s.symbol == "resource.aws_iam_role_policy_attachment.attach"
+            s for s in doc.sections if s.symbol == "resource.aws_iam_role_policy_attachment.attach"
         )
         refs = attach.metadata.get("refs", [])
         assert any("aws_iam_role" in r or "aws_iam_policy" in r for r in refs)
@@ -551,7 +549,8 @@ class TestExtractInfraGraphTerraform:
         doc = self.parser.parse(_TF_WITH_DEPS, "main.tf")
         _, edges = extract_infra_graph(doc)
         depends_on_edges = [
-            e for e in edges
+            e
+            for e in edges
             if e.edge_type == "depends_on"
             and e.from_symbol == "resource.aws_s3_bucket_policy.policy"
         ]
@@ -562,7 +561,8 @@ class TestExtractInfraGraphTerraform:
         doc = self.parser.parse(_TF_WITH_DEPS, "main.tf")
         _, edges = extract_infra_graph(doc)
         ref_edges = [
-            e for e in edges
+            e
+            for e in edges
             if e.edge_type == "references"
             and e.from_symbol == "resource.aws_s3_bucket_policy.policy"
         ]
@@ -572,10 +572,7 @@ class TestExtractInfraGraphTerraform:
         doc = self.parser.parse(_TF_SIMPLE, "main.tf")
         _, edges = extract_infra_graph(doc)
         # Simple bucket with no deps/refs
-        policy_edges = [
-            e for e in edges
-            if e.from_symbol == "resource.aws_s3_bucket.my_bucket"
-        ]
+        policy_edges = [e for e in edges if e.from_symbol == "resource.aws_s3_bucket.my_bucket"]
         assert policy_edges == []
 
     def test_module_entity_kind(self) -> None:
@@ -632,9 +629,9 @@ class TestExtractInfraGraphKubernetes:
         doc = self.parser.parse(_K8S_DEPLOYMENT, "deployment.yaml")
         _, edges = extract_infra_graph(doc)
         selects = [
-            e for e in edges
-            if e.edge_type == "selects"
-            and e.from_symbol == "Deployment/default/nginx"
+            e
+            for e in edges
+            if e.edge_type == "selects" and e.from_symbol == "Deployment/default/nginx"
         ]
         assert len(selects) >= 1
         assert selects[0].extra.get("selector", {}).get("app") == "nginx"
@@ -643,9 +640,9 @@ class TestExtractInfraGraphKubernetes:
         doc = self.parser.parse(_K8S_SERVICE, "service.yaml")
         _, edges = extract_infra_graph(doc)
         selects = [
-            e for e in edges
-            if e.edge_type == "selects"
-            and e.from_symbol == "Service/default/nginx-svc"
+            e
+            for e in edges
+            if e.edge_type == "selects" and e.from_symbol == "Service/default/nginx-svc"
         ]
         assert len(selects) >= 1
 

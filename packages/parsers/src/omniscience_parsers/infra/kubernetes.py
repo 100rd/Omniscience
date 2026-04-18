@@ -89,9 +89,7 @@ def _symbol(kind: str, namespace: str, name: str) -> str:
 def _extract_owner_refs(resource: dict[str, Any]) -> list[str]:
     """Return ownerReferences as symbol strings."""
     refs: list[str] = []
-    owner_refs = (
-        resource.get("metadata", {}).get("ownerReferences", []) or []
-    )
+    owner_refs = resource.get("metadata", {}).get("ownerReferences", []) or []
     for ref in owner_refs:
         if not isinstance(ref, dict):
             continue
@@ -202,8 +200,7 @@ def _resource_to_section(
     name = _safe_str(meta_block.get("name", ""))
     namespace = _safe_str(meta_block.get("namespace", "default"))
     labels: dict[str, str] = {
-        _safe_str(k): _safe_str(v)
-        for k, v in (meta_block.get("labels") or {}).items()
+        _safe_str(k): _safe_str(v) for k, v in (meta_block.get("labels") or {}).items()
     }
 
     if not kind or not name:

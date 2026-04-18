@@ -46,37 +46,35 @@ _TF_CONTENT_TYPES = frozenset(
 #          output  "bucket_arn" {
 #          locals  {
 _BLOCK_HEADER = re.compile(
-    r'^(?P<block_type>resource|data|module|variable|output|locals|terraform|provider)'
+    r"^(?P<block_type>resource|data|module|variable|output|locals|terraform|provider)"
     r'(?:\s+"(?P<label1>[^"]+)")?'
     r'(?:\s+"(?P<label2>[^"]+)")?'
-    r'\s*\{',
+    r"\s*\{",
     re.MULTILINE,
 )
 
 # Reference to another resource/data in an attribute value:
 # aws_s3_bucket.my_bucket.arn  or  data.aws_iam_policy.current.id
 _RESOURCE_REF = re.compile(
-    r'\b(?P<ref_type>resource|data)?\.?'
-    r'(?P<rtype>[a-z][a-z0-9_]+(?:\.[a-z][a-z0-9_]+)+)'
+    r"\b(?P<ref_type>resource|data)?\.?"
+    r"(?P<rtype>[a-z][a-z0-9_]+(?:\.[a-z][a-z0-9_]+)+)"
 )
 
 # Explicit interpolation reference: ${aws_s3_bucket.my_bucket.arn}
-_INTERPOLATION_REF = re.compile(
-    r'\$\{(?P<expr>[^}]+)\}'
-)
+_INTERPOLATION_REF = re.compile(r"\$\{(?P<expr>[^}]+)\}")
 
 # depends_on = [resource.name, ...]
 _DEPENDS_ON = re.compile(
-    r'depends_on\s*=\s*\[(?P<items>[^\]]*)\]',
+    r"depends_on\s*=\s*\[(?P<items>[^\]]*)\]",
     re.DOTALL,
 )
 
 # Terraform reference expression like: aws_s3_bucket.example  or  module.vpc
 _PLAIN_REF = re.compile(
-    r'\b(?P<kind>(?:resource|data|module)\.)?'
-    r'(?P<rtype>[a-z][a-z0-9_]+)\.'
-    r'(?P<rname>[a-z][a-z0-9_-]+)'
-    r'(?:\.[a-z][a-z0-9_]+)*\b'
+    r"\b(?P<kind>(?:resource|data|module)\.)?"
+    r"(?P<rtype>[a-z][a-z0-9_]+)\."
+    r"(?P<rname>[a-z][a-z0-9_-]+)"
+    r"(?:\.[a-z][a-z0-9_]+)*\b"
 )
 
 
@@ -165,9 +163,7 @@ def _symbol_for_block(block_type: str, label1: str | None, label2: str | None) -
     return block_type
 
 
-def _heading_path_for_block(
-    block_type: str, label1: str | None, label2: str | None
-) -> list[str]:
+def _heading_path_for_block(block_type: str, label1: str | None, label2: str | None) -> list[str]:
     """Build a human-readable heading path for a block."""
     parts: list[str] = [block_type]
     if label1:
