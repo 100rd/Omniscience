@@ -17,6 +17,11 @@ Chunkers:
     CodeSymbolChunker        — one chunk per code symbol
     MarkdownSectionChunker   — one chunk per markdown section
     FixedWindowChunker       — sliding window for plain text
+
+Code symbol graph:
+    ExtractedEntity      — node in the code symbol graph
+    ExtractedEdge        — directed edge in the code symbol graph
+    extract_symbol_graph — extract symbol graph from a parsed code document
 """
 
 from omniscience_parsers.base import ParsedDocument, Parser, Section
@@ -27,6 +32,7 @@ from omniscience_parsers.chunking import (
     FixedWindowChunker,
     MarkdownSectionChunker,
 )
+from omniscience_parsers.code.graph import ExtractedEdge, ExtractedEntity, extract_symbol_graph
 from omniscience_parsers.code.treesitter import TreeSitterParser
 from omniscience_parsers.dispatch import ParserDispatch
 from omniscience_parsers.markdown import MarkdownParser
@@ -36,6 +42,8 @@ __all__ = [
     "ChunkOutput",
     "Chunker",
     "CodeSymbolChunker",
+    "ExtractedEdge",
+    "ExtractedEntity",
     "FixedWindowChunker",
     "MarkdownParser",
     "MarkdownSectionChunker",
@@ -45,4 +53,5 @@ __all__ = [
     "PlainTextParser",
     "Section",
     "TreeSitterParser",
+    "extract_symbol_graph",
 ]
