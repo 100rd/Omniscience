@@ -1,8 +1,8 @@
 """Per-document ingestion pipeline.
 
-:class:`IngestionPipeline` orchestrates six stages for each document:
+:class:`IngestionPipeline` orchestrates seven stages for each document:
 
-    fetch → hash_check → parse → chunk → embed → index
+    fetch → hash_check → parse → chunk → embed → index → graph → link
 
 Each stage runs inside its own structured-log context and records a
 Prometheus histogram observation.  Failures are caught at the pipeline
@@ -19,6 +19,10 @@ The real integration happens when both branches are merged.
 Symbol graph note: After parse the pipeline optionally calls
 ``extract_symbol_graph`` (omniscience_parsers) and persists entities and
 edges via ``IndexWriterProtocol.upsert_graph``.
+
+Entity linking note: After graph extraction the pipeline optionally calls
+``EntityLinkerProtocol.link_entities`` to create cross-source edges.
+Graph/linking failures are logged and swallowed — they never abort indexing.
 """
 
 from __future__ import annotations
@@ -111,6 +115,22 @@ class IndexWriterProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
+# EntityLinker protocol
+# ---------------------------------------------------------------------------
+
+
+@runtime_checkable
+class EntityLinkerProtocol(Protocol):
+    """Minimal surface of EntityLinker needed by the ingestion pipeline.
+
+    The real ``omniscience_index.EntityLinker`` satisfies this protocol.
+    Tests inject a mock that also satisfies it.
+    """
+
+    async def link_entities(self, source_id: UUID) -> int: ...
+
+
+# ---------------------------------------------------------------------------
 # Chunk placeholder (Wave 5 will replace with real ChunkData)
 # ---------------------------------------------------------------------------
 
@@ -148,10 +168,14 @@ class IngestionPipeline:
     on the result but does not raise; the caller (worker) decides how to
     ack/nak the underlying message.
 
-    Symbol graph extraction runs as an optional stage after parse.  It is
+    Symbol graph extraction runs as an optional stage after index.  It is
     activated when both ``_graph_extractor`` is provided (non-None) and the
     parsed document's language is supported.  Graph extraction failures are
     logged and swallowed — they never abort indexing.
+
+    Entity linking runs as an optional stage after graph extraction.  It is
+    activated when ``_entity_linker`` is provided (non-None).  Linking
+    failures are logged and swallowed — they never abort indexing.
     """
 
     def __init__(
@@ -160,6 +184,7 @@ class IngestionPipeline:
         embedding_provider: EmbeddingProvider,
         index_writer: IndexWriterProtocol,
         graph_extractor: Any | None = None,
+        entity_linker: EntityLinkerProtocol | None = None,
     ) -> None:
         self._connector = connector
         self._embedding_provider = embedding_provider
@@ -168,6 +193,8 @@ class IngestionPipeline:
         #   graph_extractor(parsed_doc, source_bytes) -> (entities, edges)
         # Matches the signature of omniscience_parsers.code.graph.extract_symbol_graph
         self._graph_extractor = graph_extractor
+        # Optional EntityLinker (or compatible duck-typed object)
+        self._entity_linker = entity_linker
 
     async def run(
         self,
@@ -241,6 +268,9 @@ class IngestionPipeline:
 
         # Symbol graph extraction — optional, best-effort
         await self._stage_graph(event, fetched.content_bytes, document_id, bound)
+
+        # Cross-source entity linking — optional, best-effort
+        await self._stage_link(event, bound)
 
         return ProcessResult(
             source_id=event.source_id,
@@ -432,6 +462,26 @@ class IngestionPipeline:
         finally:
             INGESTION_STAGE_DURATION_SECONDS.labels(stage="graph").observe(time.monotonic() - t0)
 
+    async def _stage_link(
+        self,
+        event: DocumentChangeEvent,
+        bound: Any,
+    ) -> None:
+        """Create cross-source entity links.  Best-effort: never raises."""
+        if self._entity_linker is None:
+            return
+
+        t0 = time.monotonic()
+        try:
+            new_edges = await self._entity_linker.link_entities(event.source_id)
+            bound.debug("stage_link_ok", new_edges=new_edges)
+        except Exception as exc:
+            INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="link").inc()
+            bound.warning("stage_link_error", error=str(exc))
+            # Swallow: entity linking is non-critical
+        finally:
+            INGESTION_STAGE_DURATION_SECONDS.labels(stage="link").observe(time.monotonic() - t0)
+
     async def _handle_delete(self, event: DocumentChangeEvent, bound: Any) -> ProcessResult:
         t0 = time.monotonic()
         try:
@@ -452,4 +502,4 @@ class IngestionPipeline:
             INGESTION_STAGE_DURATION_SECONDS.labels(stage="index").observe(time.monotonic() - t0)
 
 
-__all__ = ["IndexWriterProtocol", "IngestionPipeline"]
+__all__ = ["EntityLinkerProtocol", "IndexWriterProtocol", "IngestionPipeline"]
