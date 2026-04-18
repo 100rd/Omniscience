@@ -64,9 +64,7 @@ class StrategyRouter:
         """
         if request.retrieval_strategy == "auto":
             chosen = classify_query(request.query)
-            logger.debug(
-                "auto strategy classified %r as %r", request.query, chosen
-            )
+            logger.debug("auto strategy classified %r as %r", request.query, chosen)
             return chosen
         return request.retrieval_strategy
 
@@ -90,9 +88,7 @@ class StrategyRouter:
 
         # "hybrid" (default) or any future unrecognised value
         if strategy_name != "hybrid":
-            logger.warning(
-                "unknown retrieval_strategy=%r; falling back to hybrid", strategy_name
-            )
+            logger.warning("unknown retrieval_strategy=%r; falling back to hybrid", strategy_name)
         return await self._hybrid_fn(request)
 
 

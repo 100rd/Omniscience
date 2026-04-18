@@ -718,12 +718,19 @@ class TestAutoStrategyEndToEnd:
             hybrid_fn=hybrid_fn,
         )
 
-        assert router.select_strategy(
-            SearchRequest(query="what imports utils", retrieval_strategy="auto")
-        ) == "structural"
-        assert router.select_strategy(
-            SearchRequest(query='"ERR_404"', retrieval_strategy="auto")
-        ) == "keyword"
-        assert router.select_strategy(
-            SearchRequest(query="explain caching", retrieval_strategy="auto")
-        ) == "hybrid"
+        assert (
+            router.select_strategy(
+                SearchRequest(query="what imports utils", retrieval_strategy="auto")
+            )
+            == "structural"
+        )
+        assert (
+            router.select_strategy(SearchRequest(query='"ERR_404"', retrieval_strategy="auto"))
+            == "keyword"
+        )
+        assert (
+            router.select_strategy(
+                SearchRequest(query="explain caching", retrieval_strategy="auto")
+            )
+            == "hybrid"
+        )
