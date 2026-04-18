@@ -80,7 +80,7 @@ def normalize_entity_name(name: str) -> str:
         changed = False
         for prefix in _STRIP_PREFIXES:
             if result.startswith(prefix):
-                result = result[len(prefix):]
+                result = result[len(prefix) :]
                 changed = True
                 break
 
@@ -163,11 +163,7 @@ def resource_name_match(tf_resource: str, k8s_resource: str) -> float:
 def _meaningful_tokens(normalised: str) -> set[str]:
     """Split a normalised name into meaningful tokens, filtering noise."""
     raw_tokens = normalised.split("_")
-    return {
-        t
-        for t in raw_tokens
-        if len(t) > 1 and t not in _K8S_SUFFIXES
-    }
+    return {t for t in raw_tokens if len(t) > 1 and t not in _K8S_SUFFIXES}
 
 
 __all__ = [

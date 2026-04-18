@@ -363,7 +363,6 @@ class TestEntityLinkerLinkEntities:
 
         # Simulate DB: both queries return all entities (source + others)
 
-
         session = AsyncMock()
 
         def _scalars(rows: list[Any]) -> MagicMock:
@@ -377,9 +376,9 @@ class TestEntityLinkerLinkEntities:
             return r
 
         call_returns = [
-            _scalars([ent_a]),       # fetch for source_a
-            _scalars([ent_b]),       # fetch excluding source_a
-            _rows([]),               # existing cross_ref pairs
+            _scalars([ent_a]),  # fetch for source_a
+            _scalars([ent_b]),  # fetch excluding source_a
+            _rows([]),  # existing cross_ref pairs
         ]
 
         async def _exec(_stmt: Any) -> Any:
@@ -526,7 +525,7 @@ class TestEntityLinkerResolve:
 
         call_returns = [
             _scalars([ent_a, ent_b]),  # _fetch_all_entities
-            _rows([]),                  # _fetch_existing_cross_ref_pairs
+            _rows([]),  # _fetch_existing_cross_ref_pairs
         ]
 
         async def _exec(_stmt: Any) -> Any:

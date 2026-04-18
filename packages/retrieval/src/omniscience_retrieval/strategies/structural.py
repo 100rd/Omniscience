@@ -70,9 +70,7 @@ class StructuralStrategy:
             seed_entities = await self._find_seed_entities(session, term)
 
             if not seed_entities:
-                logger.info(
-                    "structural: no entities matched %r; falling back to hybrid", term
-                )
+                logger.info("structural: no entities matched %r; falling back to hybrid", term)
                 return await self._fallback_fn(request)
 
             entity_ids = [e.id for e in seed_entities]
@@ -300,13 +298,8 @@ def _positional_scores(
     chunk_ids: set[uuid.UUID],
 ) -> dict[uuid.UUID, float]:
     """Assign scores: seed entity chunks get 1.0, neighbour chunks get 0.7."""
-    seed_chunk_ids: set[uuid.UUID] = {
-        e.chunk_id for e in seed_entities if e.chunk_id is not None
-    }
-    return {
-        cid: (1.0 if cid in seed_chunk_ids else 0.7)
-        for cid in chunk_ids
-    }
+    seed_chunk_ids: set[uuid.UUID] = {e.chunk_id for e in seed_entities if e.chunk_id is not None}
+    return {cid: (1.0 if cid in seed_chunk_ids else 0.7) for cid in chunk_ids}
 
 
 __all__ = ["HybridFallbackFn", "StructuralStrategy"]
