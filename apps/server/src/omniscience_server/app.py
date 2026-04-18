@@ -25,6 +25,8 @@ from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.logging import configure_logging
 from omniscience_core.queue import NatsConnection, ensure_streams
 from omniscience_core.telemetry import init_telemetry
+from omniscience_embeddings import create_embedding_provider
+from omniscience_retrieval import RetrievalService
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
@@ -77,17 +79,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await ensure_streams(nats_conn.jetstream)
     app.state.nats = nats_conn
 
-    # --- Ingestion worker (placeholder — not consuming yet) ---
-    # TODO(issue-6): Wire real connector registry, embedding provider, index writer,
-    # and session factory here, then call ``asyncio.create_task(worker.start())``.
-    # The worker is intentionally not started until all dependencies are available.
-    log.info("ingestion_worker_placeholder", status="not_started")
-    app.state.ingestion_worker = None
+    # --- Embedding provider ---
+    embedding_provider = create_embedding_provider(settings)
+    app.state.embedding_provider = embedding_provider
+    log.info(
+        "embedding_provider_ready",
+        provider=embedding_provider.provider_name,
+        model=embedding_provider.model_name,
+        dim=embedding_provider.dim,
+    )
+
+    # --- Retrieval service ---
+    retrieval_service = RetrievalService(
+        session_factory=session_factory,
+        embedding_provider=embedding_provider,
+    )
+    app.state.retrieval_service = retrieval_service
+    log.info("retrieval_service_ready")
 
     yield
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
+    await embedding_provider.close()
     await engine.dispose()
     await nats_conn.disconnect()
 
