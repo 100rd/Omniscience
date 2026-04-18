@@ -155,9 +155,7 @@ class IndexWriter:
         """
         async with self._session_factory() as session, session.begin():
             # Delete existing entities for this source (edges cascade via FK)
-            await session.execute(
-                delete(Entity).where(Entity.source_id == source_id)
-            )
+            await session.execute(delete(Entity).where(Entity.source_id == source_id))
 
             if not entities:
                 return

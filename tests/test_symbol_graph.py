@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from omniscience_core.db.models import Edge, Entity
@@ -391,18 +392,26 @@ class TestMigration:
     def test_migration_file_exists(self) -> None:
         import os
 
-        mig_path = (
-            "/Users/igor_gerasimov/Develop/multi-team-agentic/project/Omniscience"
-            "/packages/core/alembic/versions/0002_entities_edges.py"
+        mig_path = str(
+            Path(__file__).resolve().parent.parent
+            / "packages"
+            / "core"
+            / "alembic"
+            / "versions"
+            / "0002_entities_edges.py"
         )
         assert os.path.isfile(mig_path), "Migration file 0002_entities_edges.py not found"
 
     def test_migration_revision_chain(self) -> None:
         import importlib.util
 
-        mig_path = (
-            "/Users/igor_gerasimov/Develop/multi-team-agentic/project/Omniscience"
-            "/packages/core/alembic/versions/0002_entities_edges.py"
+        mig_path = str(
+            Path(__file__).resolve().parent.parent
+            / "packages"
+            / "core"
+            / "alembic"
+            / "versions"
+            / "0002_entities_edges.py"
         )
         spec = importlib.util.spec_from_file_location("mig_0002", mig_path)
         assert spec is not None
@@ -415,9 +424,13 @@ class TestMigration:
     def test_migration_has_upgrade(self) -> None:
         import importlib.util
 
-        mig_path = (
-            "/Users/igor_gerasimov/Develop/multi-team-agentic/project/Omniscience"
-            "/packages/core/alembic/versions/0002_entities_edges.py"
+        mig_path = str(
+            Path(__file__).resolve().parent.parent
+            / "packages"
+            / "core"
+            / "alembic"
+            / "versions"
+            / "0002_entities_edges.py"
         )
         spec = importlib.util.spec_from_file_location("mig_0002", mig_path)
         assert spec is not None

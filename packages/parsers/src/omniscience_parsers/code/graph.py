@@ -102,12 +102,52 @@ _DEFINITION_KEYWORDS: frozenset[str] = frozenset(
 
 _BUILTIN_NAMES: frozenset[str] = frozenset(
     {
-        "print", "len", "range", "int", "str", "float", "bool", "list",
-        "dict", "set", "tuple", "type", "super", "isinstance", "issubclass",
-        "hasattr", "getattr", "setattr", "delattr", "repr", "id", "hash",
-        "abs", "min", "max", "sum", "zip", "map", "filter", "sorted",
-        "enumerate", "iter", "next", "open", "input", "format", "round",
-        "hex", "oct", "bin", "chr", "ord", "any", "all", "vars", "dir",
+        "print",
+        "len",
+        "range",
+        "int",
+        "str",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "set",
+        "tuple",
+        "type",
+        "super",
+        "isinstance",
+        "issubclass",
+        "hasattr",
+        "getattr",
+        "setattr",
+        "delattr",
+        "repr",
+        "id",
+        "hash",
+        "abs",
+        "min",
+        "max",
+        "sum",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "enumerate",
+        "iter",
+        "next",
+        "open",
+        "input",
+        "format",
+        "round",
+        "hex",
+        "oct",
+        "bin",
+        "chr",
+        "ord",
+        "any",
+        "all",
+        "vars",
+        "dir",
     }
 )
 
@@ -120,12 +160,12 @@ _BUILTIN_NAMES: frozenset[str] = frozenset(
 def _entity_type_from_symbol(symbol: str, section: Section) -> str:
     """Infer entity type from the symbol FQN and section text heuristics."""
     text = section.text.lstrip()
-    if text.startswith("class ") or (
-        text.startswith("@") and "\nclass " in text
-    ):
+    if text.startswith("class ") or (text.startswith("@") and "\nclass " in text):
         return "class"
-    if text.startswith("def ") or text.startswith("async def ") or (
-        text.startswith("@") and ("\ndef " in text or "\nasync def " in text)
+    if (
+        text.startswith("def ")
+        or text.startswith("async def ")
+        or (text.startswith("@") and ("\ndef " in text or "\nasync def " in text))
     ):
         return "function"
     return "function"
@@ -323,8 +363,10 @@ def extract_symbol_graph(
     # ------------------------------------------------------------------
     # 4. Extract imports from the full source text (or joined section text).
     # ------------------------------------------------------------------
-    full_text = source_text.decode(errors="replace") if source_text else "\n".join(
-        s.text for s in parsed.sections
+    full_text = (
+        source_text.decode(errors="replace")
+        if source_text
+        else "\n".join(s.text for s in parsed.sections)
     )
     import_edges = _extract_python_imports(full_text, module_entity_id)
     edges.extend(import_edges)

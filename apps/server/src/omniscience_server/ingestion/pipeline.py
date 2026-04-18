@@ -240,9 +240,7 @@ class IngestionPipeline:
         )
 
         # Symbol graph extraction — optional, best-effort
-        await self._stage_graph(
-            event, fetched.content_bytes, document_id, bound
-        )
+        await self._stage_graph(event, fetched.content_bytes, document_id, bound)
 
         return ProcessResult(
             source_id=event.source_id,
@@ -428,9 +426,7 @@ class IngestionPipeline:
                 edges=len(edges),
             )
         except Exception as exc:
-            INGESTION_ERRORS_TOTAL.labels(
-                source_type=event.source_type, stage="graph"
-            ).inc()
+            INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="graph").inc()
             bound.warning("stage_graph_error", error=str(exc))
             # Swallow: graph extraction is non-critical
         finally:
