@@ -15,6 +15,10 @@ Real parsers/chunkers will be wired in when Wave 5 lands.
 IndexWriter note: ``IndexWriterProtocol`` is the interface contract for the
 parallel issue-11 implementation (``omniscience_index.IndexWriter``).
 The real integration happens when both branches are merged.
+
+Symbol graph note: After parse the pipeline optionally calls
+``extract_symbol_graph`` (omniscience_parsers) and persists entities and
+edges via ``IndexWriterProtocol.upsert_graph``.
 """
 
 from __future__ import annotations
@@ -97,6 +101,14 @@ class IndexWriterProtocol(Protocol):
 
     async def tombstone(self, source_id: UUID, external_id: str) -> bool: ...
 
+    async def upsert_graph(
+        self,
+        source_id: UUID,
+        document_id: UUID,
+        entities: list[Any],
+        edges: list[Any],
+    ) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Chunk placeholder (Wave 5 will replace with real ChunkData)
@@ -135,6 +147,11 @@ class IngestionPipeline:
     Each stage is isolated: a failure in one stage sets ``action="error"``
     on the result but does not raise; the caller (worker) decides how to
     ack/nak the underlying message.
+
+    Symbol graph extraction runs as an optional stage after parse.  It is
+    activated when both ``_graph_extractor`` is provided (non-None) and the
+    parsed document's language is supported.  Graph extraction failures are
+    logged and swallowed — they never abort indexing.
     """
 
     def __init__(
@@ -142,10 +159,15 @@ class IngestionPipeline:
         connector: Connector,
         embedding_provider: EmbeddingProvider,
         index_writer: IndexWriterProtocol,
+        graph_extractor: Any | None = None,
     ) -> None:
         self._connector = connector
         self._embedding_provider = embedding_provider
         self._index_writer = index_writer
+        # Optional callable:
+        #   graph_extractor(parsed_doc, source_bytes) -> (entities, edges)
+        # Matches the signature of omniscience_parsers.code.graph.extract_symbol_graph
+        self._graph_extractor = graph_extractor
 
     async def run(
         self,
@@ -213,9 +235,15 @@ class IngestionPipeline:
         parsed_text = await self._stage_parse(content_text, event.source_type, bound)
         chunks_text = await self._stage_chunk(parsed_text, event.source_type, bound)
         embeddings = await self._stage_embed(chunks_text, event.source_type, bound)
-        upsert_action = await self._stage_index(
+        upsert_action, document_id = await self._stage_index(
             event, fetched, content_text, chunks_text, embeddings, ingestion_run_id, bound
         )
+
+        # Symbol graph extraction — optional, best-effort
+        await self._stage_graph(
+            event, fetched.content_bytes, document_id, bound
+        )
+
         return ProcessResult(
             source_id=event.source_id,
             external_id=event.external_id,
@@ -324,7 +352,8 @@ class IngestionPipeline:
         embeddings: list[list[float]],
         ingestion_run_id: UUID | None,
         bound: Any,
-    ) -> str:
+    ) -> tuple[str, UUID]:
+        """Write chunks to the index.  Returns (action, document_id)."""
         t0 = time.monotonic()
         try:
             content_hash = _compute_content_hash(content_text)
@@ -348,17 +377,64 @@ class IngestionPipeline:
                 ingestion_run_id=ingestion_run_id,
             )
             action: str = result.action
+            document_id: UUID = result.document_id
             if action == "unchanged":
                 bound.debug("stage_index_unchanged")
             else:
                 bound.debug("stage_index_ok", action=action, chunks_written=result.chunks_written)
-            return action
+            return action, document_id
         except Exception as exc:
             INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="index").inc()
             bound.error("stage_index_error", error=str(exc))
             raise
         finally:
             INGESTION_STAGE_DURATION_SECONDS.labels(stage="index").observe(time.monotonic() - t0)
+
+    async def _stage_graph(
+        self,
+        event: DocumentChangeEvent,
+        content_bytes: bytes,
+        document_id: UUID,
+        bound: Any,
+    ) -> None:
+        """Extract symbol graph and persist entities/edges.  Best-effort: never raises."""
+        if self._graph_extractor is None:
+            return
+
+        t0 = time.monotonic()
+        try:
+            from omniscience_parsers import TreeSitterParser
+
+            parser = TreeSitterParser()
+            ext = "." + event.external_id.rsplit(".", 1)[-1] if "." in event.external_id else ""
+            if not parser.can_handle("", ext):
+                return
+
+            parsed = parser.parse(content_bytes, file_path=event.external_id)
+            entities, edges = self._graph_extractor(parsed, content_bytes)
+
+            if not entities and not edges:
+                return
+
+            await self._index_writer.upsert_graph(
+                source_id=event.source_id,
+                document_id=document_id,
+                entities=entities,
+                edges=edges,
+            )
+            bound.debug(
+                "stage_graph_ok",
+                entities=len(entities),
+                edges=len(edges),
+            )
+        except Exception as exc:
+            INGESTION_ERRORS_TOTAL.labels(
+                source_type=event.source_type, stage="graph"
+            ).inc()
+            bound.warning("stage_graph_error", error=str(exc))
+            # Swallow: graph extraction is non-critical
+        finally:
+            INGESTION_STAGE_DURATION_SECONDS.labels(stage="graph").observe(time.monotonic() - t0)
 
     async def _handle_delete(self, event: DocumentChangeEvent, bound: Any) -> ProcessResult:
         t0 = time.monotonic()

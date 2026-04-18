@@ -4,11 +4,11 @@ Each table has two schema variants:
 - ``*Create`` — input for INSERT operations (no server-generated fields)
 - ``*Read``   — output for SELECT operations (includes all fields)
 
-Note: ORM models use ``doc_metadata`` / ``chunk_metadata`` / ``run_errors``
-as Python attribute names to avoid the SQLAlchemy reserved name ``metadata``.
-The Pydantic schemas expose the canonical field names (``metadata``, ``errors``)
-and use ``model_validate`` with ``from_attributes=True`` plus field aliases
-where names diverge.
+Note: ORM models use ``doc_metadata`` / ``chunk_metadata`` / ``run_errors`` /
+``entity_metadata`` / ``edge_metadata`` as Python attribute names to avoid
+the SQLAlchemy reserved name ``metadata``.  The Pydantic schemas expose the
+canonical field names (``metadata``, ``errors``) and use ``model_validate``
+with ``from_attributes=True`` plus field aliases where names diverge.
 """
 
 from __future__ import annotations
@@ -230,6 +230,70 @@ class ApiTokenRead(BaseModel):
     is_active: bool
 
 
+# ---------------------------------------------------------------------------
+# Entities (symbol graph nodes)
+# ---------------------------------------------------------------------------
+
+
+class EntityCreate(BaseModel):
+    """Fields required when inserting a new entity."""
+
+    source_id: uuid.UUID
+    entity_type: str
+    name: str
+    display_name: str
+    chunk_id: uuid.UUID | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EntityRead(BaseModel):
+    """Full entity representation returned to callers.
+
+    The ORM attribute is ``entity_metadata``; exposed as ``metadata`` here.
+    """
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: uuid.UUID
+    source_id: uuid.UUID
+    entity_type: str
+    name: str
+    display_name: str
+    chunk_id: uuid.UUID | None
+    metadata: dict[str, Any] = Field(alias="entity_metadata", default_factory=dict)
+    created_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Edges (symbol graph relationships)
+# ---------------------------------------------------------------------------
+
+
+class EdgeCreate(BaseModel):
+    """Fields required when inserting a new edge."""
+
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    edge_type: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class EdgeRead(BaseModel):
+    """Full edge representation returned to callers.
+
+    The ORM attribute is ``edge_metadata``; exposed as ``metadata`` here.
+    """
+
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    id: uuid.UUID
+    source_entity_id: uuid.UUID
+    target_entity_id: uuid.UUID
+    edge_type: str
+    metadata: dict[str, Any] = Field(alias="edge_metadata", default_factory=dict)
+    created_at: datetime
+
+
 __all__ = [
     "ApiTokenCreate",
     "ApiTokenRead",
@@ -238,6 +302,10 @@ __all__ = [
     "DocumentCreate",
     "DocumentRead",
     "DocumentUpdate",
+    "EdgeCreate",
+    "EdgeRead",
+    "EntityCreate",
+    "EntityRead",
     "IngestionRunCreate",
     "IngestionRunRead",
     "IngestionRunUpdate",

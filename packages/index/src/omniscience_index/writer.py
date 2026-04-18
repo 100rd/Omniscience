@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from omniscience_core.db.models import Chunk, Document
+from omniscience_core.db.models import Chunk, Document, Edge, Entity
 from sqlalchemy import delete, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -131,6 +131,80 @@ class IndexWriter:
             )
             cursor = cast("CursorResult[Any]", await session.execute(stmt))
             return cursor.rowcount
+
+    async def upsert_graph(
+        self,
+        source_id: uuid.UUID,
+        document_id: uuid.UUID,
+        entities: list[Any],
+        edges: list[Any],
+    ) -> None:
+        """Persist symbol graph entities and edges for a document.
+
+        On re-ingestion of the same document the previous entities/edges for
+        this source are deleted and replaced.  This keeps the graph consistent
+        with the current document content.
+
+        ``entities`` are :class:`~omniscience_parsers.code.graph.ExtractedEntity`
+        instances; ``edges`` are
+        :class:`~omniscience_parsers.code.graph.ExtractedEdge` instances.
+
+        Cross-file edges (where the target entity does not yet exist) are
+        stored with a NULL target — they are resolved lazily in a later
+        graph-linking pass (not yet implemented; placeholder for v0.2).
+        """
+        async with self._session_factory() as session, session.begin():
+            # Delete existing entities for this source (edges cascade via FK)
+            await session.execute(
+                delete(Entity).where(Entity.source_id == source_id)
+            )
+
+            if not entities:
+                return
+
+            # Insert entities and build a name → ORM id mapping
+            name_to_orm_id: dict[str, uuid.UUID] = {}
+            for ext_ent in entities:
+                orm_id = ext_ent.id
+                ent = Entity(
+                    id=orm_id,
+                    source_id=source_id,
+                    entity_type=ext_ent.entity_type,
+                    name=ext_ent.name,
+                    display_name=ext_ent.display_name,
+                    chunk_id=None,  # chunk linking deferred to v0.2
+                    entity_metadata=ext_ent.metadata,
+                    created_at=datetime.now(UTC),
+                )
+                session.add(ent)
+                name_to_orm_id[ext_ent.name] = orm_id
+                # Also index by display name for intra-file call resolution
+                name_to_orm_id.setdefault(ext_ent.display_name, orm_id)
+
+            await session.flush()
+
+            # Insert edges — resolve target by name, drop unresolvable ones
+            for ext_edge in edges:
+                source_id_ent = ext_edge.source_entity_id
+                target_name = ext_edge.target_name
+                target_orm_id = name_to_orm_id.get(target_name)
+                if target_orm_id is None:
+                    # Cross-file target; skip for now (v0.2 will resolve these)
+                    continue
+                # Skip self-loops
+                if source_id_ent == target_orm_id:
+                    continue
+                edge = Edge(
+                    id=uuid.uuid4(),
+                    source_entity_id=source_id_ent,
+                    target_entity_id=target_orm_id,
+                    edge_type=ext_edge.edge_type,
+                    edge_metadata=ext_edge.metadata,
+                    created_at=datetime.now(UTC),
+                )
+                session.add(edge)
+
+            await session.flush()
 
     # ------------------------------------------------------------------
     # Private helpers — each kept < 30 lines

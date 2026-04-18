@@ -6,7 +6,8 @@ Multi-tenant namespacing is deferred to v0.2.
 Note: SQLAlchemy reserves the attribute name ``metadata`` on declarative
 classes (it refers to the ``MetaData`` object).  All ``metadata`` *columns*
 are mapped under the Python attribute ``doc_metadata`` / ``chunk_metadata`` /
-``run_errors``, while the underlying DB column retains the schema-canonical name.
+``run_errors`` / ``entity_metadata`` / ``edge_metadata``, while the
+underlying DB column retains the schema-canonical name.
 """
 
 from __future__ import annotations
@@ -113,6 +114,9 @@ class Source(Base):
     )
     ingestion_runs: Mapped[list[IngestionRun]] = relationship(
         "IngestionRun", back_populates="source", cascade="all, delete-orphan"
+    )
+    entities: Mapped[list[Entity]] = relationship(
+        "Entity", back_populates="source", cascade="all, delete-orphan"
     )
 
     __table_args__ = (
@@ -249,6 +253,7 @@ class Chunk(Base):
     ingestion_run: Mapped[IngestionRun | None] = relationship(
         "IngestionRun", back_populates="chunks"
     )
+    entities: Mapped[list[Entity]] = relationship("Entity", back_populates="chunk")
 
     __table_args__ = (
         Index("ix_chunks_document_ord", "document_id", "ord"),
@@ -292,11 +297,131 @@ class ApiToken(Base):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
+# ---------------------------------------------------------------------------
+# Entities (symbol graph nodes)
+# ---------------------------------------------------------------------------
+
+
+class Entity(Base):
+    """A named code entity extracted from a source document.
+
+    Represents a node in the symbol graph.  Each entity has a fully-qualified
+    name (FQN) such as ``mymodule.MyClass.my_method`` and a shorter display
+    name (``my_method``).  The ``entity_type`` field categorises the symbol
+    so graph queries can filter by kind (e.g. only classes, only functions).
+
+    Valid ``entity_type`` values (open-ended, extensible):
+      ``"function"``, ``"class"``, ``"module"``, ``"service"``, ``"resource"``
+    """
+
+    __tablename__ = "entities"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("sources.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    entity_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # FQN: e.g. "mymodule.MyClass.my_method"
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    # Short display name: e.g. "my_method"
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    chunk_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chunks.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # DB column is "metadata"; Python attribute avoids SA reserved name conflict.
+    entity_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    source: Mapped[Source] = relationship("Source", back_populates="entities")
+    chunk: Mapped[Chunk | None] = relationship("Chunk", back_populates="entities")
+    outgoing_edges: Mapped[list[Edge]] = relationship(
+        "Edge",
+        foreign_keys="Edge.source_entity_id",
+        back_populates="source_entity",
+        cascade="all, delete-orphan",
+    )
+    incoming_edges: Mapped[list[Edge]] = relationship(
+        "Edge",
+        foreign_keys="Edge.target_entity_id",
+        back_populates="target_entity",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_entities_source_type", "source_id", "entity_type"),
+        Index("ix_entities_name", "name"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Edges (symbol graph relationships)
+# ---------------------------------------------------------------------------
+
+
+class Edge(Base):
+    """A directed relationship between two :class:`Entity` nodes.
+
+    Represents an edge in the symbol graph.  The ``edge_type`` describes the
+    nature of the relationship:
+
+      ``"imports"``    — module A imports module/symbol B
+      ``"calls"``      — function/method A calls function/method B
+      ``"inherits"``   — class A inherits from class B
+      ``"defines"``    — module A defines entity B
+      ``"depends_on"`` — generic dependency (infra resources, services, etc.)
+    """
+
+    __tablename__ = "edges"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    source_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    target_entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("entities.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    edge_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # DB column is "metadata"; Python attribute avoids SA reserved name conflict.
+    edge_metadata: Mapped[dict[str, Any]] = mapped_column(
+        "metadata", JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    source_entity: Mapped[Entity] = relationship(
+        "Entity",
+        foreign_keys=[source_entity_id],
+        back_populates="outgoing_edges",
+    )
+    target_entity: Mapped[Entity] = relationship(
+        "Entity",
+        foreign_keys=[target_entity_id],
+        back_populates="incoming_edges",
+    )
+
+    __table_args__ = (Index("ix_edges_edge_type", "edge_type"),)
+
+
 __all__ = [
     "ApiToken",
     "Base",
     "Chunk",
     "Document",
+    "Edge",
+    "Entity",
     "IngestionRun",
     "IngestionRunStatus",
     "Source",
