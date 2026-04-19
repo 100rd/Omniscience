@@ -12,6 +12,7 @@ from omniscience_core.auth.tokens import (
     hash_token,
     verify_token,
 )
+from omniscience_core.auth.workspace import get_workspace_id, workspace_filter
 
 __all__ = [
     "Scope",
@@ -22,7 +23,9 @@ __all__ = [
     "delete_api_token",
     "generate_token",
     "get_current_token",
+    "get_workspace_id",
     "hash_token",
     "require_scope",
     "verify_token",
+    "workspace_filter",
 ]

@@ -22,6 +22,32 @@ from pydantic import BaseModel, ConfigDict, Field
 from omniscience_core.db.models import IngestionRunStatus, SourceStatus, SourceType
 
 # ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+
+class WorkspaceCreate(BaseModel):
+    """Fields required when creating a new workspace."""
+
+    name: str
+    display_name: str
+    settings: dict[str, Any] = Field(default_factory=dict)
+
+
+class WorkspaceRead(BaseModel):
+    """Full workspace representation returned to callers."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    name: str
+    display_name: str
+    settings: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 
@@ -213,6 +239,7 @@ class ApiTokenCreate(BaseModel):
     token_prefix: str
     scopes: list[str] = Field(default_factory=list)
     expires_at: datetime | None = None
+    workspace_id: uuid.UUID | None = None
 
 
 class ApiTokenRead(BaseModel):
@@ -224,6 +251,7 @@ class ApiTokenRead(BaseModel):
     name: str
     token_prefix: str
     scopes: list[str]
+    workspace_id: uuid.UUID | None
     created_at: datetime
     expires_at: datetime | None
     last_used_at: datetime | None
@@ -312,4 +340,6 @@ __all__ = [
     "SourceCreate",
     "SourceRead",
     "SourceUpdate",
+    "WorkspaceCreate",
+    "WorkspaceRead",
 ]

@@ -67,6 +67,7 @@ async def create_api_token(
     name: str,
     scopes: list[str],
     expires_at: datetime | None = None,
+    workspace_id: uuid.UUID | None = None,
 ) -> tuple[ApiTokenRead, str]:
     """Create a new API token, persist it, and return the read model + plaintext.
 
@@ -74,10 +75,11 @@ async def create_api_token(
     the stored hash.  The caller MUST surface it to the user immediately.
 
     Args:
-        session:    Active async SQLAlchemy session.
-        name:       Human-readable label for this token.
-        scopes:     List of scope strings (e.g. ["search", "sources:read"]).
-        expires_at: Optional expiry datetime (UTC).
+        session:      Active async SQLAlchemy session.
+        name:         Human-readable label for this token.
+        scopes:       List of scope strings (e.g. ["search", "sources:read"]).
+        expires_at:   Optional expiry datetime (UTC).
+        workspace_id: Optional workspace UUID to scope this token.
 
     Returns:
         (ApiTokenRead, plaintext) — read model for the new token and the
@@ -93,6 +95,7 @@ async def create_api_token(
         token_prefix=prefix,
         scopes=scopes,
         expires_at=expires_at,
+        workspace_id=workspace_id,
     )
 
     token_obj = ApiToken(
@@ -101,13 +104,20 @@ async def create_api_token(
         token_prefix=create_schema.token_prefix,
         scopes=create_schema.scopes,
         expires_at=create_schema.expires_at,
+        workspace_id=create_schema.workspace_id,
     )
     session.add(token_obj)
     await session.flush()
     await session.refresh(token_obj)
 
     read_model = ApiTokenRead.model_validate(token_obj)
-    log.info("token_created", token_prefix=prefix, name=name, scopes=scopes)
+    log.info(
+        "token_created",
+        token_prefix=prefix,
+        name=name,
+        scopes=scopes,
+        workspace_id=str(workspace_id) if workspace_id else None,
+    )
     return read_model, plaintext
 
 
