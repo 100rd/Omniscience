@@ -42,6 +42,19 @@ class Settings(BaseSettings):
         description="Base URL for the Ollama API (used when embedding_provider='ollama').",
     )
 
+    # --- Re-ranker ---
+    reranker_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, a cross-encoder re-ranker scores candidate chunks after "
+            "initial retrieval and re-orders them before the final top-k slice."
+        ),
+    )
+    reranker_model: str = Field(
+        default="nomic-embed-text",
+        description="Ollama model used by OllamaReranker for embedding-based scoring.",
+    )
+
     # --- Observability ---
     log_level: str = Field(
         default="INFO",

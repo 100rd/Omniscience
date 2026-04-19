@@ -23,6 +23,7 @@ from .models import (
     SourceInfo,
 )
 from .ranking import reciprocal_rank_fusion
+from .reranker import NoopReranker, Reranker
 from .strategies.router import StrategyRouter
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,9 @@ logger = logging.getLogger(__name__)
 # A WARNING is still emitted during the transition period so existing callers
 # can update their log-monitoring expectations.
 _NON_HYBRID_STRATEGIES = frozenset({"keyword", "structural", "auto"})
+
+# Number of candidates forwarded to the re-ranker before slicing to top-k.
+_RERANK_CANDIDATE_LIMIT = 50
 
 
 class RetrievalService:
@@ -46,20 +50,34 @@ class RetrievalService:
 
     The hybrid path is implemented directly on this class and passed as a
     callable to ``StrategyRouter`` to avoid circular imports.
+
+    Optional re-ranking:
+        When *reranker* is supplied (and is not a :class:`~.reranker.NoopReranker`),
+        the service widens the initial candidate set to
+        ``_RERANK_CANDIDATE_LIMIT`` results, scores each candidate against the
+        query, and then returns the top-k by re-ranked score.  This improves
+        precision at the cost of one extra embedding round-trip.
     """
 
     def __init__(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         embedding_provider: EmbeddingProvider,
+        reranker: Reranker | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_provider = embedding_provider
+        self._reranker: Reranker = reranker if reranker is not None else NoopReranker()
         self._router = StrategyRouter(
             session_factory=session_factory,
             embedding_provider=embedding_provider,
             hybrid_fn=self._hybrid_search,
         )
+
+    @property
+    def _reranking_active(self) -> bool:
+        """True when an active (non-noop) reranker is configured."""
+        return not isinstance(self._reranker, NoopReranker)
 
     async def search(self, request: SearchRequest) -> SearchResult:
         """Execute the appropriate retrieval strategy and return top-k results."""
@@ -68,19 +86,66 @@ class RetrievalService:
                 "retrieval_strategy=%r dispatching to dedicated implementation",
                 request.retrieval_strategy,
             )
-        return await self._router.execute(request)
+
+        result = await self._router.execute(request)
+
+        # Re-rank if a non-noop reranker is configured.
+        if self._reranking_active:
+            result = await self._apply_reranker(request, result)
+
+        return result
+
+    # ------------------------------------------------------------------
+    # Re-ranking
+    # ------------------------------------------------------------------
+
+    async def _apply_reranker(self, request: SearchRequest, result: SearchResult) -> SearchResult:
+        """Re-score *result.hits* against *request.query* and return top-k."""
+        candidates = result.hits[:_RERANK_CANDIDATE_LIMIT]
+        if not candidates:
+            return result
+
+        texts = [hit.text for hit in candidates]
+        scores = await self._reranker.rerank(request.query, texts)
+
+        # Pair each hit with its new score and sort descending.
+        rescored = sorted(
+            zip(scores, candidates, strict=True),
+            key=lambda pair: pair[0],
+            reverse=True,
+        )
+
+        top_k_hits = [
+            hit.model_copy(update={"score": score}) for score, hit in rescored[: request.top_k]
+        ]
+
+        logger.debug(
+            "reranker applied: candidates=%d top_k=%d",
+            len(candidates),
+            len(top_k_hits),
+        )
+        return SearchResult(hits=top_k_hits, query_stats=result.query_stats)
 
     # ------------------------------------------------------------------
     # Hybrid search (vector + BM25 + RRF)
     # ------------------------------------------------------------------
 
     async def _hybrid_search(self, request: SearchRequest) -> SearchResult:
-        """Run hybrid retrieval: pgvector HNSW + tsvector BM25, merged via RRF."""
+        """Run hybrid retrieval: pgvector HNSW + tsvector BM25, merged via RRF.
+
+        When a reranker is active, the initial hit set is widened to
+        ``_RERANK_CANDIDATE_LIMIT`` so the reranker has enough candidates to
+        work with before the final top-k slice.
+        """
         start = time.monotonic()
         query_vector = await self._embed_query(request.query)
 
+        # When reranking is active, widen the candidate pool so the reranker
+        # has enough hits to re-order meaningfully before the top-k slice.
+        hit_limit = _RERANK_CANDIDATE_LIMIT if self._reranking_active else request.top_k
+
         async with self._session_factory() as session:
-            oversample = request.top_k * 2
+            oversample = hit_limit * 2
 
             vector_rows = await self._vector_search(session, query_vector, oversample)
             text_rows = await self._text_search(session, request.query, oversample)
@@ -96,7 +161,7 @@ class RetrievalService:
 
             rows = await self._fetch_enriched(session, request, chunk_ids)
 
-        hits = self._build_hits(rows, scores, request.top_k)
+        hits = self._build_hits(rows, scores, hit_limit)
         duration_ms = (time.monotonic() - start) * 1000.0
 
         return SearchResult(

@@ -1147,6 +1147,7 @@ dependencies = [
     { name = "httpx" },
     { name = "omniscience-core" },
     { name = "pydantic" },
+    { name = "sqlalchemy" },
     { name = "watchfiles" },
 ]
 
@@ -1155,6 +1156,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "pydantic", specifier = ">=2.7.0" },
+    { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "watchfiles", specifier = ">=0.21.0" },
 ]
 
@@ -1274,6 +1276,7 @@ version = "0.1.0"
 source = { editable = "packages/retrieval" }
 dependencies = [
     { name = "asyncpg" },
+    { name = "httpx" },
     { name = "omniscience-core" },
     { name = "omniscience-embeddings" },
     { name = "pgvector" },
@@ -1283,6 +1286,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
     { name = "pgvector", specifier = ">=0.3.0" },

@@ -21,9 +21,9 @@ Registry::
     from omniscience_connectors import ConnectorRegistry, get_connector
 
 Built-in connectors (``git``, ``fs``, ``confluence``, ``notion``, ``slack``,
-``jira``, ``database``, ``k8s-agentic``) are registered below and available
-immediately on import.  Third-party connectors call :func:`get_connector`
-after registering against the shared registry.
+``jira``, ``k8s-agentic``) are registered below and available immediately on
+import.  Third-party connectors call :func:`get_connector` after registering
+against the shared registry.
 """
 
 from omniscience_connectors.agentic import (
@@ -63,8 +63,8 @@ _registry.register(ConfluenceConnector)
 _registry.register(NotionConnector)
 _registry.register(SlackConnector)
 _registry.register(JiraConnector)
-_registry.register(DatabaseConnector)
 _registry.register(K8sAgenticConnector)
+_registry.register(DatabaseConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry

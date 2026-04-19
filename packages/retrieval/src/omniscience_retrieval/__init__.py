@@ -14,12 +14,16 @@ from .models import (
     SearchResult,
     SourceInfo,
 )
+from .reranker import NoopReranker, OllamaReranker, Reranker
 from .search import RetrievalService
 
 __all__ = [
     "ChunkLineage",
     "Citation",
+    "NoopReranker",
+    "OllamaReranker",
     "QueryStats",
+    "Reranker",
     "RetrievalService",
     "SearchHit",
     "SearchRequest",
