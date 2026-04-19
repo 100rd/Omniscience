@@ -43,6 +43,7 @@ from omniscience_connectors.base import (
     WebhookPayload,
 )
 from omniscience_connectors.confluence.connector import ConfluenceConnector
+from omniscience_connectors.database.connector import DatabaseConnector
 from omniscience_connectors.fs.connector import FsConnector
 from omniscience_connectors.git.connector import GitConnector
 from omniscience_connectors.jira.connector import JiraConnector
@@ -63,6 +64,7 @@ _registry.register(NotionConnector)
 _registry.register(SlackConnector)
 _registry.register(JiraConnector)
 _registry.register(K8sAgenticConnector)
+_registry.register(DatabaseConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -73,6 +75,7 @@ __all__ = [
     "ConfluenceConnector",
     "Connector",
     "ConnectorRegistry",
+    "DatabaseConnector",
     "DocumentRef",
     "FetchedDocument",
     "FsConnector",
