@@ -69,6 +69,33 @@ class Settings(BaseSettings):
         description="Ollama model used by OllamaReranker for embedding-based scoring.",
     )
 
+    # --- Federation ---
+    federation_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, search queries are fanned out to all enabled remote "
+            "Omniscience instances listed in ``federation_instances``, and "
+            "results are merged before being returned to the caller."
+        ),
+    )
+    federation_instances: str = Field(
+        default="",
+        description=(
+            "JSON array of remote Omniscience instance descriptors.  Each "
+            "element must be an object with keys ``name`` (str), ``url`` (str), "
+            "``token`` (str), and optionally ``enabled`` (bool, default true) "
+            "and ``priority`` (int, default 0).  Example: "
+            '[{"name": "eu-cluster", "url": "https://eu.example.com", '
+            '"token": "tok_abc123"}]'
+        ),
+    )
+    federation_timeout_seconds: int = Field(
+        default=5,
+        ge=1,
+        le=300,
+        description="Per-remote HTTP timeout (seconds) used during federated search fan-out.",
+    )
+
     # --- Observability ---
     log_level: str = Field(
         default="INFO",

@@ -67,6 +67,7 @@ ignore = [
     "S101",  # assert is the standard pytest assertion mechanism
     "S105",  # Hardcoded password string — test fixtures use placeholder values
     "S106",  # Hardcoded password in function argument — test fixtures only
+    "S107",  # Hardcoded password in function default — test fixtures only
     "S108",  # Probable insecure usage of temp file — test-only temp paths
     "S306",  # Insecure mktemp — test-only, we unlink immediately
     "S603",  # subprocess call — test helpers run git in controlled fixtures

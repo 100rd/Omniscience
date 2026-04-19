@@ -50,7 +50,12 @@ class SourceInfo(BaseModel):
 
 
 class SearchHit(BaseModel):
-    """A single result returned by the retrieval service."""
+    """A single result returned by the retrieval service.
+
+    The ``source_instance`` field is ``None`` for results from the local
+    instance and set to the :attr:`~FederatedInstance.name` of the remote
+    peer for hits that arrived via federation.
+    """
 
     chunk_id: uuid.UUID
     document_id: uuid.UUID
@@ -60,6 +65,13 @@ class SearchHit(BaseModel):
     citation: Citation
     lineage: ChunkLineage
     metadata: dict[str, Any]
+    source_instance: str | None = Field(
+        default=None,
+        description=(
+            "Name of the Omniscience instance that produced this hit.  "
+            "None for the local instance; set to the peer name for federated results."
+        ),
+    )
 
 
 class QueryStats(BaseModel):
