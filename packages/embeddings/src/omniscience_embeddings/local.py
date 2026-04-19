@@ -33,7 +33,7 @@ _MODEL_DIMS: dict[str, int] = {
 def _require_sentence_transformers() -> Any:
     """Import and return the SentenceTransformer class, raising a clear error if absent."""
     try:
-        from sentence_transformers import SentenceTransformer  # type: ignore[import-untyped]
+        from sentence_transformers import SentenceTransformer  # type: ignore[import-not-found]
 
         return SentenceTransformer
     except ImportError as exc:
@@ -174,4 +174,5 @@ class LocalEmbeddingProvider:
         )
         # sentence-transformers returns ndarray of shape (N, dim)
         arr = np.asarray(raw, dtype=np.float32)
-        return arr.tolist()
+        result: list[list[float]] = arr.tolist()
+        return result
