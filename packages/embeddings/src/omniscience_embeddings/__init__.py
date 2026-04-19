@@ -7,6 +7,8 @@ Supported backends
 ------------------
 * **Ollama** (default) — local or self-hosted, privacy-preserving
 * **OpenAI** — ``text-embedding-3-small`` / ``text-embedding-3-large``
+* **Voyage** — ``voyage-3`` / ``voyage-3-lite`` / ``voyage-code-3``
+* **Cohere** — ``embed-english-v3.0`` / ``embed-multilingual-v3.0`` / ``embed-english-light-v3.0``
 
 Example::
 
@@ -19,13 +21,17 @@ Example::
 """
 
 from omniscience_embeddings.base import EmbeddingProvider
+from omniscience_embeddings.cohere import CohereEmbeddingProvider
 from omniscience_embeddings.factory import create_embedding_provider
 from omniscience_embeddings.ollama import OllamaEmbeddingProvider
 from omniscience_embeddings.openai import OpenAIEmbeddingProvider
+from omniscience_embeddings.voyage import VoyageEmbeddingProvider
 
 __all__ = [
+    "CohereEmbeddingProvider",
     "EmbeddingProvider",
     "OllamaEmbeddingProvider",
     "OpenAIEmbeddingProvider",
+    "VoyageEmbeddingProvider",
     "create_embedding_provider",
 ]
