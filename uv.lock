@@ -16,6 +16,7 @@ members = [
     "omniscience-embeddings",
     "omniscience-index",
     "omniscience-parsers",
+    "omniscience-plugin-example",
     "omniscience-retrieval",
     "omniscience-server",
 ]
@@ -1078,6 +1079,7 @@ dev = [
     { name = "omniscience-embeddings" },
     { name = "omniscience-index" },
     { name = "omniscience-parsers" },
+    { name = "omniscience-plugin-example" },
     { name = "omniscience-retrieval" },
     { name = "omniscience-server" },
     { name = "pre-commit" },
@@ -1107,6 +1109,7 @@ dev = [
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
     { name = "omniscience-index", editable = "packages/index" },
     { name = "omniscience-parsers", editable = "packages/parsers" },
+    { name = "omniscience-plugin-example", editable = "examples/plugin-example" },
     { name = "omniscience-retrieval", editable = "packages/retrieval" },
     { name = "omniscience-server", editable = "apps/server" },
     { name = "pre-commit", specifier = ">=3.7.1" },
@@ -1268,6 +1271,21 @@ requires-dist = [
     { name = "tree-sitter-python", specifier = ">=0.25.0" },
     { name = "tree-sitter-rust", specifier = ">=0.24.2" },
     { name = "tree-sitter-typescript", specifier = ">=0.23.2" },
+]
+
+[[package]]
+name = "omniscience-plugin-example"
+version = "0.1.0"
+source = { editable = "examples/plugin-example" }
+dependencies = [
+    { name = "omniscience-connectors" },
+    { name = "pydantic" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "omniscience-connectors", editable = "packages/connectors" },
+    { name = "pydantic", specifier = ">=2.7.0" },
 ]
 
 [[package]]
