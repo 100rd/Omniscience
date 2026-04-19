@@ -9,6 +9,7 @@ import typer
 from omniscience_cli.client import OmniscienceClientError
 from omniscience_cli.commands import mcp, sources, tokens
 from omniscience_cli.commands.ops import _check_api, _check_config, _check_embeddings, _check_nats
+from omniscience_cli.commands.plugins import app as plugins_app
 from omniscience_cli.commands.search import _make_client as _search_client
 from omniscience_cli.output import (
     abort,
@@ -29,6 +30,7 @@ app = typer.Typer(
 app.add_typer(sources.app, name="sources")
 app.add_typer(tokens.app, name="tokens")
 app.add_typer(mcp.app, name="mcp")
+app.add_typer(plugins_app, name="plugins")
 
 
 @app.command("search")

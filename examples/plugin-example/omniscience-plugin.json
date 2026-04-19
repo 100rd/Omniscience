@@ -1,0 +1,11 @@
+{
+  "name": "example",
+  "version": "0.1.0",
+  "connector_type": "example",
+  "description": "Minimal example connector plugin demonstrating the Omniscience plugin API",
+  "author": "Example Author <author@example.com>",
+  "homepage": "https://github.com/example/omniscience-plugin-example",
+  "min_omniscience_version": "0.1.0",
+  "capabilities": [],
+  "config_schema_ref": "omniscience_plugin_example.connector:ExampleConfig"
+}
