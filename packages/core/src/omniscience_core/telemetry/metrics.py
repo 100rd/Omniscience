@@ -33,3 +33,24 @@ REQUEST_IN_PROGRESS: Gauge = Gauge(
     documentation="Number of HTTP requests currently in flight.",
     labelnames=["method", "path"],
 )
+
+# ---------------------------------------------------------------------------
+# Freshness SLO metrics
+# ---------------------------------------------------------------------------
+
+# Per-source age in seconds since last successful sync.
+# Labels: source_id, source_name
+FRESHNESS_AGE_SECONDS: Gauge = Gauge(
+    name="omniscience_source_freshness_age_seconds",
+    documentation=(
+        "Age in seconds since the source was last successfully synced. "
+        "Set to a large sentinel value (1e15) when the source has never been synced."
+    ),
+    labelnames=["source_id", "source_name"],
+)
+
+# Count of sources currently violating their freshness SLO.
+FRESHNESS_STALE_TOTAL: Gauge = Gauge(
+    name="omniscience_source_stale_total",
+    documentation="Number of sources currently exceeding their freshness_sla_seconds budget.",
+)
