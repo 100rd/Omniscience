@@ -3,7 +3,7 @@
 Covers:
 - OllamaEmbeddingProvider: happy path, batching, retry, dimension validation
 - OpenAIEmbeddingProvider: happy path, batching, dimension validation
-- Factory routing: ollama, openai, unknown provider
+- Factory routing: ollama, openai, voyage, cohere, unknown provider
 - close() cleanup
 """
 
@@ -16,9 +16,11 @@ import pytest
 from omniscience_core.config import Settings
 from omniscience_core.errors import ConfigError
 from omniscience_embeddings import (
+    CohereEmbeddingProvider,
     EmbeddingProvider,
     OllamaEmbeddingProvider,
     OpenAIEmbeddingProvider,
+    VoyageEmbeddingProvider,
     create_embedding_provider,
 )
 
@@ -394,8 +396,24 @@ def test_factory_creates_openai(monkeypatch: pytest.MonkeyPatch) -> None:
     assert provider.provider_name == "openai"
 
 
-def test_factory_unknown_provider_raises() -> None:
+def test_factory_creates_voyage(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOYAGE_API_KEY", "pa-test")
     settings = Settings(embedding_provider="voyage")
+    provider = create_embedding_provider(settings)
+    assert isinstance(provider, VoyageEmbeddingProvider)
+    assert provider.provider_name == "voyage"
+
+
+def test_factory_creates_cohere(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("COHERE_API_KEY", "co-test")
+    settings = Settings(embedding_provider="cohere")
+    provider = create_embedding_provider(settings)
+    assert isinstance(provider, CohereEmbeddingProvider)
+    assert provider.provider_name == "cohere"
+
+
+def test_factory_unknown_provider_raises() -> None:
+    settings = Settings(embedding_provider="unknown-provider-xyz")
     with pytest.raises(ConfigError, match="Unknown embedding provider"):
         create_embedding_provider(settings)
 

@@ -41,6 +41,20 @@ class Settings(BaseSettings):
         default="http://localhost:11434",
         description="Base URL for the Ollama API (used when embedding_provider='ollama').",
     )
+    voyage_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Voyage AI API key (used when embedding_provider='voyage'). "
+            "Falls back to the VOYAGE_API_KEY environment variable when None."
+        ),
+    )
+    cohere_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Cohere API key (used when embedding_provider='cohere'). "
+            "Falls back to the COHERE_API_KEY environment variable when None."
+        ),
+    )
 
     # --- Re-ranker ---
     reranker_enabled: bool = Field(
