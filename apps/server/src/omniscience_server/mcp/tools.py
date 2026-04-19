@@ -8,6 +8,7 @@ FastMCP instance.
 
 from __future__ import annotations
 
+import math
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -21,6 +22,9 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
+
+# JSON-safe sentinel used instead of +inf for sources that have never synced.
+_INFINITY_JSON_SAFE: float = 1e15
 
 
 # ---------------------------------------------------------------------------
@@ -146,12 +150,26 @@ async def mcp_list_sources(app: FastAPI) -> dict[str, Any]:
     for src in sources:
         sla = src.freshness_sla_seconds
         last_sync = src.last_sync_at
+
+        # Inline staleness calculation (avoids extra DB round-trip per source).
         is_stale = False
-        if sla is not None and last_sync is not None:
-            elapsed = (now - last_sync.replace(tzinfo=UTC)).total_seconds()
-            is_stale = elapsed > sla
-        elif sla is not None and last_sync is None:
-            is_stale = True
+        age_seconds: float = _INFINITY_JSON_SAFE
+        staleness_margin_seconds: float | None = None
+
+        if last_sync is not None:
+            sync_aware = last_sync if last_sync.tzinfo else last_sync.replace(tzinfo=UTC)
+            age_seconds = (now - sync_aware).total_seconds()
+
+        if sla is not None:
+            if last_sync is None:
+                is_stale = True
+                staleness_margin_seconds = _INFINITY_JSON_SAFE
+            else:
+                margin = age_seconds - sla
+                is_stale = age_seconds > sla
+                staleness_margin_seconds = (
+                    margin if not math.isinf(margin) else _INFINITY_JSON_SAFE
+                )
 
         source_list.append(
             {
@@ -162,6 +180,8 @@ async def mcp_list_sources(app: FastAPI) -> dict[str, Any]:
                 "last_sync_at": last_sync.isoformat() if last_sync else None,
                 "freshness_sla_seconds": sla,
                 "is_stale": is_stale,
+                "age_seconds": age_seconds,
+                "staleness_margin_seconds": staleness_margin_seconds,
                 "indexed_document_count": counts.get(src.id, 0),
             }
         )
@@ -226,6 +246,27 @@ async def mcp_source_stats(app: FastAPI, source_id: str) -> dict[str, Any]:
             "errors": last_run.run_errors,
         }
 
+    # Compute freshness fields inline.
+    now = datetime.now(tz=UTC)
+    sla = src.freshness_sla_seconds
+    last_sync = src.last_sync_at
+    is_stale = False
+    age_seconds: float = _INFINITY_JSON_SAFE
+    staleness_margin_seconds: float | None = None
+
+    if last_sync is not None:
+        sync_aware = last_sync if last_sync.tzinfo else last_sync.replace(tzinfo=UTC)
+        age_seconds = (now - sync_aware).total_seconds()
+
+    if sla is not None:
+        if last_sync is None:
+            is_stale = True
+            staleness_margin_seconds = _INFINITY_JSON_SAFE
+        else:
+            margin = age_seconds - sla
+            is_stale = age_seconds > sla
+            staleness_margin_seconds = margin if not math.isinf(margin) else _INFINITY_JSON_SAFE
+
     return {
         "id": str(src.id),
         "name": src.name,
@@ -234,7 +275,10 @@ async def mcp_source_stats(app: FastAPI, source_id: str) -> dict[str, Any]:
         "last_sync_at": src.last_sync_at.isoformat() if src.last_sync_at else None,
         "last_error": src.last_error,
         "last_error_at": src.last_error_at.isoformat() if src.last_error_at else None,
-        "freshness_sla_seconds": src.freshness_sla_seconds,
+        "freshness_sla_seconds": sla,
+        "is_stale": is_stale,
+        "age_seconds": age_seconds,
+        "staleness_margin_seconds": staleness_margin_seconds,
         "indexed_document_count": doc_count,
         "indexed_chunk_count": chunk_count,
         "last_ingestion_run": last_run_dict,

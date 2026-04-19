@@ -6,6 +6,7 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - initialises OpenTelemetry
   - connects to Postgres, NATS JetStream, embedding provider
   - starts the ingestion worker (consumes document change events)
+  - starts the freshness worker (periodic SLO evaluation + Prometheus metrics)
   - mounts the Prometheus metrics ASGI app at /metrics
   - mounts the MCP ASGI app at /mcp (streamable-http transport)
   - adds TracingMiddleware
@@ -35,6 +36,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
 
+from omniscience_server.freshness_worker import FreshnessWorker
 from omniscience_server.ingestion.events import DocumentChangeEvent
 from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
@@ -124,10 +126,26 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.ingestion_worker = worker
     log.info("ingestion_worker_started")
 
+    # --- Freshness worker ---
+    freshness_worker = FreshnessWorker(
+        session_factory=session_factory,
+        interval_seconds=getattr(settings, "freshness_check_interval_seconds", 60.0),
+    )
+    freshness_task = asyncio.create_task(freshness_worker.start())
+    app.state.freshness_worker = freshness_worker
+    log.info(
+        "freshness_worker_started",
+        interval_seconds=freshness_worker._interval,
+    )
+
     yield
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
+
+    freshness_worker.stop()
+    freshness_task.cancel()
+
     await worker.stop()
     worker_task.cancel()
     await embedding_provider.close()
