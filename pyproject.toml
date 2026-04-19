@@ -10,6 +10,7 @@ dependencies = [
 ]
 
 [tool.uv.workspace]
+exclude = ["apps/admin"]
 members = [
     "apps/*",
     "packages/*",
