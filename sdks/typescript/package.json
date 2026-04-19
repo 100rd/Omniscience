@@ -1,0 +1,56 @@
+{
+  "name": "@omniscience/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for Omniscience — REST and MCP transports",
+  "type": "module",
+  "license": "Apache-2.0",
+  "author": "Omniscience Contributors",
+  "homepage": "https://github.com/omniscience-ai/omniscience",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/omniscience-ai/omniscience"
+  },
+  "keywords": [
+    "omniscience",
+    "mcp",
+    "knowledge-retrieval",
+    "sdk",
+    "typescript"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./rest": {
+      "import": "./dist/rest.js",
+      "types": "./dist/rest.d.ts"
+    },
+    "./mcp": {
+      "import": "./dist/mcp.js",
+      "types": "./dist/mcp.d.ts"
+    },
+    "./types": {
+      "import": "./dist/types.js",
+      "types": "./dist/types.d.ts"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.5.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
