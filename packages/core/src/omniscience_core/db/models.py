@@ -75,6 +75,44 @@ class Base(DeclarativeBase):
 
 
 # ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+
+class Workspace(Base):
+    """Multi-tenant workspace — top-level isolation boundary.
+
+    Every resource (sources, tokens, etc.) can be scoped to a workspace.
+    The ``default`` workspace is created automatically on first migration
+    and acts as the implicit workspace for tokens that pre-date multi-tenancy.
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(Text, nullable=False)
+    settings: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb"), default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    api_tokens: Mapped[list[ApiToken]] = relationship(
+        "ApiToken", back_populates="workspace", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (Index("ix_workspaces_name", "name"),)
+
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 
@@ -280,7 +318,7 @@ class Chunk(Base):
 
 
 class ApiToken(Base):
-    """Minimal API token model for single-user MVP."""
+    """API token scoped to an optional workspace."""
 
     __tablename__ = "api_tokens"
 
@@ -289,12 +327,21 @@ class ApiToken(Base):
     hashed_token: Mapped[str] = mapped_column(Text, nullable=False)
     token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    workspace: Mapped[Workspace | None] = relationship("Workspace", back_populates="api_tokens")
+
+    __table_args__ = (Index("ix_api_tokens_workspace_id", "workspace_id"),)
 
 
 # ---------------------------------------------------------------------------
@@ -427,4 +474,5 @@ __all__ = [
     "Source",
     "SourceStatus",
     "SourceType",
+    "Workspace",
 ]
