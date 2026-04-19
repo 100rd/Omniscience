@@ -9,6 +9,7 @@ Supported backends
 * **OpenAI** — ``text-embedding-3-small`` / ``text-embedding-3-large``
 * **Voyage** — ``voyage-3`` / ``voyage-3-lite`` / ``voyage-code-3``
 * **Cohere** — ``embed-english-v3.0`` / ``embed-multilingual-v3.0`` / ``embed-english-light-v3.0``
+* **Local** — sentence-transformers in-process, fully air-gapped
 
 Example::
 
@@ -23,6 +24,7 @@ Example::
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_embeddings.cohere import CohereEmbeddingProvider
 from omniscience_embeddings.factory import create_embedding_provider
+from omniscience_embeddings.local import LocalEmbeddingProvider
 from omniscience_embeddings.ollama import OllamaEmbeddingProvider
 from omniscience_embeddings.openai import OpenAIEmbeddingProvider
 from omniscience_embeddings.voyage import VoyageEmbeddingProvider
@@ -30,6 +32,7 @@ from omniscience_embeddings.voyage import VoyageEmbeddingProvider
 __all__ = [
     "CohereEmbeddingProvider",
     "EmbeddingProvider",
+    "LocalEmbeddingProvider",
     "OllamaEmbeddingProvider",
     "OpenAIEmbeddingProvider",
     "VoyageEmbeddingProvider",

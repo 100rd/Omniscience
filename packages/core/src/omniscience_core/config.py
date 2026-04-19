@@ -35,7 +35,10 @@ class Settings(BaseSettings):
     # --- Embeddings ---
     embedding_provider: str = Field(
         default="ollama",
-        description="Embedding backend: 'ollama', 'openai', 'voyage', or 'cohere'.",
+        description=(
+            "Embedding backend: 'ollama', 'openai', 'voyage', 'cohere', or 'local'. "
+            "Use 'local' for fully air-gapped deployments (requires sentence-transformers)."
+        ),
     )
     ollama_url: str = Field(
         default="http://localhost:11434",
@@ -53,6 +56,33 @@ class Settings(BaseSettings):
         description=(
             "Cohere API key (used when embedding_provider='cohere'). "
             "Falls back to the COHERE_API_KEY environment variable when None."
+        ),
+    )
+
+    # --- Local / Air-gapped Embeddings ---
+    local_model_name: str = Field(
+        default="all-MiniLM-L6-v2",
+        description=(
+            "sentence-transformers model ID or local directory path used when "
+            "embedding_provider='local'.  The model must be pre-downloaded for "
+            "truly air-gapped deployments."
+        ),
+    )
+    local_model_device: str = Field(
+        default="cpu",
+        description=(
+            "Torch device for the local embedding model: 'cpu', 'cuda', or 'mps'. "
+            "Defaults to 'cpu' for maximum portability in air-gapped environments."
+        ),
+    )
+
+    # --- Query Rewriting ---
+    query_rewriting_enabled: bool = Field(
+        default=False,
+        description=(
+            "When True, search queries are rewritten and expanded before retrieval "
+            "to improve recall.  Uses heuristic expansion in v0.4 MVP; a local LLM "
+            "can be plugged in via QueryRewriter(model_path=...) in later versions."
         ),
     )
 
