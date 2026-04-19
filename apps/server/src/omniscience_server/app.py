@@ -31,6 +31,8 @@ from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
 from omniscience_index import IndexWriter
 from omniscience_retrieval import RetrievalService
+from omniscience_retrieval.federation import FederatedSearch
+from omniscience_retrieval.federation_config import FederationConfig
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
@@ -96,12 +98,33 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     # --- Retrieval service ---
-    retrieval_service = RetrievalService(
+    local_retrieval = RetrievalService(
         session_factory=session_factory,
         embedding_provider=embedding_provider,
     )
+
+    # --- Federation (optional) ---
+    if settings.federation_enabled:
+        fed_config = FederationConfig.from_json(settings.federation_instances)
+        fed_config = fed_config.model_copy(
+            update={"timeout_seconds": float(settings.federation_timeout_seconds)}
+        )
+        retrieval_service: RetrievalService | FederatedSearch = FederatedSearch(
+            local_service=local_retrieval,
+            config=fed_config,
+        )
+        app.state.federated_search = retrieval_service
+        log.info(
+            "federation_enabled",
+            peers=len(fed_config.enabled_instances),
+            timeout_s=fed_config.timeout_seconds,
+        )
+    else:
+        retrieval_service = local_retrieval
+        app.state.federated_search = None
+
     app.state.retrieval_service = retrieval_service
-    log.info("retrieval_service_ready")
+    log.info("retrieval_service_ready", federated=settings.federation_enabled)
 
     # --- Ingestion worker ---
     index_writer = IndexWriter(session_factory)
@@ -131,6 +154,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await worker.stop()
     worker_task.cancel()
     await embedding_provider.close()
+
+    # Close the federation HTTP client if federation is active.
+    if settings.federation_enabled and isinstance(retrieval_service, FederatedSearch):
+        await retrieval_service.close()
+
     await engine.dispose()
     await nats_conn.disconnect()
 
