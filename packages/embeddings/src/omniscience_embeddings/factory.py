@@ -7,11 +7,12 @@ from omniscience_core.errors import ConfigError
 
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_embeddings.cohere import CohereEmbeddingProvider
+from omniscience_embeddings.local import LocalEmbeddingProvider
 from omniscience_embeddings.ollama import OllamaEmbeddingProvider
 from omniscience_embeddings.openai import OpenAIEmbeddingProvider
 from omniscience_embeddings.voyage import VoyageEmbeddingProvider
 
-_SUPPORTED_PROVIDERS = ("ollama", "openai", "voyage", "cohere")
+_SUPPORTED_PROVIDERS = ("ollama", "openai", "voyage", "cohere", "local")
 
 
 def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
@@ -23,6 +24,8 @@ def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
     * ``"openai"``  → :class:`OpenAIEmbeddingProvider` with default model
     * ``"voyage"``  → :class:`VoyageEmbeddingProvider` using ``settings.voyage_api_key``
     * ``"cohere"``  → :class:`CohereEmbeddingProvider` using ``settings.cohere_api_key``
+    * ``"local"``   → :class:`LocalEmbeddingProvider` using sentence-transformers
+      (fully air-gapped, no external API calls)
 
     Args:
         settings: Application settings instance.
@@ -32,6 +35,8 @@ def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
 
     Raises:
         ConfigError: When ``settings.embedding_provider`` names an unknown backend.
+        ImportError: When ``"local"`` is selected but ``sentence-transformers``
+            is not installed.
     """
     provider = settings.embedding_provider.lower()
 
@@ -46,6 +51,12 @@ def create_embedding_provider(settings: Settings) -> EmbeddingProvider:
 
     if provider == "cohere":
         return CohereEmbeddingProvider(api_key=settings.cohere_api_key or None)
+
+    if provider == "local":
+        return LocalEmbeddingProvider(
+            model_name=settings.local_model_name,
+            device=settings.local_model_device,
+        )
 
     raise ConfigError(
         f"Unknown embedding provider '{settings.embedding_provider}'. "
