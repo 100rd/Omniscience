@@ -17,6 +17,15 @@ services:
       start_period: 10s
     restart: unless-stopped
 
+  admin:
+    build: ./apps/admin
+    ports:
+      - "3001:80"
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: unless-stopped
+
   postgres:
     image: pgvector/pgvector:pg16
     ports:
