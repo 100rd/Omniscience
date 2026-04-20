@@ -9,11 +9,15 @@ Matching strategy (applied in priority order):
 1. **Exact name match** — entities whose normalised names are identical
    across *different* sources are linked unconditionally (score == 1.0).
 
-2. **Resource name match** — Terraform resources ↔ Kubernetes resources
+2. **ARN match** — when one entity is ``tfstate_instance`` kind and the
+   other is ``aws_live`` kind, ARNs are compared.  Score 1.0 on exact ARN
+   match; score 0.8 on id-only match (without account/region prefix).
+
+3. **Resource name match** — Terraform resources ↔ Kubernetes resources
    are compared with :func:`~omniscience_index.matchers.resource_name_match`.
    Pairs scoring above :data:`RESOURCE_MATCH_THRESHOLD` are linked.
 
-3. **Service name match** — a Kubernetes ``Service`` entity ↔ a Grafana
+4. **Service name match** — a Kubernetes ``Service`` entity ↔ a Grafana
    dashboard entity are fuzzy-matched on their normalised names.
    Pairs scoring above :data:`SERVICE_MATCH_THRESHOLD` are linked.
 
@@ -53,6 +57,16 @@ SERVICE_MATCH_THRESHOLD: float = 0.5
 
 #: Edge type used for all cross-source links created by this module.
 CROSS_REF_EDGE_TYPE: str = "cross_ref"
+
+# ---------------------------------------------------------------------------
+# ARN matching constants
+# ---------------------------------------------------------------------------
+
+#: Entity kind used by AwsConnector for all live-resource entities.
+_AWS_LIVE_KIND: str = "aws_live"
+
+#: Entity kind used by Terraform state entities representing real resources.
+_TFSTATE_KIND: str = "tfstate_instance"
 
 
 # ---------------------------------------------------------------------------
@@ -225,7 +239,12 @@ class EntityLinker:
         if exact_name_match(ent_a.display_name, ent_b.display_name) == 1.0:
             return 1.0, "exact_display_name"
 
-        # Strategy 2: Terraform resource ↔ K8s resource
+        # Strategy 2: ARN match — tfstate_instance ↔ aws_live
+        arn_score, arn_strategy = _arn_match_score(ent_a, ent_b)
+        if arn_score > 0.0:
+            return arn_score, arn_strategy
+
+        # Strategy 3: Terraform resource ↔ K8s resource
         tf_types = {"terraform_resource", "terraform_module", "resource"}
         k8s_types = {"k8s_resource", "service", "deployment"}
 
@@ -239,7 +258,7 @@ class EntityLinker:
             if score >= RESOURCE_MATCH_THRESHOLD:
                 return score, "resource_name"
 
-        # Strategy 3: K8s Service ↔ Grafana dashboard
+        # Strategy 4: K8s Service ↔ Grafana dashboard
         grafana_types = {"dashboard", "grafana_dashboard"}
         is_k8s_service_a = is_k8s_a and _is_service_entity(ent_a)
         is_grafana_a = ent_a.entity_type in grafana_types
@@ -300,6 +319,93 @@ def _is_service_entity(entity: Entity) -> bool:
     meta: dict[str, Any] = entity.entity_metadata
     k8s_kind = str(meta.get("k8s_kind", "")).lower()
     return k8s_kind == "service" or entity.entity_type.lower() in {"service"}
+
+
+def _extract_arn(entity: Entity) -> str:
+    """Extract the ARN from an entity's extra/metadata dict.
+
+    Checks ``entity_metadata["arn"]``, ``entity_metadata["extra"]["arn"]``,
+    and falls back to ``entity.name`` when the entity type looks like an ARN.
+    """
+    meta: dict[str, Any] = entity.entity_metadata
+
+    # Direct arn key in metadata
+    arn = meta.get("arn", "")
+    if arn:
+        return str(arn)
+
+    # Nested under "extra"
+    extra: dict[str, Any] = meta.get("extra", {})
+    arn = extra.get("arn", "")
+    if arn:
+        return str(arn)
+
+    # entity.name may itself be an ARN (starts with "arn:")
+    if entity.name.startswith("arn:"):
+        return entity.name
+
+    return ""
+
+
+def _arn_id_segment(arn: str) -> str:
+    """Return the last path segment of an ARN — the bare resource id/name.
+
+    For ``arn:aws:s3:::my-bucket`` this returns ``my-bucket``.
+    For ``arn:aws:ec2:us-east-1:123:instance/i-abc`` this returns ``i-abc``.
+    Returns empty string when *arn* is empty or cannot be parsed.
+    """
+    if not arn:
+        return ""
+    # ARN format: arn:partition:service:region:account-id:resource
+    # resource may be "type/id" or just "id"
+    parts = arn.split(":", 5)
+    if len(parts) < 6:
+        return ""
+    resource = parts[5]
+    # Strip type prefix if present (e.g. "instance/i-abc" → "i-abc")
+    if "/" in resource:
+        resource = resource.rsplit("/", 1)[-1]
+    return resource
+
+
+def _arn_match_score(ent_a: Entity, ent_b: Entity) -> tuple[float, str]:
+    """Return ``(score, "arn_match")`` when a tfstate_instance ↔ aws_live ARN match fires.
+
+    Returns ``(0.0, "")`` when the strategy does not apply.
+
+    Scoring:
+    - 1.0 — exact ARN match
+    - 0.8 — id-only match (last path segment matches, ignoring account/region)
+    """
+    kind_a: str = str(ent_a.entity_metadata.get("kind", ""))
+    kind_b: str = str(ent_b.entity_metadata.get("kind", ""))
+
+    # Strategy applies only when one is tfstate_instance and other is aws_live
+    is_tf_a = kind_a == _TFSTATE_KIND or ent_a.entity_type == _TFSTATE_KIND
+    is_live_a = kind_a == _AWS_LIVE_KIND or ent_a.entity_type == _AWS_LIVE_KIND
+    is_tf_b = kind_b == _TFSTATE_KIND or ent_b.entity_type == _TFSTATE_KIND
+    is_live_b = kind_b == _AWS_LIVE_KIND or ent_b.entity_type == _AWS_LIVE_KIND
+
+    if not ((is_tf_a and is_live_b) or (is_live_a and is_tf_b)):
+        return 0.0, ""
+
+    arn_a = _extract_arn(ent_a)
+    arn_b = _extract_arn(ent_b)
+
+    if not arn_a or not arn_b:
+        return 0.0, ""
+
+    # Exact ARN match
+    if arn_a == arn_b:
+        return 1.0, "arn_match"
+
+    # Id-only match: compare the bare resource identifier
+    id_a = _arn_id_segment(arn_a)
+    id_b = _arn_id_segment(arn_b)
+    if id_a and id_b and id_a == id_b:
+        return 0.8, "arn_match"
+
+    return 0.0, ""
 
 
 __all__ = [

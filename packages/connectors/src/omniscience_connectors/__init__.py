@@ -21,7 +21,7 @@ Registry::
     from omniscience_connectors import ConnectorRegistry, get_connector
 
 Built-in connectors (``git``, ``fs``, ``confluence``, ``notion``, ``slack``,
-``jira``, ``k8s-agentic``, ``s3``) are registered below and available
+``jira``, ``k8s-agentic``, ``s3``, ``aws``) are registered below and available
 immediately on import.  Third-party connectors call :func:`get_connector`
 after registering against the shared registry.
 """
@@ -35,6 +35,7 @@ from omniscience_connectors.agentic import (
     OllamaLLMProvider,
     build_provider,
 )
+from omniscience_connectors.aws.connector import AwsConfig, AwsConnector
 from omniscience_connectors.base import (
     Connector,
     DocumentRef,
@@ -67,6 +68,7 @@ _registry.register(JiraConnector)
 _registry.register(K8sAgenticConnector)
 _registry.register(DatabaseConnector)
 _registry.register(S3Connector)
+_registry.register(AwsConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -74,6 +76,8 @@ default_registry: ConnectorRegistry = _registry
 __all__ = [
     "AgentConfig",
     "AgenticConnector",
+    "AwsConfig",
+    "AwsConnector",
     "ConfluenceConnector",
     "Connector",
     "ConnectorRegistry",
