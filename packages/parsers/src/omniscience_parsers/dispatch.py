@@ -57,19 +57,22 @@ def default_dispatch() -> ParserDispatch:
     """Return a :class:`ParserDispatch` pre-loaded with all built-in parsers.
 
     Parser priority (first-match wins):
-    1. TerraformParser  — .tf, .tf.json
-    2. KubernetesParser — .yaml / .yml with a ``kind:`` field
-    3. MarkdownParser   — .md, .mdx, .markdown
-    4. TreeSitterParser — .py, .ts, .js, .go, .rs, .java
-    5. PlainTextParser  — everything else (fallback)
+    1. TfStateParser    — .tfstate or application/x-tfstate content type
+    2. TerraformParser  — .tf, .tf.json
+    3. KubernetesParser — .yaml / .yml with a ``kind:`` field
+    4. MarkdownParser   — .md, .mdx, .markdown
+    5. TreeSitterParser — .py, .ts, .js, .go, .rs, .java
+    6. PlainTextParser  — everything else (fallback)
     """
     from omniscience_parsers.code.treesitter import TreeSitterParser
     from omniscience_parsers.infra.kubernetes import KubernetesParser
     from omniscience_parsers.infra.terraform import TerraformParser
+    from omniscience_parsers.infra.tfstate import TfStateParser
     from omniscience_parsers.markdown import MarkdownParser
 
     return ParserDispatch(
         [
+            TfStateParser(),
             TerraformParser(),
             KubernetesParser(),
             MarkdownParser(),
