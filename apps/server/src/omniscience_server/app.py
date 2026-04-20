@@ -7,6 +7,7 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - connects to Postgres, NATS JetStream, embedding provider
   - starts the ingestion worker (consumes document change events)
   - starts the freshness worker (periodic SLO evaluation + Prometheus metrics)
+  - starts the scheduler worker (periodic stale-source re-sync triggers)
   - mounts the Prometheus metrics ASGI app at /metrics
   - mounts the MCP ASGI app at /mcp (streamable-http transport)
   - adds TracingMiddleware
@@ -45,6 +46,7 @@ from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.middleware import TracingMiddleware
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.routes import health_router, tokens_router
+from omniscience_server.scheduler import SchedulerWorker
 
 log = structlog.get_logger(__name__)
 
@@ -161,6 +163,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         interval_seconds=freshness_worker._interval,
     )
 
+    # --- Scheduler worker ---
+    scheduler_task: asyncio.Task[None] | None = None
+    scheduler: SchedulerWorker | None = None
+    if settings.scheduler_enabled:
+        scheduler = SchedulerWorker(
+            session_factory=session_factory,
+            nats_conn=nats_conn,
+            interval=settings.scheduler_interval_seconds,
+        )
+        scheduler_task = asyncio.create_task(scheduler.start())
+        app.state.scheduler = scheduler
+        log.info(
+            "scheduler_worker_started",
+            interval_seconds=settings.scheduler_interval_seconds,
+        )
+    else:
+        app.state.scheduler = None
+        log.info("scheduler_worker_disabled")
+
     yield
 
     # --- Shutdown ---
@@ -168,6 +189,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     freshness_worker.stop()
     freshness_task.cancel()
+
+    if scheduler is not None and scheduler_task is not None:
+        await scheduler.stop()
+        scheduler_task.cancel()
 
     await worker.stop()
     worker_task.cancel()
