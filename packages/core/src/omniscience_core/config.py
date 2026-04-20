@@ -146,3 +146,21 @@ class Settings(BaseSettings):
         default="development",
         description="Deployment environment: development, staging, production.",
     )
+
+    # --- Scheduler ---
+    scheduler_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the scheduler worker runs in the background and automatically "
+            "triggers re-syncs for sources whose data has grown stale relative to their "
+            "freshness_sla_seconds budget (or per-type default TTLs when no SLA is set)."
+        ),
+    )
+    scheduler_interval_seconds: int = Field(
+        default=300,
+        ge=1,
+        description=(
+            "How often (in seconds) the scheduler worker checks all sources for staleness "
+            "and publishes re-sync triggers. Defaults to 300 (5 minutes)."
+        ),
+    )

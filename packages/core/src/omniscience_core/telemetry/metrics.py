@@ -54,3 +54,24 @@ FRESHNESS_STALE_TOTAL: Gauge = Gauge(
     name="omniscience_source_stale_total",
     documentation="Number of sources currently exceeding their freshness_sla_seconds budget.",
 )
+
+# ---------------------------------------------------------------------------
+# Scheduler metrics
+# ---------------------------------------------------------------------------
+
+# Total re-syncs triggered by the scheduler, labelled by source_type.
+SCHEDULER_SYNCS_TRIGGERED_TOTAL: Counter = Counter(
+    name="omniscience_scheduler_syncs_triggered_total",
+    documentation=(
+        "Total number of automatic re-sync triggers published by the scheduler worker. "
+        "Incremented once per stale source per check cycle."
+    ),
+    labelnames=["source_type"],
+)
+
+# Histogram of scheduler check cycle wall-clock duration.
+SCHEDULER_CHECK_DURATION_SECONDS: Histogram = Histogram(
+    name="omniscience_scheduler_check_duration_seconds",
+    documentation="Wall-clock time in seconds for a single scheduler check-and-trigger cycle.",
+    buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
+)
