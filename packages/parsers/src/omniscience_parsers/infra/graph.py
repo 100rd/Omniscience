@@ -1,8 +1,9 @@
 """Infrastructure dependency graph extractor.
 
 Takes a :class:`~omniscience_parsers.base.ParsedDocument` produced by
-:class:`~omniscience_parsers.infra.terraform.TerraformParser` or
-:class:`~omniscience_parsers.infra.kubernetes.KubernetesParser` and returns
+:class:`~omniscience_parsers.infra.terraform.TerraformParser`,
+:class:`~omniscience_parsers.infra.kubernetes.KubernetesParser`, or
+:class:`~omniscience_parsers.infra.tfstate.TfStateParser` and returns
 simple data-transfer objects that downstream indexers can write to the
 ``entities`` and ``edges`` tables without depending on SQLAlchemy models.
 
@@ -22,6 +23,12 @@ Edge types
 
 ``"mounts"``
     Volume or envFrom reference to ConfigMap or Secret.
+
+``"tfstate_of"``
+    Links a ``tfstate_instance`` entity back to the corresponding Terraform
+    resource definition.  The ``to_symbol`` uses the plain resource address
+    (e.g. ``resource.aws_s3_bucket.logs``) which can be cross-referenced against
+    entities produced by :class:`~omniscience_parsers.infra.terraform.TerraformParser`.
 """
 
 from __future__ import annotations
@@ -46,7 +53,7 @@ class EntityData:
 
     kind: str
     """High-level kind: ``"terraform_resource"``, ``"terraform_module"``,
-    ``"terraform_variable"``, ``"k8s_resource"``."""
+    ``"terraform_variable"``, ``"k8s_resource"``, ``"tfstate_instance"``."""
 
     name: str
     """Human-readable short name."""
@@ -72,7 +79,8 @@ class EdgeData:
     """Symbol of the target entity."""
 
     edge_type: str
-    """One of: ``depends_on``, ``references``, ``selects``, ``owns``, ``mounts``."""
+    """One of: ``depends_on``, ``references``, ``selects``, ``owns``, ``mounts``,
+    ``tfstate_of``."""
 
     extra: dict[str, Any] = field(default_factory=dict)
     """Optional extra context (e.g. the label selector dict for ``selects`` edges)."""
@@ -236,6 +244,110 @@ def _k8s_edges_from_section(section: Section) -> list[EdgeData]:
 
 
 # ---------------------------------------------------------------------------
+# Terraform state graph extraction
+# ---------------------------------------------------------------------------
+
+
+def _tfstate_entity_from_section(section: Section) -> EntityData | None:
+    """Convert a tfstate section to an :class:`EntityData` node."""
+    if not section.symbol:
+        return None
+
+    meta = section.metadata
+    resource_type = meta.get("resource_type", "")
+    resource_name = meta.get("resource_name", "")
+
+    # Short human-readable name: prefer "resource_name" or last path segment.
+    name = resource_name or section.symbol.rsplit(".", 1)[-1]
+
+    return EntityData(
+        symbol=section.symbol,
+        kind="tfstate_instance",
+        name=name,
+        extra={
+            "arn": meta.get("arn", ""),
+            "id": meta.get("id", ""),
+            "region": meta.get("region", ""),
+            "account": meta.get("account", ""),
+            "provider": meta.get("provider", ""),
+            "mode": meta.get("mode", "managed"),
+            "resource_type": resource_type,
+        },
+    )
+
+
+def _tfstate_edges_from_section(section: Section) -> list[EdgeData]:
+    """Produce a ``tfstate_of`` edge linking this instance to its config symbol.
+
+    The ``to_symbol`` is the Terraform *configuration* address — e.g.
+    ``resource.aws_s3_bucket.logs`` — so the edge can be resolved against
+    :class:`EntityData` nodes from the Terraform config parser.
+    """
+    if not section.symbol:
+        return []
+
+    meta = section.metadata
+    mode = meta.get("mode", "managed")
+    resource_type = meta.get("resource_type", "")
+    resource_name = meta.get("resource_name", "")
+
+    if not resource_type or not resource_name:
+        return []
+
+    # Build the config-side symbol (without module path or index, as the config
+    # graph uses the flat resource address).
+    if mode == "data":
+        config_symbol = f"data.{resource_type}.{resource_name}"
+    else:
+        config_symbol = f"resource.{resource_type}.{resource_name}"
+
+    return [
+        EdgeData(
+            from_symbol=section.symbol,
+            to_symbol=config_symbol,
+            edge_type="tfstate_of",
+        )
+    ]
+
+
+def extract_tfstate_graph(
+    parsed: ParsedDocument,
+) -> tuple[list[EntityData], list[EdgeData]]:
+    """Extract entities and edges from a parsed Terraform state document.
+
+    Each resource instance becomes an :class:`EntityData` with
+    ``kind="tfstate_instance"`` and ARN/id/region/account in ``extra``.
+
+    A ``tfstate_of`` edge is created from each instance to its corresponding
+    Terraform configuration symbol (e.g. ``resource.aws_s3_bucket.logs``).
+
+    Parameters
+    ----------
+    parsed:
+        The output of :class:`~omniscience_parsers.infra.tfstate.TfStateParser`.
+
+    Returns
+    -------
+    tuple[list[EntityData], list[EdgeData]]
+        A pair of (entities, edges).  Returns empty lists if *parsed* is not a
+        tfstate document.
+    """
+    entities: list[EntityData] = []
+    edges: list[EdgeData] = []
+
+    if parsed.content_type != "application/x-tfstate":
+        return entities, edges
+
+    for section in parsed.sections:
+        entity = _tfstate_entity_from_section(section)
+        if entity is not None:
+            entities.append(entity)
+        edges.extend(_tfstate_edges_from_section(section))
+
+    return entities, edges
+
+
+# ---------------------------------------------------------------------------
 # Dispatcher
 # ---------------------------------------------------------------------------
 
@@ -248,18 +360,23 @@ def _is_kubernetes_doc(doc: ParsedDocument) -> bool:
     return doc.content_type in ("application/x-kubernetes", "text/x-kubernetes")
 
 
+def _is_tfstate_doc(doc: ParsedDocument) -> bool:
+    return doc.content_type == "application/x-tfstate"
+
+
 def extract_infra_graph(
     parsed: ParsedDocument,
 ) -> tuple[list[EntityData], list[EdgeData]]:
     """Extract entities and edges from a parsed infrastructure document.
 
-    Works for both Terraform and Kubernetes documents.  Returns empty lists
-    for documents of other content types.
+    Works for Terraform, Kubernetes, and Terraform state documents.  Returns
+    empty lists for documents of other content types.
 
     Parameters
     ----------
     parsed:
-        The output of :class:`TerraformParser` or :class:`KubernetesParser`.
+        The output of :class:`TerraformParser`, :class:`KubernetesParser`, or
+        :class:`TfStateParser`.
 
     Returns
     -------
@@ -284,7 +401,10 @@ def extract_infra_graph(
                 entities.append(entity)
             edges.extend(_k8s_edges_from_section(section))
 
+    elif _is_tfstate_doc(parsed):
+        return extract_tfstate_graph(parsed)
+
     return entities, edges
 
 
-__all__ = ["EdgeData", "EntityData", "extract_infra_graph"]
+__all__ = ["EdgeData", "EntityData", "extract_infra_graph", "extract_tfstate_graph"]

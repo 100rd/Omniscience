@@ -13,6 +13,7 @@ Parsers:
     TreeSitterParser — tree-sitter backed code symbol extractor
     TerraformParser — Terraform HCL / JSON block extractor
     KubernetesParser — Kubernetes YAML manifest parser
+    TfStateParser   — Terraform state file (JSON v4) parser
 
 Chunkers:
     Chunker                  — protocol all chunkers satisfy
@@ -25,6 +26,7 @@ Infrastructure graph:
     EntityData       — node in the infrastructure graph
     EdgeData         — directed dependency edge
     extract_infra_graph — extract graph from a parsed infra document
+    extract_tfstate_graph — extract graph from a parsed Terraform state document
 
 Code symbol graph:
     ExtractedEntity      — node in the code symbol graph
@@ -43,9 +45,15 @@ from omniscience_parsers.chunking import (
 from omniscience_parsers.code.graph import ExtractedEdge, ExtractedEntity, extract_symbol_graph
 from omniscience_parsers.code.treesitter import TreeSitterParser
 from omniscience_parsers.dispatch import ParserDispatch, default_dispatch
-from omniscience_parsers.infra.graph import EdgeData, EntityData, extract_infra_graph
+from omniscience_parsers.infra.graph import (
+    EdgeData,
+    EntityData,
+    extract_infra_graph,
+    extract_tfstate_graph,
+)
 from omniscience_parsers.infra.kubernetes import KubernetesParser
 from omniscience_parsers.infra.terraform import TerraformParser
+from omniscience_parsers.infra.tfstate import TfStateParser
 from omniscience_parsers.markdown import MarkdownParser
 from omniscience_parsers.plaintext import PlainTextParser
 
@@ -67,8 +75,10 @@ __all__ = [
     "PlainTextParser",
     "Section",
     "TerraformParser",
+    "TfStateParser",
     "TreeSitterParser",
     "default_dispatch",
     "extract_infra_graph",
     "extract_symbol_graph",
+    "extract_tfstate_graph",
 ]
