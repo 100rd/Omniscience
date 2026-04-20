@@ -14,6 +14,7 @@ queries before retrieval to improve recall in air-gapped deployments.
 
 from .federation import FederatedSearch
 from .federation_config import FederatedInstance, FederationConfig
+from .graph_query import EdgeResult, EntityNode, GraphQueryService, GraphResult
 from .models import (
     ChunkLineage,
     Citation,
@@ -30,9 +31,13 @@ from .search import RetrievalService
 __all__ = [
     "ChunkLineage",
     "Citation",
+    "EdgeResult",
+    "EntityNode",
     "FederatedInstance",
     "FederatedSearch",
     "FederationConfig",
+    "GraphQueryService",
+    "GraphResult",
     "NoopReranker",
     "OllamaReranker",
     "QueryRewriter",

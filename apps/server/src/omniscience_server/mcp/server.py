@@ -1,10 +1,11 @@
 """FastMCP server setup for Omniscience.
 
-Registers four tools:
-- search       (requires scope: search)
-- get_document (requires scope: search)
-- list_sources (requires scope: sources:read)
-- source_stats (requires scope: sources:read)
+Registers five tools:
+- search              (requires scope: search)
+- get_document        (requires scope: search)
+- get_related_entities (requires scope: search)
+- list_sources        (requires scope: sources:read)
+- source_stats        (requires scope: sources:read)
 
 Auth:
 - HTTP transport: Bearer token from Authorization header
@@ -29,6 +30,7 @@ from omniscience_core.db.models import ApiToken
 
 from omniscience_server.mcp.tools import (
     mcp_get_document,
+    mcp_get_related_entities,
     mcp_list_sources,
     mcp_search,
     mcp_source_stats,
@@ -165,6 +167,43 @@ async def get_document(
         msg = str(exc)
         if msg.startswith("document_not_found:"):
             raise ValueError(f"source_not_found:{document_id}") from exc
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_related_entities
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="get_related_entities",
+    description=(
+        "Traverse the entity graph from a named entity. "
+        "Returns the seed entity, related entities up to max_depth hops, "
+        "and the edges that connect them. Each entity includes chunk text for context."
+    ),
+)
+async def get_related_entities(
+    entity_name: str,
+    ctx: Context[Any, Any, Any],
+    max_depth: int = 1,
+    edge_types: list[str] | None = None,
+) -> dict[str, Any]:
+    """get_related_entities tool — requires scope 'search'."""
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+
+    try:
+        return await mcp_get_related_entities(
+            app=_get_app(),
+            entity_name=entity_name,
+            max_depth=max_depth,
+            edge_types=edge_types,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if msg.startswith("entity_not_found:"):
+            raise
         raise
 
 
