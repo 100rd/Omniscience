@@ -121,6 +121,7 @@ class TestSourceModel:
             "grafana",
             "k8s",
             "terraform",
+            "s3",
         }
         assert {t.value for t in SourceType} == expected
 

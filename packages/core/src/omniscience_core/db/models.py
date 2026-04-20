@@ -50,6 +50,7 @@ class SourceType(enum.StrEnum):
     grafana = "grafana"
     k8s = "k8s"
     terraform = "terraform"
+    s3 = "s3"
 
 
 class SourceStatus(enum.StrEnum):

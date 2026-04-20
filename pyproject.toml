@@ -50,6 +50,8 @@ dev = [
     "omniscience-plugin-example",
     "typer>=0.12.0",
     "rich>=13.7.0",
+    "moto>=5.1.22",
+    "boto3-stubs[s3]>=1.42.91",
 ]
 
 [tool.ruff]
