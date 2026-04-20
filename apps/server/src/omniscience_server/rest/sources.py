@@ -23,9 +23,12 @@ from omniscience_core.auth.middleware import require_scope
 from omniscience_core.auth.scopes import Scope
 from omniscience_core.db.models import IngestionRunStatus, Source, SourceStatus, SourceType
 from omniscience_core.db.schemas import SourceCreate, SourceRead, SourceUpdate
+from omniscience_core.queue.producer import QueueProducer
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from omniscience_server.ingestion.events import DocumentChangeEvent
 
 log = structlog.get_logger(__name__)
 
@@ -81,6 +84,52 @@ async def _get_source_or_404(db: AsyncSession, source_id: uuid.UUID) -> Source:
             detail={"code": "source_not_found", "message": f"Source {source_id} not found"},
         )
     return source
+
+
+async def _publish_sync_event(
+    request: Request,
+    source_id: uuid.UUID,
+    source_type: str,
+    run_id: uuid.UUID,
+) -> bool:
+    """Publish a DocumentChangeEvent to NATS to trigger a full sync.
+
+    Returns True when the event was enqueued, False when NATS is unavailable.
+    Publish failures are logged but do not cause the HTTP request to fail —
+    the IngestionRun record is already committed and can be retried.
+    """
+    nats_conn = getattr(request.app.state, "nats", None)
+    if nats_conn is None:
+        log.debug("sync_nats_unavailable", source_id=str(source_id))
+        return False
+
+    js = getattr(nats_conn, "jetstream", None)
+    if js is None:
+        log.debug("sync_nats_no_jetstream", source_id=str(source_id))
+        return False
+
+    event = DocumentChangeEvent(
+        source_id=source_id,
+        source_type=source_type,
+        external_id="*",
+        uri=f"sync://{source_id}",
+        action="updated",
+    )
+    subject = f"ingest.changes.{source_type}"
+    producer = QueueProducer(js)
+
+    try:
+        await producer.publish(subject=subject, payload=event)
+        log.debug("sync_event_published", subject=subject, run_id=str(run_id))
+        return True
+    except Exception as exc:
+        log.error(
+            "sync_publish_error",
+            source_id=str(source_id),
+            run_id=str(run_id),
+            error=str(exc),
+        )
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -250,8 +299,15 @@ async def trigger_sync(
 ) -> SyncResponse:
     """Trigger an immediate manual sync for the given source.
 
-    Creates an ingestion run record and enqueues a sync task via the message queue.
-    Monitor progress via ``GET /api/v1/ingestion-runs/{run_id}``.
+    Creates an ingestion run record and enqueues a sync event to
+    ``ingest.changes.{source_type}`` via NATS JetStream.  When NATS is
+    unavailable the run record is still committed and the response is still
+    202 — the caller can monitor run progress via
+    ``GET /api/v1/ingestion-runs/{run_id}``.
+
+    The published :class:`~omniscience_server.ingestion.events.DocumentChangeEvent`
+    uses ``external_id="*"`` and ``action="updated"`` as a sentinel that
+    instructs the ingestion worker to perform a full re-sync of the source.
 
     Requires scope: ``sources:write``
     """
@@ -261,10 +317,11 @@ async def trigger_sync(
 
     db: AsyncSession
     async with factory() as db:
-        # Verify source exists
-        await _get_source_or_404(db, source_id)
+        # Verify source exists and capture its type for the NATS subject.
+        source = await _get_source_or_404(db, source_id)
+        source_type = str(source.type)
 
-        # Create an ingestion run record
+        # Create an ingestion run record.
         run = IngestionRun(
             source_id=source_id,
             status=IngestionRunStatus.running,
@@ -276,13 +333,9 @@ async def trigger_sync(
 
         run_id: uuid.UUID = run.id
 
-    # TODO(issue-6): Enqueue sync task via NATS JetStream
-    # nats = getattr(request.app.state, "nats", None)
-    # if nats is not None:
-    #     await nats.jetstream.publish(
-    #         "sync.trigger",
-    #         json.dumps({"source_id": str(source_id), "run_id": str(run_id)}).encode(),
-    #     )
+    # Publish the sync trigger event to NATS JetStream.
+    # Failure is non-fatal: the IngestionRun is already committed.
+    await _publish_sync_event(request, source_id, source_type, run_id)
 
     log.info("sync_triggered", source_id=str(source_id), run_id=str(run_id))
     return SyncResponse(run_id=run_id)

@@ -12,6 +12,10 @@ Design decisions:
   the worker coroutine completes cleanly.
 - One ``IngestionRun`` row covers the entire worker lifetime so counters
   aggregate across all processed documents.
+- Secrets are resolved at message-processing time via
+  :class:`~omniscience_core.secrets.SecretsResolver`.  Resolution failures
+  (missing env vars, unreadable files) produce an error result so the broker
+  can redeliver or route to the DLQ.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ import uuid
 import structlog
 from omniscience_connectors.registry import ConnectorRegistry
 from omniscience_core.queue.consumer import QueueConsumer
+from omniscience_core.secrets import SecretsResolver
 from omniscience_embeddings.base import EmbeddingProvider
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -41,6 +46,9 @@ class IngestionWorker:
         embedding_provider: Backend used to generate embedding vectors.
         index_writer: Writer for the document/chunk index.
         session_factory: SQLAlchemy async session factory for run tracking.
+        secrets_resolver: Resolver for ``secrets_ref`` strings.  When ``None``
+            a default :class:`~omniscience_core.secrets.SecretsResolver` is
+            created automatically.
     """
 
     def __init__(
@@ -50,12 +58,14 @@ class IngestionWorker:
         embedding_provider: EmbeddingProvider,
         index_writer: IndexWriterProtocol,
         session_factory: async_sessionmaker[AsyncSession],
+        secrets_resolver: SecretsResolver | None = None,
     ) -> None:
         self._consumer = queue_consumer
         self._connector_registry = connector_registry
         self._embedding_provider = embedding_provider
         self._index_writer = index_writer
         self._run_tracker = RunTracker(session_factory)
+        self._secrets_resolver = secrets_resolver or SecretsResolver()
         self._run_id: uuid.UUID | None = None
         self._error_count = 0
 
@@ -100,18 +110,32 @@ class IngestionWorker:
     # ------------------------------------------------------------------
 
     async def process_document(self, event: DocumentChangeEvent) -> ProcessResult:
-        """Fetch, parse, embed, and index a single document change event."""
+        """Fetch, parse, embed, and index a single document change event.
+
+        Secrets are resolved from the ``secrets_ref`` attribute on the event
+        (when present) via :class:`~omniscience_core.secrets.SecretsResolver`.
+        When the event carries no ``secrets_ref`` an empty dict is used.
+
+        Resolution failures surface as error results so the broker can
+        redeliver the message or route it to the DLQ after ``max_deliver``.
+        """
         connector = self._connector_registry.get(event.source_type)
+
+        # Resolve secrets for this source. The secrets_ref attribute may be
+        # added to DocumentChangeEvent in a future extension; for now we
+        # gracefully fall back to None (empty secrets) if not present.
+        secrets_ref: str | None = getattr(event, "secrets_ref", None)
+        secrets = self._secrets_resolver.resolve(secrets_ref)
+
         pipeline = IngestionPipeline(
             connector=connector,
             embedding_provider=self._embedding_provider,
             index_writer=self._index_writer,
         )
-        # Config and secrets are empty for now; real resolution wired in Wave 7.
         result = await pipeline.run(
             event=event,
             config=None,
-            secrets={},
+            secrets=secrets,
             ingestion_run_id=self._run_id,
         )
         INGESTION_DOCUMENTS_PROCESSED_TOTAL.labels(
