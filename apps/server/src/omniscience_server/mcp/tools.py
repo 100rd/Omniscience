@@ -16,6 +16,7 @@ from typing import Any
 import structlog
 from fastapi import FastAPI
 from omniscience_core.db.models import Chunk, Document, IngestionRun, Source
+from omniscience_retrieval.graph_query import GraphQueryService
 from omniscience_retrieval.models import SearchRequest
 from omniscience_retrieval.search import RetrievalService
 from sqlalchemy import func, select
@@ -283,3 +284,33 @@ async def mcp_source_stats(app: FastAPI, source_id: str) -> dict[str, Any]:
         "indexed_chunk_count": chunk_count,
         "last_ingestion_run": last_run_dict,
     }
+
+
+# ---------------------------------------------------------------------------
+# get_related_entities
+# ---------------------------------------------------------------------------
+
+
+async def mcp_get_related_entities(
+    app: FastAPI,
+    entity_name: str,
+    max_depth: int = 1,
+    edge_types: list[str] | None = None,
+) -> dict[str, Any]:
+    """Traverse the entity graph starting from a named entity.
+
+    Returns the seed entity, related entities (up to max_depth hops),
+    and the edges connecting them. Each entity includes its associated
+    chunk text for context.
+    """
+    factory = getattr(app.state, "db_session_factory", None)
+    if factory is None:
+        raise RuntimeError("db_session_factory not available on app.state")
+
+    service = GraphQueryService(factory)
+    result = await service.get_related(
+        entity_name=entity_name,
+        max_depth=max_depth,
+        edge_types=edge_types,
+    )
+    return result.to_dict()
