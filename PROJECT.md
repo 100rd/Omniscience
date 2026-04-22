@@ -2,7 +2,11 @@
 
 ## Overview
 
-Self-hosted knowledge retrieval service with an MCP-first API. Indexes sources (code, docs, infra configs, tickets) and exposes them as retrieval tools to any MCP-compatible AI client.
+Self-hosted **Living Semantic Core** for platform and SRE teams. Indexes cloud infrastructure, IaC code, Kubernetes runtime, CI/CD, alerts and incident chat into a **causal, temporal, semantic graph** exposed through Model Context Protocol (MCP).
+
+See [docs/vision.md](docs/vision.md) for the full project description.
+
+**Scope**: v1 is **Insight Mode** — read-only analysis, linking, and recommendations with confidence scores. Action Mode (write/execute) is a separate v2 product.
 
 ## Repository
 
@@ -17,8 +21,10 @@ Self-hosted knowledge retrieval service with an MCP-first API. Indexes sources (
 - **Package manager**: `uv` (Astral)
 - **Web framework**: FastAPI
 - **MCP server**: `mcp` SDK (FastMCP)
-- **ORM**: SQLAlchemy 2 + Alembic
-- **Database**: PostgreSQL 16 + pgvector
+- **ORM**: SQLAlchemy 2 + Alembic (transitional — tracking pgvector phase)
+- **Graph store (target)**: **Neo4j** — topology, causal edges, temporal state
+- **Vector store (target)**: **Qdrant** — semantic embeddings
+- **Database (current)**: PostgreSQL 16 + pgvector (to be migrated — see Neo4j+Qdrant epic)
 - **Queue**: NATS JetStream
 - **Parsing**: tree-sitter, markdown-it-py
 - **Embeddings**: Ollama (default), OpenAI/Voyage (pluggable)
