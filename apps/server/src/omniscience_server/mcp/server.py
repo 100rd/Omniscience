@@ -3,7 +3,7 @@
 Registers five tools:
 - search              (requires scope: search)
 - get_document        (requires scope: search)
-- get_related_entities (requires scope: search)
+- get_related_entities (requires scope: search + workspace-scoped token)
 - list_sources        (requires scope: sources:read)
 - source_stats        (requires scope: sources:read)
 
@@ -26,6 +26,7 @@ from fastapi import FastAPI
 from mcp.server.fastmcp import Context, FastMCP
 from omniscience_core.auth.middleware import _lookup_token
 from omniscience_core.auth.scopes import Scope, check_scopes
+from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
 
 from omniscience_server.mcp.tools import (
@@ -180,7 +181,8 @@ async def get_document(
     description=(
         "Traverse the entity graph from a named entity. "
         "Returns the seed entity, related entities up to max_depth hops, "
-        "and the edges that connect them. Each entity includes chunk text for context."
+        "and the edges that connect them. Each entity includes chunk text for context. "
+        "Requires a workspace-scoped token."
     ),
 )
 async def get_related_entities(
@@ -189,14 +191,30 @@ async def get_related_entities(
     max_depth: int = 1,
     edge_types: list[str] | None = None,
 ) -> dict[str, Any]:
-    """get_related_entities tool — requires scope 'search'."""
+    """get_related_entities tool — requires scope 'search' AND a workspace-scoped token.
+
+    The graph is workspace-scoped.  A token that is not bound to any
+    workspace cannot silently traverse the global graph (issue #117);
+    it is rejected with a ``forbidden:`` error.
+    """
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
+    # _require_scope raised if token is None, so it is non-None here.
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_graph_request_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
 
     try:
         return await mcp_get_related_entities(
             app=_get_app(),
             entity_name=entity_name,
+            workspace_id=workspace_id,
             max_depth=max_depth,
             edge_types=edge_types,
         )
