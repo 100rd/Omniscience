@@ -221,6 +221,40 @@ services:
       start_period: 30s
     restart: unless-stopped
 
+  # ==========================================================================
+  # qdrant — Vector store (Epic #96, ADR-0006, issue #106)
+  # --------------------------------------------------------------------------
+  # Activates with:   docker compose --profile graph up
+  # gRPC primary:     6334  (ADR-0006 §Transport)
+  # HTTP fallback:    6333
+  # Storage volume:   /qdrant/storage  (bind-mounted for persistence)
+  # API key:          QDRANT__SERVICE__API_KEY env (unset in dev profile)
+  # ==========================================================================
+  qdrant:
+    image: qdrant/qdrant:v1.12.4
+    profiles:
+      - graph
+    ports:
+      - "127.0.0.1:6333:6333"
+      - "127.0.0.1:6334:6334"
+    environment:
+      QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+      QDRANT__LOG_LEVEL: ${QDRANT_LOG_LEVEL:-INFO}
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    restart: unless-stopped
+  # ==========================================================================
+  # /qdrant
+  # ==========================================================================
+
 volumes:
   pgdata:
   pgbackups:
@@ -231,3 +265,4 @@ volumes:
   caddy_data:
   neo4jdata:
   neo4jlogs:
+  qdrant_data:

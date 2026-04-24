@@ -32,8 +32,11 @@ from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.storage.graph import GraphStore
 from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
+from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_index import IndexWriter
 from omniscience_index.stores import Neo4jGraphStore, Neo4jStoreConfig
+from omniscience_index.stores.qdrant_config import QdrantConfig
+from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from omniscience_retrieval import (
     PgVectorGraphStore,
     PgVectorVectorStore,
@@ -111,8 +114,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # These wrap the pgvector writer + retriever behind the new backend-
     # neutral protocols defined in ``omniscience_core.storage``.  Phase 2a
     # (issue #104) selects the Neo4j graph backend behind the
-    # ``STORAGE_GRAPH_BACKEND`` feature flag; vector backend selection is
-    # separate (issue #106).
+    # ``STORAGE_GRAPH_BACKEND`` feature flag; Phase 2b (issue #106) selects
+    # the Qdrant vector backend behind ``STORAGE_VECTOR_BACKEND``.
     graph_backend = str(settings.storage_graph_backend).lower()
     graph_store: GraphStore
     neo4j_graph_store: Neo4jGraphStore | None = None
@@ -127,20 +130,49 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         raise ValueError(
             f"unknown_storage_graph_backend:{graph_backend} (expected 'pgvector' or 'neo4j')"
         )
-    vector_store = PgVectorVectorStore(
+    pgvector_store = PgVectorVectorStore(
         session_factory=session_factory,
         embedding_provider=embedding_provider,
     )
     app.state.graph_store = graph_store
-    app.state.vector_store = vector_store
+
+    # --- Vector backend selection (Epic #96, Phase 2b, issue #106) ---
+    # ``STORAGE_VECTOR_BACKEND`` toggles between the pgvector adapter
+    # (default) and the Qdrant adapter.  The pgvector retrieval service
+    # remains available on ``app.state`` for the hybrid/federation path
+    # until #107 (retrieval rewrite) composes over the new interface.
+    vector_backend = str(settings.storage_vector_backend).lower()
+    if vector_backend == "qdrant":
+        qdrant_store = await _build_qdrant_store(settings, embedding_provider)
+        app.state.vector_store = qdrant_store
+        app.state.qdrant_store = qdrant_store
+        log.info(
+            "storage_adapters_ready",
+            graph_backend=graph_backend,
+            vector_backend="qdrant",
+            collection=qdrant_store.collection_name,
+        )
+    elif vector_backend == "pgvector":
+        app.state.vector_store = pgvector_store
+        app.state.qdrant_store = None
+        log.info(
+            "storage_adapters_ready",
+            graph_backend=graph_backend,
+            vector_backend="pgvector",
+        )
+    else:
+        raise ValueError(
+            f"STORAGE_VECTOR_BACKEND must be 'pgvector' or 'qdrant' (got {vector_backend!r})"
+        )
     app.state.neo4j_graph_store = neo4j_graph_store
-    log.info("storage_adapters_ready", graph_backend=graph_backend)
 
     # --- Retrieval service ---
     # Keep the direct ``RetrievalService`` handle on app.state for the
     # (still-in-flight) federation composition path.  New consumers
-    # should prefer ``app.state.vector_store``.
-    local_retrieval = vector_store.retrieval_service
+    # should prefer ``app.state.vector_store``.  Retrieval is still
+    # pgvector-backed until #107 cuts over; the Qdrant store is wired
+    # in but not yet consulted by the hybrid search path.
+    local_retrieval = pgvector_store.retrieval_service
 
     # --- Federation (optional) ---
     if settings.federation_enabled:
@@ -233,6 +265,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker_task.cancel()
     await embedding_provider.close()
 
+    # Close the Qdrant client if the qdrant backend is active (#106).
+    qdrant_store_on_shutdown: QdrantVectorStore | None = getattr(app.state, "qdrant_store", None)
+    if qdrant_store_on_shutdown is not None:
+        await qdrant_store_on_shutdown.close()
+
     # Close the federation HTTP client if federation is active.
     if settings.federation_enabled and isinstance(retrieval_service, FederatedSearch):
         await retrieval_service.close()
@@ -242,6 +279,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     await engine.dispose()
     await nats_conn.disconnect()
+
+
+async def _build_qdrant_store(
+    settings: Settings, embedding_provider: EmbeddingProvider
+) -> QdrantVectorStore:
+    """Construct, connect, and bootstrap a ``QdrantVectorStore`` (#106).
+
+    Reads connection settings from ``Settings`` (including the API key
+    from ``QDRANT_API_KEY``) and returns a ready-to-use adapter with
+    the collection and payload indexes already ensured on the cluster.
+    """
+    config = QdrantConfig(
+        host=settings.qdrant_host,
+        grpc_port=settings.qdrant_grpc_port,
+        http_port=settings.qdrant_http_port,
+        api_key=settings.qdrant_api_key,
+        https=settings.qdrant_https,
+        prefer_grpc=settings.qdrant_prefer_grpc,
+        timeout_seconds=settings.qdrant_timeout_seconds,
+    )
+    store = QdrantVectorStore(config=config, embedding_provider=embedding_provider)
+    await store.connect()
+    return store
 
 
 async def _metrics_endpoint(request: Request) -> Response:

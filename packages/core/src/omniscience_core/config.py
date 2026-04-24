@@ -99,6 +99,56 @@ class Settings(BaseSettings):
         description="Ollama model used by OllamaReranker for embedding-based scoring.",
     )
 
+    # --- Storage backends (Epic #96 — Neo4j + Qdrant migration) ---
+    storage_vector_backend: str = Field(
+        default="pgvector",
+        description=(
+            "Vector-store backend: 'pgvector' (default) or 'qdrant'. "
+            "Switches the VectorStore implementation wired into the DI "
+            "container. See ADR-0006. Pgvector remains the default until "
+            "the cutover (#105) completes."
+        ),
+    )
+    qdrant_host: str = Field(
+        default="localhost",
+        description="Qdrant server host (used when storage_vector_backend='qdrant').",
+    )
+    qdrant_grpc_port: int = Field(
+        default=6334,
+        ge=1,
+        le=65535,
+        description="Qdrant gRPC port (ADR-0006 §Transport — primary transport).",
+    )
+    qdrant_http_port: int = Field(
+        default=6333,
+        ge=1,
+        le=65535,
+        description="Qdrant HTTP port (ADR-0006 §Transport — fallback transport).",
+    )
+    qdrant_api_key: str | None = Field(
+        default=None,
+        description=(
+            "Qdrant API key. Required in every non-dev environment per "
+            "ADR-0006 §Deployment posture. Read from env QDRANT_API_KEY."
+        ),
+    )
+    qdrant_https: bool = Field(
+        default=False,
+        description="Enable TLS on Qdrant client connections (required in non-dev).",
+    )
+    qdrant_prefer_grpc: bool = Field(
+        default=True,
+        description=(
+            "Prefer gRPC over HTTP when talking to Qdrant. gRPC is the "
+            "primary transport per ADR-0006; HTTP is the fallback."
+        ),
+    )
+    qdrant_timeout_seconds: float = Field(
+        default=10.0,
+        gt=0,
+        description="Per-RPC timeout for Qdrant operations.",
+    )
+
     # --- Federation ---
     federation_enabled: bool = Field(
         default=False,
