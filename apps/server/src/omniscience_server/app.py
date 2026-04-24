@@ -32,7 +32,11 @@ from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
 from omniscience_index import IndexWriter
-from omniscience_retrieval import RetrievalService
+from omniscience_retrieval import (
+    PgVectorGraphStore,
+    PgVectorVectorStore,
+    RetrievalService,
+)
 from omniscience_retrieval.federation import FederatedSearch
 from omniscience_retrieval.federation_config import FederationConfig
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
@@ -101,11 +105,25 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         dim=embedding_provider.dim,
     )
 
-    # --- Retrieval service ---
-    local_retrieval = RetrievalService(
+    # --- Storage adapters (GraphStore / VectorStore protocols, issue #103) ---
+    # These wrap the pgvector writer + retriever behind the new backend-
+    # neutral protocols defined in ``omniscience_core.storage``.  Phase 2
+    # will swap these for Neo4jGraphStore + QdrantVectorStore behind a
+    # feature flag with zero changes to the call sites.
+    graph_store = PgVectorGraphStore(session_factory=session_factory)
+    vector_store = PgVectorVectorStore(
         session_factory=session_factory,
         embedding_provider=embedding_provider,
     )
+    app.state.graph_store = graph_store
+    app.state.vector_store = vector_store
+    log.info("storage_adapters_ready", backend="pgvector")
+
+    # --- Retrieval service ---
+    # Keep the direct ``RetrievalService`` handle on app.state for the
+    # (still-in-flight) federation composition path.  New consumers
+    # should prefer ``app.state.vector_store``.
+    local_retrieval = vector_store.retrieval_service
 
     # --- Federation (optional) ---
     if settings.federation_enabled:

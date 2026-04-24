@@ -517,6 +517,20 @@ def _make_rest_app() -> FastAPI:
     return create_app(settings=settings)
 
 
+def _wire_graph_store(app: FastAPI, factory: Any) -> None:
+    """Attach ``PgVectorGraphStore`` to ``app.state`` for the #103 wiring.
+
+    Lifespan does not run under ``ASGITransport`` and the helper
+    ``FastAPI()`` constructor in the MCP tests does not start one
+    either — so every test site that pokes a session factory onto
+    ``app.state`` must also wire a ``graph_store`` adapter.
+    """
+    from omniscience_retrieval.adapters import PgVectorGraphStore
+
+    app.state.db_session_factory = factory
+    app.state.graph_store = PgVectorGraphStore(session_factory=factory)
+
+
 def _auth_token(workspace_id: uuid.UUID | None) -> tuple[MagicMock, str]:
     plaintext, prefix = generate_token("test")
     token: MagicMock = MagicMock(spec=ApiToken)
@@ -546,7 +560,7 @@ async def test_rest_endpoint_rejects_workspace_a_probing_workspace_b() -> None:
     factory = _session_factory(fx)
 
     app = _make_rest_app()
-    app.state.db_session_factory = factory
+    _wire_graph_store(app, factory)
 
     with patch(
         "omniscience_core.auth.middleware._lookup_token",
@@ -575,7 +589,7 @@ async def test_rest_endpoint_rejects_unscoped_token() -> None:
     factory = _session_factory(fx)
 
     app = _make_rest_app()
-    app.state.db_session_factory = factory
+    _wire_graph_store(app, factory)
 
     with patch(
         "omniscience_core.auth.middleware._lookup_token",
@@ -602,7 +616,7 @@ async def test_rest_endpoint_workspace_a_traversal_never_includes_b() -> None:
     factory = _session_factory(fx)
 
     app = _make_rest_app()
-    app.state.db_session_factory = factory
+    _wire_graph_store(app, factory)
 
     with patch(
         "omniscience_core.auth.middleware._lookup_token",
@@ -641,7 +655,7 @@ async def test_mcp_tool_workspace_a_never_returns_b_entities() -> None:
     factory = _session_factory(fx)
 
     app = FastAPI()
-    app.state.db_session_factory = factory
+    _wire_graph_store(app, factory)
 
     result = await mcp_get_related_entities(
         app=app,
@@ -667,7 +681,7 @@ async def test_mcp_tool_workspace_b_never_returns_a_entities() -> None:
     factory = _session_factory(fx)
 
     app = FastAPI()
-    app.state.db_session_factory = factory
+    _wire_graph_store(app, factory)
 
     result = await mcp_get_related_entities(
         app=app,
