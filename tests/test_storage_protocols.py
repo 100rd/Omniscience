@@ -208,9 +208,7 @@ async def test_pgvector_graph_get_entity_returns_none_for_cross_workspace() -> N
         new_callable=AsyncMock,
         side_effect=ValueError("entity_not_found:svc.other"),
     ):
-        result = await store.get_entity(
-            entity_name="svc.other", workspace_id=_OTHER_WORKSPACE_ID
-        )
+        result = await store.get_entity(entity_name="svc.other", workspace_id=_OTHER_WORKSPACE_ID)
 
     assert result is None
 
