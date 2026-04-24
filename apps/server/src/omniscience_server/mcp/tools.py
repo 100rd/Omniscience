@@ -16,7 +16,7 @@ from typing import Any
 import structlog
 from fastapi import FastAPI
 from omniscience_core.db.models import Chunk, Document, IngestionRun, Source
-from omniscience_retrieval.graph_query import GraphQueryService
+from omniscience_core.storage import GraphResultView, GraphStore
 from omniscience_retrieval.models import SearchRequest
 from omniscience_retrieval.search import RetrievalService
 from sqlalchemy import func, select
@@ -309,15 +309,56 @@ async def mcp_get_related_entities(
     and the edges connecting them.  Each entity includes its associated
     chunk text for context.
     """
-    factory = getattr(app.state, "db_session_factory", None)
-    if factory is None:
-        raise RuntimeError("db_session_factory not available on app.state")
+    graph_store: GraphStore | None = getattr(app.state, "graph_store", None)
+    if graph_store is None:
+        raise RuntimeError("graph_store not available on app.state")
 
-    service = GraphQueryService(factory)
-    result = await service.get_related(
+    result = await graph_store.find_related(
         entity_name=entity_name,
         workspace_id=workspace_id,
         max_depth=max_depth,
         edge_types=edge_types,
     )
-    return result.to_dict()
+    return _graph_view_to_dict(result)
+
+
+def _graph_view_to_dict(result: GraphResultView) -> dict[str, Any]:
+    """Serialise a ``GraphResultView`` to the MCP wire format.
+
+    Mirrors ``omniscience_server.rest.entities._result_to_dict`` so
+    the MCP and REST surfaces return identical shapes.  Kept local
+    to avoid a rest -> mcp import.
+    """
+    depth_reached = max((n.depth for n in result.related), default=0)
+    return {
+        "seed": {
+            "name": result.seed.name,
+            "kind": result.seed.kind,
+            "source": result.seed.source,
+            "chunk_text": result.seed.chunk_text,
+        },
+        "related": [
+            {
+                "name": n.name,
+                "kind": n.kind,
+                "source": n.source,
+                "chunk_text": n.chunk_text,
+                "depth": n.depth,
+                "edge_type": n.edge_type,
+            }
+            for n in result.related
+        ],
+        "edges": [
+            {
+                "from": e.from_entity,
+                "to": e.to_entity,
+                "type": e.edge_type,
+            }
+            for e in result.edges
+        ],
+        "stats": {
+            "entities_found": 1 + len(result.related),
+            "edges_traversed": len(result.edges),
+            "depth_reached": depth_reached,
+        },
+    }

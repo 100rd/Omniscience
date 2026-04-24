@@ -11,11 +11,20 @@ Workspace scoping (issue #117)
 ------------------------------
 
 The caller's ``workspace_id`` is resolved from the authenticated principal
-and propagated to :class:`~omniscience_retrieval.graph_query.GraphQueryService`.
-A token with no workspace is rejected with ``403 forbidden`` — graph
-retrieval is fail-closed, never fail-open — because the service layer
-requires an explicit workspace and we refuse to invent one on behalf of
-an unscoped caller.
+and propagated to the ``GraphStore`` protocol (pgvector adapter today;
+Neo4j in Phase 2).  A token with no workspace is rejected with
+``403 forbidden`` — graph retrieval is fail-closed, never fail-open —
+because the protocol layer requires an explicit workspace and we refuse
+to invent one on behalf of an unscoped caller.
+
+Dependency injection
+--------------------
+
+The handler reads ``request.app.state.graph_store`` — a
+``GraphStore`` implementation wired at application startup (see
+``omniscience_server.app.create_app``).  The protocol-level
+``find_related`` call is semantically identical to the pre-#103
+``GraphQueryService.get_related`` call it replaces.
 """
 
 from __future__ import annotations
@@ -29,7 +38,7 @@ from omniscience_core.auth.middleware import get_current_token, require_scope
 from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
-from omniscience_retrieval.graph_query import GraphQueryService
+from omniscience_core.storage import GraphResultView, GraphStore
 
 log = structlog.get_logger(__name__)
 
@@ -74,12 +83,12 @@ async def get_related_entities(
     # Path parameters are URL-encoded by FastAPI; decode forward-slashes etc.
     entity_name = unquote(name)
 
-    factory = getattr(request.app.state, "db_session_factory", None)
-    if factory is None:
-        log.warning("db_session_factory_unavailable")
+    graph_store: GraphStore | None = getattr(request.app.state, "graph_store", None)
+    if graph_store is None:
+        log.warning("graph_store_unavailable")
         raise HTTPException(
             status_code=503,
-            detail={"code": "service_unavailable", "message": "Database not available"},
+            detail={"code": "service_unavailable", "message": "Graph store not available"},
         )
 
     # Resolve the caller's workspace.  A token with no workspace cannot be
@@ -99,10 +108,8 @@ async def get_related_entities(
             },
         )
 
-    service = GraphQueryService(factory)
-
     try:
-        result = await service.get_related(
+        result = await graph_store.find_related(
             entity_name=entity_name,
             workspace_id=workspace_id,
             max_depth=max_depth,
@@ -123,16 +130,60 @@ async def get_related_entities(
             detail={"code": "bad_request", "message": msg},
         ) from exc
 
+    depth_reached = max((n.depth for n in result.related), default=0)
     log.info(
         "entity_graph_traversal",
         entity=entity_name,
         workspace_id=str(workspace_id),
         max_depth=max_depth,
-        entities_found=result.stats["entities_found"],
-        edges_traversed=result.stats["edges_traversed"],
+        entities_found=1 + len(result.related),
+        edges_traversed=len(result.edges),
+        depth_reached=depth_reached,
     )
 
-    return result.to_dict()
+    return _result_to_dict(result)
+
+
+def _result_to_dict(result: GraphResultView) -> dict[str, Any]:
+    """Serialise a ``GraphResultView`` to the REST/MCP wire format.
+
+    Matches the legacy ``GraphResult.to_dict`` output byte-for-byte so
+    existing API consumers see no change after the #103 protocol
+    migration.
+    """
+    depth_reached = max((n.depth for n in result.related), default=0)
+    return {
+        "seed": {
+            "name": result.seed.name,
+            "kind": result.seed.kind,
+            "source": result.seed.source,
+            "chunk_text": result.seed.chunk_text,
+        },
+        "related": [
+            {
+                "name": n.name,
+                "kind": n.kind,
+                "source": n.source,
+                "chunk_text": n.chunk_text,
+                "depth": n.depth,
+                "edge_type": n.edge_type,
+            }
+            for n in result.related
+        ],
+        "edges": [
+            {
+                "from": e.from_entity,
+                "to": e.to_entity,
+                "type": e.edge_type,
+            }
+            for e in result.edges
+        ],
+        "stats": {
+            "entities_found": 1 + len(result.related),
+            "edges_traversed": len(result.edges),
+            "depth_reached": depth_reached,
+        },
+    }
 
 
 __all__ = ["router"]

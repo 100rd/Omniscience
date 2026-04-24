@@ -103,8 +103,22 @@ def _make_chunk(
 
 
 def _make_app(factory: Any = None) -> FastAPI:
+    """Build a minimal FastAPI app wired for the #103 GraphStore protocol.
+
+    The MCP/REST handlers post-#103 consume ``app.state.graph_store``
+    (a ``PgVectorGraphStore``) rather than constructing
+    ``GraphQueryService`` from ``db_session_factory`` directly.  The
+    session factory is still kept on ``app.state`` for legacy code
+    paths (tokens, freshness, etc.) that have not yet migrated.
+    """
+    from omniscience_retrieval.adapters import PgVectorGraphStore
+
     app = FastAPI()
     app.state.db_session_factory = factory
+    if factory is not None:
+        app.state.graph_store = PgVectorGraphStore(session_factory=factory)
+    else:
+        app.state.graph_store = None
     return app
 
 
@@ -533,14 +547,20 @@ async def test_get_related_skips_edge_when_endpoint_outside_workspace() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mcp_get_related_entities_raises_without_factory() -> None:
-    """mcp_get_related_entities raises RuntimeError when db_session_factory absent."""
+async def test_mcp_get_related_entities_raises_without_graph_store() -> None:
+    """mcp_get_related_entities raises RuntimeError when graph_store absent.
+
+    Post-#103 the MCP handler resolves its dependency through
+    ``app.state.graph_store`` (a ``GraphStore`` protocol implementation)
+    instead of constructing ``GraphQueryService`` directly from
+    ``db_session_factory``.
+    """
     from omniscience_server.mcp.tools import mcp_get_related_entities
 
     app = FastAPI()
-    app.state.db_session_factory = None
+    app.state.graph_store = None
 
-    with pytest.raises(RuntimeError, match="db_session_factory not available"):
+    with pytest.raises(RuntimeError, match="graph_store not available"):
         await mcp_get_related_entities(
             app=app, entity_name="any.entity", workspace_id=_WORKSPACE_ID
         )
@@ -563,7 +583,7 @@ async def test_mcp_get_related_entities_returns_dict() -> None:
     app = _make_app(factory=factory)
 
     with patch(
-        "omniscience_server.mcp.tools.GraphQueryService.get_related",
+        "omniscience_retrieval.graph_query.GraphQueryService.get_related",
         new_callable=AsyncMock,
         return_value=mock_result,
     ):
@@ -587,7 +607,7 @@ async def test_mcp_get_related_entities_propagates_not_found() -> None:
 
     with (
         patch(
-            "omniscience_server.mcp.tools.GraphQueryService.get_related",
+            "omniscience_retrieval.graph_query.GraphQueryService.get_related",
             new_callable=AsyncMock,
             side_effect=ValueError("entity_not_found:gone"),
         ),
@@ -613,7 +633,7 @@ async def test_mcp_get_related_entities_forwards_workspace_and_edge_types() -> N
     app = _make_app(factory=factory)
 
     with patch(
-        "omniscience_server.mcp.tools.GraphQueryService.get_related",
+        "omniscience_retrieval.graph_query.GraphQueryService.get_related",
         new_callable=AsyncMock,
         return_value=mock_result,
     ) as mock_get:
@@ -639,8 +659,14 @@ async def test_mcp_get_related_entities_forwards_workspace_and_edge_types() -> N
 
 
 def _make_rest_app(factory: Any = None) -> FastAPI:
-    """Build a minimal app with the entities router registered."""
+    """Build a minimal app with the entities router registered.
+
+    Lifespan does not run under an ``ASGITransport`` harness, so we
+    seed ``app.state.graph_store`` (a ``PgVectorGraphStore``) here —
+    mirroring what ``_lifespan`` does in production.
+    """
     from omniscience_core.config import Settings
+    from omniscience_retrieval.adapters import PgVectorGraphStore
     from omniscience_server.app import create_app
 
     settings = Settings(
@@ -653,6 +679,7 @@ def _make_rest_app(factory: Any = None) -> FastAPI:
     app = create_app(settings=settings)
     if factory is not None:
         app.state.db_session_factory = factory
+        app.state.graph_store = PgVectorGraphStore(session_factory=factory)
     return app
 
 
@@ -689,7 +716,7 @@ async def test_rest_entities_related_404_when_not_found() -> None:
             return_value=token_mock,
         ),
         patch(
-            "omniscience_server.rest.entities.GraphQueryService.get_related",
+            "omniscience_retrieval.graph_query.GraphQueryService.get_related",
             new_callable=AsyncMock,
             side_effect=ValueError("entity_not_found:gone"),
         ),
@@ -755,7 +782,7 @@ async def test_rest_entities_related_returns_graph_structure() -> None:
             return_value=token_mock,
         ),
         patch(
-            "omniscience_server.rest.entities.GraphQueryService.get_related",
+            "omniscience_retrieval.graph_query.GraphQueryService.get_related",
             new_callable=AsyncMock,
             return_value=graph_result,
         ),
@@ -856,7 +883,7 @@ async def test_rest_entities_related_max_depth_forwarded() -> None:
             return_value=token_mock,
         ),
         patch(
-            "omniscience_server.rest.entities.GraphQueryService.get_related",
+            "omniscience_retrieval.graph_query.GraphQueryService.get_related",
             new_callable=AsyncMock,
             return_value=graph_result,
         ) as mock_get,
@@ -891,7 +918,7 @@ async def test_rest_entities_related_edge_types_forwarded() -> None:
             return_value=token_mock,
         ),
         patch(
-            "omniscience_server.rest.entities.GraphQueryService.get_related",
+            "omniscience_retrieval.graph_query.GraphQueryService.get_related",
             new_callable=AsyncMock,
             return_value=graph_result,
         ) as mock_get,

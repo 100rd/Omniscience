@@ -12,6 +12,7 @@ Query rewriting (v0.4+) provides optional heuristic expansion of search
 queries before retrieval to improve recall in air-gapped deployments.
 """
 
+from .adapters import PgVectorGraphStore, PgVectorVectorStore
 from .federation import FederatedSearch
 from .federation_config import FederatedInstance, FederationConfig
 from .graph_query import EdgeResult, EntityNode, GraphQueryService, GraphResult
@@ -40,6 +41,8 @@ __all__ = [
     "GraphResult",
     "NoopReranker",
     "OllamaReranker",
+    "PgVectorGraphStore",
+    "PgVectorVectorStore",
     "QueryRewriter",
     "QueryStats",
     "Reranker",
