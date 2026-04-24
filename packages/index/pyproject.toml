@@ -1,18 +1,21 @@
 [project]
 name = "omniscience-index"
 version = "0.1.0"
-description = "PostgreSQL + pgvector index layer for Omniscience"
+description = "PostgreSQL + pgvector + Qdrant index layer for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
     "omniscience-core",
+    "omniscience-embeddings",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
     "neo4j>=5.19.0",
+    "qdrant-client>=1.12.0",
     "structlog>=24.1.0",
 ]
 
 [tool.uv.sources]
 omniscience-core = { workspace = true }
+omniscience-embeddings = { workspace = true }
 
 [build-system]
 requires = ["hatchling"]
