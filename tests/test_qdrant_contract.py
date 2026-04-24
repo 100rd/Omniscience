@@ -150,8 +150,28 @@ async def test_collection_bootstrap_is_idempotent(qdrant_store: QdrantVectorStor
 # ---------------------------------------------------------------------------
 
 
+def _stub_vector(text: str, dim: int = 8) -> list[float]:
+    """Same hash-based unit-norm vector that ``_StubEmbedding`` produces.
+
+    Used as the default embedding in ``_chunk`` so upsert-time and
+    query-time embeddings agree on the same text — otherwise every
+    chunk would land with the same constant vector and cosine
+    ordering would be a tie-break among identical points.
+    """
+    import math
+
+    h = hash(text)
+    raw = [((h >> (i * 4)) & 0xF) / 15.0 for i in range(dim)]
+    n = math.sqrt(sum(x * x for x in raw)) or 1.0
+    return [x / n for x in raw]
+
+
 def _chunk(*, text: str, ord_: int = 0, vector: list[float] | None = None) -> ChunkPayload:
-    payload: ChunkPayload = {"ord": ord_, "text": text, "embedding": vector or [0.1] * 8}
+    payload: ChunkPayload = {
+        "ord": ord_,
+        "text": text,
+        "embedding": vector if vector is not None else _stub_vector(text),
+    }
     return payload
 
 
