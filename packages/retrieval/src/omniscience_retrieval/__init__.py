@@ -16,6 +16,15 @@ from .adapters import PgVectorGraphStore, PgVectorVectorStore
 from .federation import FederatedSearch
 from .federation_config import FederatedInstance, FederationConfig
 from .graph_query import EdgeResult, EntityNode, GraphQueryService, GraphResult
+from .graph_rag import (
+    ANCHOR_FILTER_KEY,
+    CANDIDATE_EXPANSION_FACTOR,
+    GRAPH_AFFINITY_BASE,
+    MAX_ANCHOR_CANDIDATES,
+    MAX_ANCHOR_DEPTH,
+    MERGE_ALPHA,
+    GraphRAGComposer,
+)
 from .models import (
     ChunkLineage,
     Citation,
@@ -30,6 +39,12 @@ from .reranker import NoopReranker, OllamaReranker, Reranker
 from .search import RetrievalService
 
 __all__ = [
+    "ANCHOR_FILTER_KEY",
+    "CANDIDATE_EXPANSION_FACTOR",
+    "GRAPH_AFFINITY_BASE",
+    "MAX_ANCHOR_CANDIDATES",
+    "MAX_ANCHOR_DEPTH",
+    "MERGE_ALPHA",
     "ChunkLineage",
     "Citation",
     "EdgeResult",
@@ -38,6 +53,7 @@ __all__ = [
     "FederatedSearch",
     "FederationConfig",
     "GraphQueryService",
+    "GraphRAGComposer",
     "GraphResult",
     "NoopReranker",
     "OllamaReranker",

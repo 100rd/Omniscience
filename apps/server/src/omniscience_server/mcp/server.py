@@ -128,9 +128,17 @@ async def search(
     include_tombstoned: bool = False,
     retrieval_strategy: str = "hybrid",
 ) -> dict[str, Any]:
-    """Search tool — requires scope 'search'."""
+    """Search tool — requires scope 'search'.
+
+    When the calling token is workspace-scoped the ``workspace_id`` is
+    forwarded to :func:`mcp_search` so the :class:`GraphRAGComposer`
+    (issue #107) can enforce its ACL invariant and, when the backend
+    stack permits it, run the GraphRAG composed pipeline.  Tokens
+    without a workspace still get legacy-path results.
+    """
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
+    workspace_id = get_workspace_id(token) if token is not None else None
 
     return await mcp_search(
         app=_get_app(),
@@ -142,6 +150,7 @@ async def search(
         filters=filters,
         include_tombstoned=include_tombstoned,
         retrieval_strategy=retrieval_strategy,
+        workspace_id=workspace_id,
     )
 
 

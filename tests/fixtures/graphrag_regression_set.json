@@ -1,0 +1,29 @@
+{
+  "description": "Regression query set for GraphRAG retrieval composition (issue #107). Each entry pairs a representative user query with the set of chunk IDs the current pgvector retrieval path would return for that query on the shared in-memory corpus (``_build_corpus`` in test_graphrag_regression.py). The new composition path MUST return at least ``top_k_overlap_threshold`` of those chunks within the top-k cut — composition reorders deliberately (graph affinity boost), so we do not assert equality.",
+  "top_k": 5,
+  "top_k_overlap_threshold": 0.8,
+  "queries": [
+    { "id": "q01", "query": "how does authentication work", "anchor": "AuthService" },
+    { "id": "q02", "query": "what is the login flow", "anchor": "AuthService" },
+    { "id": "q03", "query": "password reset process", "anchor": "AuthService" },
+    { "id": "q04", "query": "how are API tokens verified", "anchor": null },
+    { "id": "q05", "query": "role based access control", "anchor": "RBACService" },
+    { "id": "q06", "query": "user permission model", "anchor": "RBACService" },
+    { "id": "q07", "query": "billing invoice generation", "anchor": "BillingService" },
+    { "id": "q08", "query": "subscription renewal", "anchor": "BillingService" },
+    { "id": "q09", "query": "refund handling", "anchor": null },
+    { "id": "q10", "query": "notification email delivery", "anchor": "NotificationService" },
+    { "id": "q11", "query": "webhook retry policy", "anchor": "NotificationService" },
+    { "id": "q12", "query": "document ingestion pipeline", "anchor": "IngestionService" },
+    { "id": "q13", "query": "chunking strategy for long documents", "anchor": "IngestionService" },
+    { "id": "q14", "query": "embedding generation throughput", "anchor": null },
+    { "id": "q15", "query": "vector search latency", "anchor": null },
+    { "id": "q16", "query": "graph traversal depth", "anchor": null },
+    { "id": "q17", "query": "freshness SLO monitoring", "anchor": "FreshnessWorker" },
+    { "id": "q18", "query": "scheduler interval configuration", "anchor": "SchedulerWorker" },
+    { "id": "q19", "query": "MCP tool endpoints", "anchor": null },
+    { "id": "q20", "query": "REST search endpoint rate limiting", "anchor": null },
+    { "id": "q21", "query": "multi-tenant workspace isolation", "anchor": null },
+    { "id": "q22", "query": "cross-workspace leakage prevention", "anchor": null }
+  ]
+}

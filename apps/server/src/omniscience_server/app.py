@@ -38,6 +38,7 @@ from omniscience_index.stores import Neo4jGraphStore, Neo4jStoreConfig
 from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from omniscience_retrieval import (
+    GraphRAGComposer,
     PgVectorGraphStore,
     PgVectorVectorStore,
     RetrievalService,
@@ -196,6 +197,23 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     app.state.retrieval_service = retrieval_service
     log.info("retrieval_service_ready", federated=settings.federation_enabled)
+
+    # --- GraphRAG composer (issue #107) ---
+    # Wraps ``graph_store`` + ``vector_store`` and dispatches to the
+    # new composed path when both backends are the Neo4j+Qdrant pair,
+    # or delegates to the legacy ``retrieval_service`` otherwise.  The
+    # composer requires an explicit ``workspace_id`` per call; callers
+    # that cannot resolve one MUST fall back to ``retrieval_service``.
+    graph_rag_composer = GraphRAGComposer(
+        graph_store=graph_store,
+        vector_store=app.state.vector_store,
+        legacy_service=retrieval_service,
+    )
+    app.state.graph_rag_composer = graph_rag_composer
+    log.info(
+        "graph_rag_composer_ready",
+        graphrag_active=graph_rag_composer.graphrag_active,
+    )
 
     # --- Ingestion worker ---
     index_writer = IndexWriter(session_factory)

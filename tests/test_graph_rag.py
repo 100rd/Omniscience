@@ -1,0 +1,641 @@
+"""Unit + contract tests for :class:`GraphRAGComposer` (issue #107).
+
+Covers:
+
+- Dispatch: legacy path when the backend pair is anything other than
+  Neo4j+Qdrant; GraphRAG path when both are the new stack.
+- Query without anchor, query with anchor, anchor-missing (graph
+  returns empty), empty graph result, empty vector result.
+- Cross-workspace filter pass-through: the composer forwards
+  ``workspace_id`` to every downstream call; a full isolation
+  contract test lives in ``test_graphrag_workspace_isolation.py``.
+- Dedup when the vector adapter returns duplicate chunk IDs.
+- Telemetry: Prometheus counters increment on the right labels, and
+  stage-duration histograms are observed for every composed query.
+
+All tests use in-process mocks (no containers) — the contract is
+expressed on the ``GraphStore`` / ``VectorStore`` protocols so mocks
+are faithful.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import UTC, datetime
+from typing import Any, cast
+
+import pytest
+from omniscience_core.storage.graph import (
+    EntityNodeView,
+    GraphEdgeView,
+    GraphResultView,
+)
+from omniscience_retrieval.graph_rag import (
+    ANCHOR_FILTER_KEY,
+    CANDIDATE_EXPANSION_FACTOR,
+    MAX_ANCHOR_CANDIDATES,
+    GraphRAGComposer,
+    _build_affinity_map,
+    _collect_candidates,
+    _extract_anchor,
+    _linear_blend,
+    _should_use_graphrag,
+    _widen_request,
+)
+from omniscience_retrieval.models import (
+    ChunkLineage,
+    Citation,
+    QueryStats,
+    SearchHit,
+    SearchRequest,
+    SearchResult,
+    SourceInfo,
+)
+from prometheus_client import CollectorRegistry, generate_latest
+
+# ---------------------------------------------------------------------------
+# Fakes — minimal GraphStore / VectorStore / legacy service
+# ---------------------------------------------------------------------------
+
+
+class _FakeGraphStore:
+    """In-memory GraphStore fake that records calls and returns fixtures."""
+
+    def __init__(
+        self,
+        *,
+        result: GraphResultView | None = None,
+        raise_not_found: bool = False,
+    ) -> None:
+        self._result = result
+        self._raise = raise_not_found
+        self.traverse_calls: list[dict[str, Any]] = []
+
+    async def traverse(
+        self,
+        *,
+        entity_name: str,
+        workspace_id: uuid.UUID,
+        max_depth: int = 1,
+        edge_types: list[str] | None = None,
+    ) -> GraphResultView:
+        self.traverse_calls.append(
+            {
+                "entity_name": entity_name,
+                "workspace_id": workspace_id,
+                "max_depth": max_depth,
+                "edge_types": edge_types,
+            }
+        )
+        if self._raise:
+            raise ValueError(f"entity_not_found:{entity_name}")
+        if self._result is None:
+            raise AssertionError("no_result_configured")
+        return self._result
+
+    # Unused by the composer but required by the protocol contract.
+    async def find_related(
+        self,
+        *,
+        entity_name: str,
+        workspace_id: uuid.UUID,
+        max_depth: int = 1,
+        edge_types: list[str] | None = None,
+    ) -> GraphResultView:
+        return await self.traverse(
+            entity_name=entity_name,
+            workspace_id=workspace_id,
+            max_depth=max_depth,
+            edge_types=edge_types,
+        )
+
+
+class _FakeVectorStore:
+    """In-memory VectorStore fake (protocol-compatible search)."""
+
+    def __init__(self, result: SearchResult) -> None:
+        self._result = result
+        self.search_calls: list[dict[str, Any]] = []
+
+    async def search(
+        self,
+        *,
+        request: SearchRequest,
+        workspace_id: uuid.UUID,
+    ) -> SearchResult:
+        self.search_calls.append({"request": request, "workspace_id": workspace_id})
+        return self._result
+
+
+class _FakeLegacyService:
+    """Legacy-path stub that records calls and returns a configured result."""
+
+    def __init__(self, result: SearchResult) -> None:
+        self._result = result
+        self.search_calls: list[SearchRequest] = []
+
+    async def search(self, request: SearchRequest) -> SearchResult:
+        self.search_calls.append(request)
+        return self._result
+
+
+# ---------------------------------------------------------------------------
+# Fixture builders
+# ---------------------------------------------------------------------------
+
+
+def _make_hit(
+    *,
+    chunk_id: uuid.UUID | None = None,
+    source_id: uuid.UUID | None = None,
+    score: float = 1.0,
+    text: str = "chunk text",
+) -> SearchHit:
+    """Minimal valid :class:`SearchHit`."""
+    return SearchHit(
+        chunk_id=chunk_id or uuid.uuid4(),
+        document_id=uuid.uuid4(),
+        score=score,
+        text=text,
+        source=SourceInfo(
+            id=source_id or uuid.uuid4(),
+            name="fake-source",
+            type="fake",
+        ),
+        citation=Citation(
+            uri="https://example.invalid/doc",
+            title="doc",
+            indexed_at=datetime.now(UTC),
+            doc_version=1,
+        ),
+        lineage=ChunkLineage(
+            ingestion_run_id=None,
+            embedding_model="stub",
+            embedding_provider="stub",
+            parser_version="stub",
+            chunker_strategy="stub",
+        ),
+        metadata={},
+    )
+
+
+def _make_result(hits: list[SearchHit]) -> SearchResult:
+    return SearchResult(
+        hits=hits,
+        query_stats=QueryStats(
+            total_matches_before_filters=len(hits),
+            vector_matches=len(hits),
+            text_matches=0,
+            duration_ms=1.0,
+        ),
+    )
+
+
+def _make_graph_result(
+    *,
+    seed_source: uuid.UUID,
+    related: list[tuple[uuid.UUID, int]],
+) -> GraphResultView:
+    """Build a ``GraphResultView`` with given seed/related source ids."""
+    seed = EntityNodeView(
+        name="seed-entity",
+        kind="service",
+        source=str(seed_source),
+        chunk_text="seed chunk",
+        depth=0,
+        edge_type=None,
+    )
+    related_nodes = [
+        EntityNodeView(
+            name=f"rel-{i}",
+            kind="service",
+            source=str(src),
+            chunk_text=f"related chunk {i}",
+            depth=depth,
+            edge_type="calls",
+        )
+        for i, (src, depth) in enumerate(related)
+    ]
+    edges = [
+        GraphEdgeView(from_entity="seed-entity", to_entity=f"rel-{i}", edge_type="calls")
+        for i in range(len(related))
+    ]
+    return GraphResultView(seed=seed, related=related_nodes, edges=edges)
+
+
+# ---------------------------------------------------------------------------
+# Pure-helper tests — no composer, no async
+# ---------------------------------------------------------------------------
+
+
+class TestExtractAnchor:
+    """Unit tests for :func:`_extract_anchor`."""
+
+    def test_returns_empty_when_filters_none(self) -> None:
+        req = SearchRequest(query="q")
+        assert _extract_anchor(req) == ""
+
+    def test_returns_empty_when_filters_missing_key(self) -> None:
+        req = SearchRequest(query="q", filters={"other": "thing"})
+        assert _extract_anchor(req) == ""
+
+    def test_returns_value_when_present(self) -> None:
+        req = SearchRequest(query="q", filters={ANCHOR_FILTER_KEY: "AuthService"})
+        assert _extract_anchor(req) == "AuthService"
+
+    def test_strips_whitespace(self) -> None:
+        req = SearchRequest(query="q", filters={ANCHOR_FILTER_KEY: "  AuthService  "})
+        assert _extract_anchor(req) == "AuthService"
+
+    def test_ignores_non_string_values(self) -> None:
+        req = SearchRequest(query="q", filters={ANCHOR_FILTER_KEY: 42})
+        assert _extract_anchor(req) == ""
+
+
+class TestLinearBlend:
+    """Unit tests for :func:`_linear_blend`."""
+
+    def test_pure_vector_when_affinity_zero(self) -> None:
+        assert _linear_blend(vector_score=0.8, graph_affinity=0.0) == pytest.approx(0.8 * 0.75)
+
+    def test_affinity_boost(self) -> None:
+        # With MERGE_ALPHA=0.25: 0.75 * 1.0 + 0.25 * 1.0 = 1.0
+        assert _linear_blend(vector_score=1.0, graph_affinity=1.0) == pytest.approx(1.0)
+
+
+class TestCollectCandidates:
+    """Unit tests for :func:`_collect_candidates`."""
+
+    def test_seed_counts_as_depth_zero(self) -> None:
+        seed_src = uuid.uuid4()
+        result = _make_graph_result(seed_source=seed_src, related=[])
+        ids, depths = _collect_candidates(result)
+        assert ids == (str(seed_src),)
+        assert depths == (0,)
+
+    def test_dedupes_duplicate_sources(self) -> None:
+        seed_src = uuid.uuid4()
+        other = uuid.uuid4()
+        result = _make_graph_result(
+            seed_source=seed_src,
+            related=[(other, 1), (other, 2), (seed_src, 1)],
+        )
+        ids, _ = _collect_candidates(result)
+        # seed + 1 unique related (second is duplicate of first, third duplicates seed)
+        assert len(ids) == 2
+        assert ids[0] == str(seed_src)
+        assert ids[1] == str(other)
+
+    def test_caps_at_max_anchor_candidates(self) -> None:
+        seed_src = uuid.uuid4()
+        related = [(uuid.uuid4(), 1) for _ in range(MAX_ANCHOR_CANDIDATES + 10)]
+        result = _make_graph_result(seed_source=seed_src, related=related)
+        ids, _ = _collect_candidates(result)
+        assert len(ids) == MAX_ANCHOR_CANDIDATES
+
+
+class TestBuildAffinityMap:
+    """Unit tests for :func:`_build_affinity_map`."""
+
+    def test_decays_by_depth(self) -> None:
+        from omniscience_retrieval.graph_rag import _AnchorStageResult
+
+        anchor = _AnchorStageResult(
+            anchor_requested=True,
+            anchor_name="x",
+            anchor_hit=True,
+            candidate_source_ids=("A", "B", "C"),
+            candidate_depths=(0, 1, 2),
+            duration_s=0.0,
+        )
+        m = _build_affinity_map(anchor)
+        # depth 0 and 1 both map to base (1.0); depth 2 halves to 0.5.
+        assert m["A"] == 1.0
+        assert m["B"] == 1.0
+        assert m["C"] == 0.5
+
+
+# ---------------------------------------------------------------------------
+# Dispatch tests
+# ---------------------------------------------------------------------------
+
+
+class TestDispatch:
+    """Ensure legacy fallback runs when the backend pair is not Neo4j+Qdrant."""
+
+    def test_legacy_when_pgvector_stack(self) -> None:
+        # Fake objects that are NOT Neo4jGraphStore/QdrantVectorStore.
+        g = _FakeGraphStore()
+        v = _FakeVectorStore(_make_result([]))
+        assert _should_use_graphrag(cast("Any", g), v) is False
+
+    def test_composer_property_reflects_dispatch(self) -> None:
+        g = _FakeGraphStore()
+        v = _FakeVectorStore(_make_result([]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g),
+            vector_store=v,
+            legacy_service=legacy,
+        )
+        assert composer.graphrag_active is False
+
+
+# ---------------------------------------------------------------------------
+# Composer behaviour tests (legacy fallback path)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestLegacyFallback:
+    """When dispatch says "legacy", the composer forwards unchanged."""
+
+    async def test_forwards_request_to_legacy(self) -> None:
+        g = _FakeGraphStore()
+        v = _FakeVectorStore(_make_result([]))
+        legacy_result = _make_result([_make_hit(score=0.9)])
+        legacy = _FakeLegacyService(legacy_result)
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g),
+            vector_store=v,
+            legacy_service=legacy,
+        )
+        req = SearchRequest(query="hello")
+        ws = uuid.uuid4()
+        result = await composer.search(req, workspace_id=ws)
+        assert result is legacy_result
+        assert len(legacy.search_calls) == 1
+        assert len(g.traverse_calls) == 0
+        assert len(v.search_calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# Composer behaviour tests (GraphRAG path — forced via monkeypatch)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def force_graphrag(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Force the dispatch to treat any store pair as the Neo4j+Qdrant stack.
+
+    Patches :func:`_should_use_graphrag` so the composer runs its
+    staged pipeline against the in-memory fakes.
+    """
+    import omniscience_retrieval.graph_rag as gr
+
+    monkeypatch.setattr(gr, "_should_use_graphrag", lambda g, v: True)
+
+
+@pytest.mark.asyncio
+class TestComposedPath:
+    """Behavioural tests when the composer runs its staged pipeline."""
+
+    async def test_no_anchor_runs_vector_only(self, force_graphrag: None) -> None:
+        g = _FakeGraphStore()  # never called when no anchor
+        hit = _make_hit(score=0.9)
+        v = _FakeVectorStore(_make_result([hit]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="no-anchor")
+        ws = uuid.uuid4()
+        result = await composer.search(req, workspace_id=ws)
+        assert len(g.traverse_calls) == 0
+        assert len(v.search_calls) == 1
+        # Workspace forwarded.
+        assert v.search_calls[0]["workspace_id"] == ws
+        # top_k widened for the vector stage.
+        called_req: SearchRequest = v.search_calls[0]["request"]
+        assert called_req.top_k == req.top_k * CANDIDATE_EXPANSION_FACTOR
+        # Result sliced back to requested top_k.
+        assert len(result.hits) == 1
+
+    async def test_anchor_hit_scopes_vector_search(self, force_graphrag: None) -> None:
+        seed_src = uuid.uuid4()
+        other_src = uuid.uuid4()
+        g = _FakeGraphStore(
+            result=_make_graph_result(seed_source=seed_src, related=[(other_src, 1)])
+        )
+        # Return a hit whose source is in the candidate set.
+        hit = _make_hit(source_id=seed_src, score=0.5)
+        v = _FakeVectorStore(_make_result([hit]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(
+            query="with-anchor",
+            filters={ANCHOR_FILTER_KEY: "AuthService"},
+        )
+        ws = uuid.uuid4()
+        await composer.search(req, workspace_id=ws)
+        # Graph traversal ran with the anchor + workspace.
+        assert len(g.traverse_calls) == 1
+        assert g.traverse_calls[0]["entity_name"] == "AuthService"
+        assert g.traverse_calls[0]["workspace_id"] == ws
+        # Vector search got the candidate source IDs as ``sources``.
+        v_req: SearchRequest = v.search_calls[0]["request"]
+        assert v_req.sources is not None
+        assert str(seed_src) in v_req.sources
+        assert str(other_src) in v_req.sources
+        # Anchor hint stripped before forwarding.
+        assert v_req.filters is None or ANCHOR_FILTER_KEY not in v_req.filters
+
+    async def test_anchor_miss_runs_unscoped_vector(self, force_graphrag: None) -> None:
+        g = _FakeGraphStore(raise_not_found=True)
+        v = _FakeVectorStore(_make_result([_make_hit(score=0.7)]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(
+            query="anchor-missing",
+            filters={ANCHOR_FILTER_KEY: "DoesNotExist"},
+        )
+        ws = uuid.uuid4()
+        result = await composer.search(req, workspace_id=ws)
+        # Graph attempted, raised, swallowed.
+        assert len(g.traverse_calls) == 1
+        # Vector still ran (with no source scoping).
+        v_req: SearchRequest = v.search_calls[0]["request"]
+        assert v_req.sources is None
+        assert len(result.hits) == 1
+
+    async def test_empty_vector_result_returns_empty(self, force_graphrag: None) -> None:
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=uuid.uuid4(), related=[]))
+        v = _FakeVectorStore(_make_result([]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="empty", filters={ANCHOR_FILTER_KEY: "X"})
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        assert result.hits == []
+
+    async def test_dedupes_duplicate_chunk_ids(self, force_graphrag: None) -> None:
+        chunk_id = uuid.uuid4()
+        dup_a = _make_hit(chunk_id=chunk_id, score=0.9)
+        dup_b = _make_hit(chunk_id=chunk_id, score=0.5)
+        other = _make_hit(score=0.4)
+        v = _FakeVectorStore(_make_result([dup_a, dup_b, other]))
+        g = _FakeGraphStore()
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="dedup", top_k=10)
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        # Two unique chunks survive.
+        ids = {h.chunk_id for h in result.hits}
+        assert len(ids) == 2
+        assert chunk_id in ids
+
+    async def test_anchor_boost_reorders_results(self, force_graphrag: None) -> None:
+        """When anchor surfaces a source, hits from that source outrank stronger vector hits."""
+        seed_src = uuid.uuid4()
+        unrelated_src = uuid.uuid4()
+        # Anchor graph includes seed_src only.
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed_src, related=[]))
+        # Vector returns: (a) unrelated_src high score, (b) seed_src lower score.
+        hit_unrelated = _make_hit(source_id=unrelated_src, score=0.9)
+        hit_related = _make_hit(source_id=seed_src, score=0.85)
+        v = _FakeVectorStore(_make_result([hit_unrelated, hit_related]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(
+            query="boost-test",
+            filters={ANCHOR_FILTER_KEY: "X"},
+            top_k=2,
+        )
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        # Related hit now outranks unrelated because of the graph affinity bonus.
+        assert result.hits[0].source.id == seed_src
+
+
+# ---------------------------------------------------------------------------
+# Telemetry tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestTelemetry:
+    """Verify Prometheus metrics emit on the right labels."""
+
+    async def test_metrics_exposed_via_generate_latest(self, force_graphrag: None) -> None:
+        # Issue a composed query so the counters/histograms get touched.
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=uuid.uuid4(), related=[]))
+        v = _FakeVectorStore(_make_result([_make_hit(score=0.5)]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="telem", filters={ANCHOR_FILTER_KEY: "X"})
+        await composer.search(req, workspace_id=uuid.uuid4())
+        exposition = generate_latest().decode()
+        # All four metric families present.
+        assert "omniscience_graphrag_stage_duration_seconds" in exposition
+        assert "omniscience_graphrag_candidate_set_size" in exposition
+        assert "omniscience_graphrag_anchor_total" in exposition
+        assert "omniscience_graphrag_queries_total" in exposition
+
+    async def test_anchor_outcome_labels(self, force_graphrag: None) -> None:
+        from omniscience_retrieval.graph_rag import _ANCHOR_HIT_TOTAL
+
+        # absent
+        g1 = _FakeGraphStore()
+        v = _FakeVectorStore(_make_result([]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g1), vector_store=v, legacy_service=legacy
+        )
+        before_absent = _ANCHOR_HIT_TOTAL.labels(outcome="absent")._value.get()
+        await composer.search(SearchRequest(query="a"), workspace_id=uuid.uuid4())
+        assert _ANCHOR_HIT_TOTAL.labels(outcome="absent")._value.get() == before_absent + 1
+
+        # miss
+        g2 = _FakeGraphStore(raise_not_found=True)
+        composer2 = GraphRAGComposer(
+            graph_store=cast("Any", g2), vector_store=v, legacy_service=legacy
+        )
+        before_miss = _ANCHOR_HIT_TOTAL.labels(outcome="miss")._value.get()
+        await composer2.search(
+            SearchRequest(query="b", filters={ANCHOR_FILTER_KEY: "X"}),
+            workspace_id=uuid.uuid4(),
+        )
+        assert _ANCHOR_HIT_TOTAL.labels(outcome="miss")._value.get() == before_miss + 1
+
+        # hit
+        g3 = _FakeGraphStore(result=_make_graph_result(seed_source=uuid.uuid4(), related=[]))
+        composer3 = GraphRAGComposer(
+            graph_store=cast("Any", g3), vector_store=v, legacy_service=legacy
+        )
+        before_hit = _ANCHOR_HIT_TOTAL.labels(outcome="hit")._value.get()
+        await composer3.search(
+            SearchRequest(query="c", filters={ANCHOR_FILTER_KEY: "Y"}),
+            workspace_id=uuid.uuid4(),
+        )
+        assert _ANCHOR_HIT_TOTAL.labels(outcome="hit")._value.get() == before_hit + 1
+
+
+# ---------------------------------------------------------------------------
+# _widen_request test
+# ---------------------------------------------------------------------------
+
+
+class TestWidenRequest:
+    """:func:`_widen_request` shapes the request forwarded to the vector store."""
+
+    def test_preserves_original_sources_when_no_candidates(self) -> None:
+        from omniscience_retrieval.graph_rag import _AnchorStageResult
+
+        anchor = _AnchorStageResult(
+            anchor_requested=False,
+            anchor_name="",
+            anchor_hit=False,
+            candidate_source_ids=(),
+            candidate_depths=(),
+            duration_s=0.0,
+        )
+        req = SearchRequest(query="x", sources=["keep-me"])
+        widened = _widen_request(req, anchor=anchor)
+        assert widened.sources == ["keep-me"]
+
+    def test_overrides_sources_with_candidates(self) -> None:
+        from omniscience_retrieval.graph_rag import _AnchorStageResult
+
+        anchor = _AnchorStageResult(
+            anchor_requested=True,
+            anchor_name="X",
+            anchor_hit=True,
+            candidate_source_ids=("A", "B"),
+            candidate_depths=(0, 1),
+            duration_s=0.0,
+        )
+        req = SearchRequest(query="x", sources=["original"])
+        widened = _widen_request(req, anchor=anchor)
+        assert widened.sources == ["A", "B"]
+
+    def test_strips_anchor_filter(self) -> None:
+        from omniscience_retrieval.graph_rag import _AnchorStageResult
+
+        anchor = _AnchorStageResult(
+            anchor_requested=False,
+            anchor_name="",
+            anchor_hit=False,
+            candidate_source_ids=(),
+            candidate_depths=(),
+            duration_s=0.0,
+        )
+        req = SearchRequest(
+            query="x",
+            filters={ANCHOR_FILTER_KEY: "Foo", "keep": "bar"},
+        )
+        widened = _widen_request(req, anchor=anchor)
+        assert widened.filters == {"keep": "bar"}
+
+
+# Silence unused-import warning on Any (used only in annotations above).
+_ = CollectorRegistry

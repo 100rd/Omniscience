@@ -17,6 +17,7 @@ import structlog
 from fastapi import FastAPI
 from omniscience_core.db.models import Chunk, Document, IngestionRun, Source
 from omniscience_core.storage import GraphResultView, GraphStore
+from omniscience_retrieval.graph_rag import GraphRAGComposer
 from omniscience_retrieval.models import SearchRequest
 from omniscience_retrieval.search import RetrievalService
 from sqlalchemy import func, select
@@ -43,12 +44,19 @@ async def mcp_search(
     filters: dict[str, Any] | None = None,
     include_tombstoned: bool = False,
     retrieval_strategy: str = "hybrid",
+    workspace_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
-    """Execute hybrid retrieval and return hits with citations."""
-    service: RetrievalService | None = getattr(app.state, "retrieval_service", None)
-    if service is None:
-        raise RuntimeError("retrieval_service not available on app.state")
+    """Execute retrieval and return hits with citations.
 
+    When ``workspace_id`` is supplied AND the ``GraphRAGComposer`` is
+    wired on ``app.state`` (issue #107), the composer runs: it either
+    performs the full GraphRAG composition (Neo4j+Qdrant stack) or
+    transparently falls back to the legacy ``RetrievalService`` for
+    any other backend combination.  When ``workspace_id`` is absent
+    (stdio/legacy callers) we use the legacy service directly — the
+    composer's workspace invariant is non-negotiable.
+    """
+    composer: GraphRAGComposer | None = getattr(app.state, "graph_rag_composer", None)
     request = SearchRequest(
         query=query,
         top_k=top_k,
@@ -59,6 +67,13 @@ async def mcp_search(
         include_tombstoned=include_tombstoned,
         retrieval_strategy=retrieval_strategy,  # type: ignore[arg-type]
     )
+    if composer is not None and workspace_id is not None:
+        result = await composer.search(request, workspace_id=workspace_id)
+        return result.model_dump(mode="json")
+
+    service: RetrievalService | None = getattr(app.state, "retrieval_service", None)
+    if service is None:
+        raise RuntimeError("retrieval_service not available on app.state")
     result = await service.search(request)
     return result.model_dump(mode="json")
 
