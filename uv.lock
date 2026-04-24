@@ -541,6 +541,20 @@ wheels = [
 ]
 
 [[package]]
+name = "docker"
+version = "7.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+    { name = "requests" },
+    { name = "urllib3" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/91/9b/4a2ea29aeba62471211598dac5d96825bb49348fa07e906ea930394a83ce/docker-7.1.0.tar.gz", hash = "sha256:ad8c70e6e3f8926cb8a92619b832b4ea5299e2831c14284663184e200546fa6c", size = 117834, upload-time = "2024-05-23T11:13:57.216Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e3/26/57c6fb270950d476074c087527a558ccb6f4436657314bfb6cdf484114c4/docker-7.1.0-py3-none-any.whl", hash = "sha256:c96b93b7f0a746f9e77d325bcfb87422a3d8bd4f03136ae8a85b37f1898d5fc0", size = 147774, upload-time = "2024-05-23T11:13:55.01Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.136.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1099,6 +1113,18 @@ wheels = [
 ]
 
 [[package]]
+name = "neo4j"
+version = "6.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1b/01/d6ce65e4647f6cb2b9cca3b813978f7329b54b4e36660aaec1ddf0ccce7a/neo4j-6.1.0.tar.gz", hash = "sha256:b5dde8c0d8481e7b6ae3733569d990dd3e5befdc5d452f531ad1884ed3500b84", size = 239629, upload-time = "2026-01-12T11:27:34.777Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/70/5c/ee71e2dd955045425ef44283f40ba1da67673cf06404916ca2950ac0cd39/neo4j-6.1.0-py3-none-any.whl", hash = "sha256:3bd93941f3a3559af197031157220af9fd71f4f93a311db687bd69ffa417b67d", size = 325326, upload-time = "2026-01-12T11:27:33.196Z" },
+]
+
+[[package]]
 name = "nodeenv"
 version = "1.10.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1200,6 +1226,7 @@ dev = [
     { name = "rich" },
     { name = "ruff" },
     { name = "tenacity" },
+    { name = "testcontainers", extra = ["neo4j"] },
     { name = "typer" },
 ]
 
@@ -1232,6 +1259,7 @@ dev = [
     { name = "rich", specifier = ">=13.7.0" },
     { name = "ruff", specifier = ">=0.4.7" },
     { name = "tenacity", specifier = ">=9.1.4" },
+    { name = "testcontainers", extras = ["neo4j"], specifier = ">=4.7.0" },
     { name = "typer", specifier = ">=0.12.0" },
 ]
 
@@ -1339,15 +1367,19 @@ version = "0.1.0"
 source = { editable = "packages/index" }
 dependencies = [
     { name = "asyncpg" },
+    { name = "neo4j" },
     { name = "omniscience-core" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
+    { name = "neo4j", specifier = ">=5.19.0" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
+    { name = "structlog", specifier = ">=24.1.0" },
 ]
 
 [[package]]
@@ -1944,6 +1976,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytz"
+version = "2026.1.post1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/56/db/b8721d71d945e6a8ac63c0fc900b2067181dbb50805958d4d4661cf7d277/pytz-2026.1.post1.tar.gz", hash = "sha256:3378dde6a0c3d26719182142c56e60c7f9af7e968076f31aae569d72a0358ee1", size = 321088, upload-time = "2026-03-03T07:47:50.683Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/10/99/781fe0c827be2742bcc775efefccb3b048a3a9c6ce9aec0cbf4a101677e5/pytz-2026.1.post1-py2.py3-none-any.whl", hash = "sha256:f2fd16142fda348286a75e1a524be810bb05d444e5a081f37f7affc635035f7a", size = 510489, upload-time = "2026-03-03T07:47:49.167Z" },
+]
+
+[[package]]
 name = "pywin32"
 version = "311"
 source = { registry = "https://pypi.org/simple" }
@@ -2302,6 +2343,27 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/47/c6/ee486fd809e357697ee8a44d3d69222b344920433d3b6666ccd9b374630c/tenacity-9.1.4.tar.gz", hash = "sha256:adb31d4c263f2bd041081ab33b498309a57c77f9acf2db65aadf0898179cf93a", size = 49413, upload-time = "2026-02-07T10:45:33.841Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d7/c1/eb8f9debc45d3b7918a32ab756658a0904732f75e555402972246b0b8e71/tenacity-9.1.4-py3-none-any.whl", hash = "sha256:6095a360c919085f28c6527de529e76a06ad89b23659fa881ae0649b867a9d55", size = 28926, upload-time = "2026-02-07T10:45:32.24Z" },
+]
+
+[[package]]
+name = "testcontainers"
+version = "4.14.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "docker" },
+    { name = "python-dotenv" },
+    { name = "typing-extensions" },
+    { name = "urllib3" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ca/ac/a597c3a0e02b26cbed6dd07df68be1e57684766fd1c381dee9b170a99690/testcontainers-4.14.2.tar.gz", hash = "sha256:1340ccf16fe3acd9389a6c9e1d9ab21d9fe99a8afdf8165f89c3e69c1967d239", size = 166841, upload-time = "2026-03-18T05:19:16.696Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/13/2d/26b8b30067d94339afee62c3edc9b803a6eb9332f521ba77d8aaab5de873/testcontainers-4.14.2-py3-none-any.whl", hash = "sha256:0d0522c3cd8f8d9627cda41f7a6b51b639fa57bdc492923c045117933c668d68", size = 125712, upload-time = "2026-03-18T05:19:15.29Z" },
+]
+
+[package.optional-dependencies]
+neo4j = [
+    { name = "neo4j" },
 ]
 
 [[package]]

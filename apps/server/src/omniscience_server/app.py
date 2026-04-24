@@ -29,9 +29,11 @@ from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.logging import configure_logging
 from omniscience_core.queue import NatsConnection, ensure_streams
 from omniscience_core.queue.consumer import QueueConsumer
+from omniscience_core.storage.graph import GraphStore
 from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
 from omniscience_index import IndexWriter
+from omniscience_index.stores import Neo4jGraphStore, Neo4jStoreConfig
 from omniscience_retrieval import (
     PgVectorGraphStore,
     PgVectorVectorStore,
@@ -107,17 +109,32 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # --- Storage adapters (GraphStore / VectorStore protocols, issue #103) ---
     # These wrap the pgvector writer + retriever behind the new backend-
-    # neutral protocols defined in ``omniscience_core.storage``.  Phase 2
-    # will swap these for Neo4jGraphStore + QdrantVectorStore behind a
-    # feature flag with zero changes to the call sites.
-    graph_store = PgVectorGraphStore(session_factory=session_factory)
+    # neutral protocols defined in ``omniscience_core.storage``.  Phase 2a
+    # (issue #104) selects the Neo4j graph backend behind the
+    # ``STORAGE_GRAPH_BACKEND`` feature flag; vector backend selection is
+    # separate (issue #106).
+    graph_backend = str(settings.storage_graph_backend).lower()
+    graph_store: GraphStore
+    neo4j_graph_store: Neo4jGraphStore | None = None
+    if graph_backend == "neo4j":
+        neo4j_config = Neo4jStoreConfig.from_settings(settings)
+        neo4j_graph_store = Neo4jGraphStore(config=neo4j_config)
+        await neo4j_graph_store.connect()
+        graph_store = neo4j_graph_store
+    elif graph_backend == "pgvector":
+        graph_store = PgVectorGraphStore(session_factory=session_factory)
+    else:
+        raise ValueError(
+            f"unknown_storage_graph_backend:{graph_backend} (expected 'pgvector' or 'neo4j')"
+        )
     vector_store = PgVectorVectorStore(
         session_factory=session_factory,
         embedding_provider=embedding_provider,
     )
     app.state.graph_store = graph_store
     app.state.vector_store = vector_store
-    log.info("storage_adapters_ready", backend="pgvector")
+    app.state.neo4j_graph_store = neo4j_graph_store
+    log.info("storage_adapters_ready", graph_backend=graph_backend)
 
     # --- Retrieval service ---
     # Keep the direct ``RetrievalService`` handle on app.state for the
@@ -219,6 +236,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Close the federation HTTP client if federation is active.
     if settings.federation_enabled and isinstance(retrieval_service, FederatedSearch):
         await retrieval_service.close()
+
+    if neo4j_graph_store is not None:
+        await neo4j_graph_store.close()
 
     await engine.dispose()
     await nats_conn.disconnect()

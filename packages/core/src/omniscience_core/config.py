@@ -147,6 +147,62 @@ class Settings(BaseSettings):
         description="Deployment environment: development, staging, production.",
     )
 
+    # --- Storage backend selection (Phase 2 / epic #96) ---
+    storage_graph_backend: str = Field(
+        default="pgvector",
+        description=(
+            "Graph-store backend: 'pgvector' (default, Phase 1) or 'neo4j' "
+            "(Phase 2a, issue #104). Flip to 'neo4j' after running the "
+            "dual-write migration per ADR-0005."
+        ),
+    )
+
+    # --- Neo4j (graph store, issue #104) ---
+    neo4j_uri: str = Field(
+        default="bolt://localhost:7687",
+        description="Bolt URI for the Neo4j graph store.",
+    )
+    neo4j_username: str = Field(
+        default="neo4j",
+        description="Neo4j auth username.",
+    )
+    neo4j_password: str = Field(
+        default="neo4j_dev",
+        description=(
+            "Neo4j auth password. MUST be overridden in non-dev "
+            "environments via Kubernetes Secret or equivalent."
+        ),
+    )
+    neo4j_database: str = Field(
+        default="neo4j",
+        description="Neo4j database name. Community Edition uses the default 'neo4j'.",
+    )
+    neo4j_max_pool_size: int = Field(
+        default=50,
+        ge=1,
+        le=500,
+        description="Maximum size of the Neo4j connection pool.",
+    )
+    neo4j_acquisition_timeout_seconds: float = Field(
+        default=60.0,
+        gt=0,
+        description="Seconds to wait for a pooled connection before failing.",
+    )
+    neo4j_max_retry_time_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Upper bound on managed-transaction retry time.",
+    )
+    neo4j_default_max_depth: int = Field(
+        default=3,
+        ge=1,
+        le=6,
+        description=(
+            "Default BFS depth cap for find_related traversals when the "
+            "caller does not supply one. Hard ceiling is 6."
+        ),
+    )
+
     # --- Scheduler ---
     scheduler_enabled: bool = Field(
         default=True,
