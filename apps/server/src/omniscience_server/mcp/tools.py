@@ -294,13 +294,19 @@ async def mcp_source_stats(app: FastAPI, source_id: str) -> dict[str, Any]:
 async def mcp_get_related_entities(
     app: FastAPI,
     entity_name: str,
+    workspace_id: uuid.UUID,
     max_depth: int = 1,
     edge_types: list[str] | None = None,
 ) -> dict[str, Any]:
     """Traverse the entity graph starting from a named entity.
 
+    The caller MUST supply ``workspace_id`` — the traversal is confined to
+    entities and edges owned by that workspace.  See issue #117 for the
+    background: graph retrieval used to bypass workspace scoping and leak
+    cross-tenant entities.
+
     Returns the seed entity, related entities (up to max_depth hops),
-    and the edges connecting them. Each entity includes its associated
+    and the edges connecting them.  Each entity includes its associated
     chunk text for context.
     """
     factory = getattr(app.state, "db_session_factory", None)
@@ -310,6 +316,7 @@ async def mcp_get_related_entities(
     service = GraphQueryService(factory)
     result = await service.get_related(
         entity_name=entity_name,
+        workspace_id=workspace_id,
         max_depth=max_depth,
         edge_types=edge_types,
     )

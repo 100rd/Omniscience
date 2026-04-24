@@ -10,6 +10,7 @@ Covers:
 - GraphQueryService.get_related: max_depth clamped to minimum 1
 - GraphQueryService.get_related: chunk_text populated when chunk exists
 - GraphQueryService.get_related: chunk_text is None when chunk_id is None
+- GraphQueryService.get_related: workspace_id is required (keyword-only, no default)
 - GraphResult.stats: entities_found, edges_traversed, depth_reached
 - GraphResult.to_dict: correct wire format structure
 - GraphResult.to_dict: empty related list
@@ -18,6 +19,7 @@ Covers:
 - mcp_get_related_entities: raises RuntimeError when no factory on app.state
 - mcp_get_related_entities: delegates to GraphQueryService and returns dict
 - mcp_get_related_entities: propagates ValueError from service
+- mcp_get_related_entities: forwards workspace_id to the service
 - MCP server tool: entity_not_found propagated as ValueError
 - REST GET /api/v1/entities/{name}/related: 404 when entity not found
 - REST GET /api/v1/entities/{name}/related: 503 when DB unavailable
@@ -26,6 +28,7 @@ Covers:
 - REST GET /api/v1/entities/{name}/related: edge_types query param forwarded
 - REST GET /api/v1/entities/{name}/related: requires search scope (401)
 - REST GET /api/v1/entities/{name}/related: requires search scope (403)
+- REST GET /api/v1/entities/{name}/related: 403 when token has no workspace (#117)
 - GraphQueryService._fetch_entity_by_name: returns None for missing entity
 - GraphQueryService._fetch_chunk_text: returns None when chunk_id is None
 """
@@ -54,6 +57,10 @@ _NEIGHBOR_ID = uuid.uuid4()
 _CHUNK_ID = uuid.uuid4()
 _SRC_ID = uuid.uuid4()
 _EDGE_ID = uuid.uuid4()
+# Workspace used for all unit-test queries.  The unit-test DB is fully
+# mocked so this value never actually filters any row; it exists only to
+# satisfy the required ``workspace_id`` parameter introduced for #117.
+_WORKSPACE_ID = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000042")
 
 
 def _make_entity(
@@ -107,6 +114,20 @@ def _build_service_with_session(session: AsyncMock) -> GraphQueryService:
     factory.return_value.__aenter__ = AsyncMock(return_value=session)
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
     return GraphQueryService(factory)
+
+
+def _scalar_result(value: Any) -> MagicMock:
+    """Build an execute() return whose scalar_one_or_none() == value."""
+    r = MagicMock()
+    r.scalar_one_or_none.return_value = value
+    return r
+
+
+def _iter_result(rows: list[Any]) -> MagicMock:
+    """Build an execute() return that iterates over *rows*."""
+    r = MagicMock()
+    r.__iter__ = MagicMock(return_value=iter(rows))
+    return r
 
 
 # ---------------------------------------------------------------------------
@@ -200,14 +221,29 @@ def test_entity_node_defaults() -> None:
 async def test_get_related_raises_when_seed_not_found() -> None:
     """get_related raises ValueError with entity_not_found: prefix."""
     session = AsyncMock()
-    # scalar_one_or_none returns None → entity not found
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None
-    session.execute = AsyncMock(return_value=result_mock)
+    session.execute = AsyncMock(return_value=_scalar_result(None))
 
     service = _build_service_with_session(session)
     with pytest.raises(ValueError, match=r"entity_not_found:missing\.entity"):
-        await service.get_related("missing.entity")
+        await service.get_related(entity_name="missing.entity", workspace_id=_WORKSPACE_ID)
+
+
+@pytest.mark.asyncio
+async def test_get_related_requires_workspace_id_keyword_only() -> None:
+    """workspace_id is keyword-only — passing it positionally fails.
+
+    Regression guard for issue #117: we never want a caller to silently
+    omit the workspace filter by mis-ordering arguments.
+    """
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=_scalar_result(None))
+    service = _build_service_with_session(session)
+
+    # Positional call is a TypeError at call time because the only
+    # allowed positional argument is self.
+    with pytest.raises(TypeError):
+        # Intentional misuse — ignore type checker.
+        await service.get_related("missing.entity", _WORKSPACE_ID)  # type: ignore[misc]
 
 
 @pytest.mark.asyncio
@@ -216,21 +252,19 @@ async def test_get_related_returns_seed_only_when_no_edges() -> None:
     seed = _make_entity(chunk_id=None)
     session = AsyncMock()
 
-    # _fetch_entity_by_name → returns seed
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-
-    # _fetch_adjacent → no edges (outgoing + incoming both empty)
-    empty_out = MagicMock()
-    empty_out.__iter__ = MagicMock(return_value=iter([]))
-    empty_in = MagicMock()
-    empty_in.__iter__ = MagicMock(return_value=iter([]))
-
-    session.execute = AsyncMock(side_effect=[name_result, empty_out, empty_in])
-    session.get = AsyncMock(return_value=None)  # chunk lookup → None
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),  # _fetch_entity_by_name
+            _iter_result([]),  # outgoing
+            _iter_result([]),  # incoming
+        ]
+    )
+    session.get = AsyncMock(return_value=None)  # chunk lookup
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs")
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID
+    )
 
     assert result.seed.name == "aws_s3_bucket.logs"
     assert result.related == []
@@ -254,31 +288,27 @@ async def test_get_related_depth1_returns_immediate_neighbor() -> None:
     )
 
     session = AsyncMock()
-
-    # execute calls:
-    # 1. _fetch_entity_by_name (SELECT Entity WHERE name=...)
-    # 2. outgoing edges (SELECT Edge JOIN Entity WHERE source=seed)
-    # 3. incoming edges (SELECT Edge JOIN Entity WHERE target=seed)
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([(edge, neighbor)]))
-
-    in_result = MagicMock()
-    in_result.__iter__ = MagicMock(return_value=iter([]))
-
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
-
-    # session.get calls:
-    # 1. _fetch_chunk_text for seed (chunk_id=None → returns None)
-    # 2. _fetch_entity_by_id for edge.source_entity_id
-    # 3. _fetch_entity_by_id for edge.target_entity_id
-    # 4. _fetch_chunk_text for neighbor (chunk_id=None → returns None)
-    session.get = AsyncMock(side_effect=[None, seed, neighbor, None])
+    # execute calls (in order):
+    # 1. _fetch_entity_by_name (SELECT Entity JOIN Source WHERE name=...)
+    # 2. outgoing edges
+    # 3. incoming edges
+    # 4. _fetch_entity_by_id for edge.source_entity_id (workspace-scoped)
+    # 5. _fetch_entity_by_id for edge.target_entity_id (workspace-scoped)
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([(edge, neighbor)]),
+            _iter_result([]),
+            _scalar_result(seed),  # source_entity resolve
+            _scalar_result(neighbor),  # target_entity resolve
+        ]
+    )
+    session.get = AsyncMock(return_value=None)  # chunk lookups
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs", max_depth=1)
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID, max_depth=1
+    )
 
     assert len(result.related) == 1
     assert result.related[0].name == "resource.aws_s3_bucket.logs"
@@ -295,21 +325,19 @@ async def test_get_related_chunk_text_populated() -> None:
     seed = _make_entity(chunk_id=_CHUNK_ID)
 
     session = AsyncMock()
-
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([]))
-    in_result = MagicMock()
-    in_result.__iter__ = MagicMock(return_value=iter([]))
-
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
-    # session.get → chunk
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([]),
+            _iter_result([]),
+        ]
+    )
     session.get = AsyncMock(return_value=chunk)
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs")
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID
+    )
 
     assert result.seed.chunk_text == "resource aws_s3_bucket logs {}"
 
@@ -320,18 +348,19 @@ async def test_get_related_chunk_text_none_when_no_chunk_id() -> None:
     seed = _make_entity(chunk_id=None)
 
     session = AsyncMock()
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([]))
-    in_result = MagicMock()
-    in_result.__iter__ = MagicMock(return_value=iter([]))
-
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([]),
+            _iter_result([]),
+        ]
+    )
     session.get = AsyncMock(return_value=None)
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs")
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID
+    )
 
     assert result.seed.chunk_text is None
 
@@ -342,19 +371,19 @@ async def test_get_related_max_depth_clamped_to_1() -> None:
     seed = _make_entity(chunk_id=None)
 
     session = AsyncMock()
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([]))
-    in_result = MagicMock()
-    in_result.__iter__ = MagicMock(return_value=iter([]))
-
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([]),
+            _iter_result([]),
+        ]
+    )
     session.get = AsyncMock(return_value=None)
 
     service = _build_service_with_session(session)
-    # max_depth=0 should be clamped to 1 — no crash
-    result = await service.get_related("aws_s3_bucket.logs", max_depth=0)
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID, max_depth=0
+    )
     assert result.seed.name == "aws_s3_bucket.logs"
 
 
@@ -364,23 +393,24 @@ async def test_get_related_edge_type_filter_applied() -> None:
     seed = _make_entity(chunk_id=None)
 
     session = AsyncMock()
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-    # No edges returned because filter restricts them
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([]))
-    in_result = MagicMock()
-    in_result.__iter__ = MagicMock(return_value=iter([]))
-
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([]),
+            _iter_result([]),
+        ]
+    )
     session.get = AsyncMock(return_value=None)
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs", edge_types=["cross_ref"])
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs",
+        workspace_id=_WORKSPACE_ID,
+        edge_types=["cross_ref"],
+    )
 
-    # The edge_types filter should have been passed to the query — no neighbors
     assert result.related == []
-    # Verify the execute was called at least once for the name lookup
+    # Name lookup at minimum triggers one execute.
     assert session.execute.call_count >= 1
 
 
@@ -394,7 +424,6 @@ async def test_get_related_bidirectional_incoming_edge() -> None:
         entity_type="module",
         chunk_id=None,
     )
-    # edge points from upstream TO seed (incoming from seed's perspective)
     edge = _make_edge(
         source_entity_id=_NEIGHBOR_ID,
         target_entity_id=_SEED_ID,
@@ -402,22 +431,21 @@ async def test_get_related_bidirectional_incoming_edge() -> None:
     )
 
     session = AsyncMock()
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([]))
-
-    in_result = MagicMock()
-    # For incoming edges: the JOIN is on source_entity_id, so we get (edge, upstream)
-    in_result.__iter__ = MagicMock(return_value=iter([(edge, upstream)]))
-
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
-    # get calls: chunk for seed, edge entity lookups (source/target), chunk for upstream
-    session.get = AsyncMock(side_effect=[None, upstream, seed, None])
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([]),  # outgoing
+            _iter_result([(edge, upstream)]),  # incoming
+            _scalar_result(upstream),  # source_entity resolve
+            _scalar_result(seed),  # target_entity resolve
+        ]
+    )
+    session.get = AsyncMock(return_value=None)
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs", max_depth=1)
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID, max_depth=1
+    )
 
     assert len(result.related) == 1
     assert result.related[0].name == "upstream.module"
@@ -442,26 +470,61 @@ async def test_get_related_deduplicates_visited_nodes() -> None:
     )
 
     session = AsyncMock()
-    name_result = MagicMock()
-    name_result.scalar_one_or_none.return_value = seed
-
-    out_result = MagicMock()
-    out_result.__iter__ = MagicMock(return_value=iter([(edge1, neighbor), (edge2, neighbor)]))
-
-    in_result = MagicMock()
-    in_result.__iter__ = MagicMock(return_value=iter([]))
-
-    # Accommodate multiple session.get calls
-    session.execute = AsyncMock(side_effect=[name_result, out_result, in_result])
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([(edge1, neighbor), (edge2, neighbor)]),
+            _iter_result([]),
+            # edge1 endpoint resolves
+            _scalar_result(seed),
+            _scalar_result(neighbor),
+            # edge2 endpoint resolves
+            _scalar_result(seed),
+            _scalar_result(neighbor),
+        ]
+    )
     session.get = AsyncMock(return_value=None)
 
     service = _build_service_with_session(session)
-    result = await service.get_related("aws_s3_bucket.logs", max_depth=1)
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID, max_depth=1
+    )
 
-    # Even though edge1 and edge2 both point to the same neighbor,
-    # the neighbor should appear only once in related.
     neighbor_names = [n.name for n in result.related]
     assert neighbor_names.count("shared.entity") == 1
+
+
+@pytest.mark.asyncio
+async def test_get_related_skips_edge_when_endpoint_outside_workspace() -> None:
+    """If one edge endpoint is outside the workspace, the edge is dropped.
+
+    Direct regression test for #117 at the unit level: even if an edge row
+    slips through (e.g. via a planted cross-tenant entity), the endpoint
+    resolution MUST re-check the workspace and refuse to surface it.
+    """
+    seed = _make_entity(entity_id=_SEED_ID, chunk_id=None)
+    neighbor = _make_entity(entity_id=_NEIGHBOR_ID, name="other.ws.entity", chunk_id=None)
+    edge = _make_edge(source_entity_id=_SEED_ID, target_entity_id=_NEIGHBOR_ID)
+
+    session = AsyncMock()
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_result(seed),
+            _iter_result([(edge, neighbor)]),
+            _iter_result([]),
+            _scalar_result(seed),  # from-endpoint in-workspace
+            _scalar_result(None),  # to-endpoint OUTSIDE workspace → drop edge
+        ]
+    )
+    session.get = AsyncMock(return_value=None)
+
+    service = _build_service_with_session(session)
+    result = await service.get_related(
+        entity_name="aws_s3_bucket.logs", workspace_id=_WORKSPACE_ID, max_depth=1
+    )
+
+    assert result.edges == []
+    assert result.related == []
 
 
 # ---------------------------------------------------------------------------
@@ -478,7 +541,9 @@ async def test_mcp_get_related_entities_raises_without_factory() -> None:
     app.state.db_session_factory = None
 
     with pytest.raises(RuntimeError, match="db_session_factory not available"):
-        await mcp_get_related_entities(app=app, entity_name="any.entity")
+        await mcp_get_related_entities(
+            app=app, entity_name="any.entity", workspace_id=_WORKSPACE_ID
+        )
 
 
 @pytest.mark.asyncio
@@ -502,7 +567,9 @@ async def test_mcp_get_related_entities_returns_dict() -> None:
         new_callable=AsyncMock,
         return_value=mock_result,
     ):
-        result = await mcp_get_related_entities(app=app, entity_name="e")
+        result = await mcp_get_related_entities(
+            app=app, entity_name="e", workspace_id=_WORKSPACE_ID
+        )
 
     assert "seed" in result
     assert "related" in result
@@ -526,12 +593,12 @@ async def test_mcp_get_related_entities_propagates_not_found() -> None:
         ),
         pytest.raises(ValueError, match="entity_not_found"),
     ):
-        await mcp_get_related_entities(app=app, entity_name="gone")
+        await mcp_get_related_entities(app=app, entity_name="gone", workspace_id=_WORKSPACE_ID)
 
 
 @pytest.mark.asyncio
-async def test_mcp_get_related_entities_passes_edge_types() -> None:
-    """mcp_get_related_entities forwards edge_types to GraphQueryService."""
+async def test_mcp_get_related_entities_forwards_workspace_and_edge_types() -> None:
+    """mcp_get_related_entities forwards workspace_id and edge_types to the service."""
     from omniscience_server.mcp.tools import mcp_get_related_entities
 
     mock_result = MagicMock()
@@ -553,12 +620,14 @@ async def test_mcp_get_related_entities_passes_edge_types() -> None:
         await mcp_get_related_entities(
             app=app,
             entity_name="e",
+            workspace_id=_WORKSPACE_ID,
             max_depth=2,
             edge_types=["cross_ref", "tfstate_of"],
         )
 
     mock_get.assert_called_once_with(
         entity_name="e",
+        workspace_id=_WORKSPACE_ID,
         max_depth=2,
         edge_types=["cross_ref", "tfstate_of"],
     )
@@ -587,20 +656,31 @@ def _make_rest_app(factory: Any = None) -> FastAPI:
     return app
 
 
+def _make_auth_token(
+    scopes: list[str] | None = None,
+    workspace_id: uuid.UUID | None = _WORKSPACE_ID,
+) -> tuple[MagicMock, str]:
+    """Build a mock ApiToken + generate a matching plaintext bearer string."""
+    from omniscience_core.auth.tokens import generate_token, hash_token
+    from omniscience_core.db.models import ApiToken
+
+    plaintext, prefix = generate_token("test")
+    token: MagicMock = MagicMock(spec=ApiToken)
+    token.hashed_token = hash_token(plaintext)
+    token.token_prefix = prefix
+    token.scopes = scopes or ["search"]
+    token.expires_at = None
+    token.is_active = True
+    token.workspace_id = workspace_id
+    return token, plaintext
+
+
 @pytest.mark.asyncio
 async def test_rest_entities_related_404_when_not_found() -> None:
     """GET /api/v1/entities/{name}/related returns 404 when entity absent."""
     from httpx import ASGITransport, AsyncClient
-    from omniscience_core.auth.tokens import generate_token, hash_token
-    from omniscience_core.db.models import ApiToken
 
-    token_mock: ApiToken = MagicMock(spec=ApiToken)
-    plaintext, prefix = generate_token("test")
-    token_mock.hashed_token = hash_token(plaintext)
-    token_mock.token_prefix = prefix
-    token_mock.scopes = ["search"]
-    token_mock.expires_at = None
-    token_mock.is_active = True
+    token_mock, plaintext = _make_auth_token()
 
     with (
         patch(
@@ -631,19 +711,9 @@ async def test_rest_entities_related_404_when_not_found() -> None:
 async def test_rest_entities_related_503_when_no_db() -> None:
     """GET /api/v1/entities/{name}/related returns 503 when DB unavailable."""
     from httpx import ASGITransport, AsyncClient
-    from omniscience_core.auth.tokens import generate_token, hash_token
-    from omniscience_core.db.models import ApiToken
 
-    token_mock: ApiToken = MagicMock(spec=ApiToken)
-    plaintext, prefix = generate_token("test")
-    token_mock.hashed_token = hash_token(plaintext)
-    token_mock.token_prefix = prefix
-    token_mock.scopes = ["search"]
-    token_mock.expires_at = None
-    token_mock.is_active = True
+    token_mock, plaintext = _make_auth_token()
 
-    # Provide a factory for auth, but make the entities endpoint see None
-    # by patching getattr inside the entities module.
     with (
         patch(
             "omniscience_core.auth.middleware._lookup_token",
@@ -670,17 +740,8 @@ async def test_rest_entities_related_503_when_no_db() -> None:
 async def test_rest_entities_related_returns_graph_structure() -> None:
     """GET /api/v1/entities/{name}/related returns the GraphResult dict."""
     from httpx import ASGITransport, AsyncClient
-    from omniscience_core.auth.tokens import generate_token, hash_token
-    from omniscience_core.db.models import ApiToken
-    from omniscience_retrieval.graph_query import EntityNode, GraphResult
 
-    token_mock: ApiToken = MagicMock(spec=ApiToken)
-    plaintext, prefix = generate_token("test")
-    token_mock.hashed_token = hash_token(plaintext)
-    token_mock.token_prefix = prefix
-    token_mock.scopes = ["search"]
-    token_mock.expires_at = None
-    token_mock.is_active = True
+    token_mock, plaintext = _make_auth_token()
 
     seed = EntityNode(
         name="aws_s3_bucket.logs", kind="tfstate_instance", source="s", chunk_text=None
@@ -733,16 +794,8 @@ async def test_rest_entities_related_401_without_token() -> None:
 async def test_rest_entities_related_403_wrong_scope() -> None:
     """GET /api/v1/entities/{name}/related returns 403 for insufficient scope."""
     from httpx import ASGITransport, AsyncClient
-    from omniscience_core.auth.tokens import generate_token, hash_token
-    from omniscience_core.db.models import ApiToken
 
-    token_mock: ApiToken = MagicMock(spec=ApiToken)
-    plaintext, prefix = generate_token("test")
-    token_mock.hashed_token = hash_token(plaintext)
-    token_mock.token_prefix = prefix
-    token_mock.scopes = ["sources:read"]  # wrong scope
-    token_mock.expires_at = None
-    token_mock.is_active = True
+    token_mock, plaintext = _make_auth_token(scopes=["sources:read"])
 
     with patch(
         "omniscience_core.auth.middleware._lookup_token",
@@ -761,20 +814,37 @@ async def test_rest_entities_related_403_wrong_scope() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rest_entities_related_403_when_token_has_no_workspace() -> None:
+    """A token without a workspace is rejected — fail-closed for #117."""
+    from httpx import ASGITransport, AsyncClient
+
+    token_mock, plaintext = _make_auth_token(workspace_id=None)
+
+    with patch(
+        "omniscience_core.auth.middleware._lookup_token",
+        new_callable=AsyncMock,
+        return_value=token_mock,
+    ):
+        app = _make_rest_app(factory=MagicMock())
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/entities/some.entity/related",
+                headers={"Authorization": f"Bearer {plaintext}"},
+            )
+
+    assert response.status_code == 403
+    data = response.json()
+    assert data["error"]["code"] == "forbidden"
+    assert "workspace" in data["error"]["message"].lower()
+
+
+@pytest.mark.asyncio
 async def test_rest_entities_related_max_depth_forwarded() -> None:
     """max_depth query parameter is forwarded to GraphQueryService."""
     from httpx import ASGITransport, AsyncClient
-    from omniscience_core.auth.tokens import generate_token, hash_token
-    from omniscience_core.db.models import ApiToken
-    from omniscience_retrieval.graph_query import EntityNode, GraphResult
 
-    token_mock: ApiToken = MagicMock(spec=ApiToken)
-    plaintext, prefix = generate_token("test")
-    token_mock.hashed_token = hash_token(plaintext)
-    token_mock.token_prefix = prefix
-    token_mock.scopes = ["search"]
-    token_mock.expires_at = None
-    token_mock.is_active = True
+    token_mock, plaintext = _make_auth_token()
 
     seed = EntityNode(name="e", kind="k", source="s", chunk_text=None)
     graph_result = GraphResult(seed=seed)
@@ -801,23 +871,15 @@ async def test_rest_entities_related_max_depth_forwarded() -> None:
 
     call_kwargs = mock_get.call_args.kwargs
     assert call_kwargs["max_depth"] == 3
+    assert call_kwargs["workspace_id"] == _WORKSPACE_ID
 
 
 @pytest.mark.asyncio
 async def test_rest_entities_related_edge_types_forwarded() -> None:
     """edge_types query parameter is forwarded to GraphQueryService."""
     from httpx import ASGITransport, AsyncClient
-    from omniscience_core.auth.tokens import generate_token, hash_token
-    from omniscience_core.db.models import ApiToken
-    from omniscience_retrieval.graph_query import EntityNode, GraphResult
 
-    token_mock: ApiToken = MagicMock(spec=ApiToken)
-    plaintext, prefix = generate_token("test")
-    token_mock.hashed_token = hash_token(plaintext)
-    token_mock.token_prefix = prefix
-    token_mock.scopes = ["search"]
-    token_mock.expires_at = None
-    token_mock.is_active = True
+    token_mock, plaintext = _make_auth_token()
 
     seed = EntityNode(name="e", kind="k", source="s", chunk_text=None)
     graph_result = GraphResult(seed=seed)
@@ -868,13 +930,13 @@ def test_mcp_server_has_get_related_entities_tool() -> None:
 async def test_fetch_entity_by_name_returns_none_when_missing() -> None:
     """_fetch_entity_by_name returns None when no entity matches."""
     session = AsyncMock()
-    result_mock = MagicMock()
-    result_mock.scalar_one_or_none.return_value = None
-    session.execute = AsyncMock(return_value=result_mock)
+    session.execute = AsyncMock(return_value=_scalar_result(None))
 
     factory = MagicMock()
     service = GraphQueryService(factory)
-    entity = await service._fetch_entity_by_name(session, "nonexistent")
+    entity = await service._fetch_entity_by_name(
+        session, "nonexistent", workspace_id=_WORKSPACE_ID
+    )
     assert entity is None
 
 
@@ -887,7 +949,6 @@ async def test_fetch_chunk_text_returns_none_when_chunk_id_none() -> None:
 
     text = await service._fetch_chunk_text(session, None)
     assert text is None
-    # session.get should NOT have been called
     session.get.assert_not_called()
 
 

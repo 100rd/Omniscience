@@ -3,17 +3,43 @@
 Provides :class:`GraphQueryService` which traverses the entity/edge graph
 starting from a named seed entity, up to a configurable depth, with optional
 edge-type filtering.
+
+Workspace isolation (see issue #117)
+------------------------------------
+
+Every public method requires an explicit ``workspace_id`` and confines both
+the seed lookup and the BFS expansion to entities whose owning
+``sources.tenant_id`` matches that workspace.  ``NULL`` tenant rows (legacy
+data that predates multi-tenancy) are admitted alongside the caller's own
+workspace — this mirrors the backward-compat semantics of
+:func:`omniscience_core.auth.workspace.workspace_filter`.
+
+The ``workspace_id`` parameter is keyword-only and required — there is no
+default — so a caller without a workspace cannot silently widen the
+traversal.  Callers that lack a workspace must fail upstream (REST/MCP
+layer) before reaching this service.
+
+Scoping is applied at three points to be transitively complete:
+
+1. Seed lookup (``_fetch_entity_by_name``).
+2. BFS expansion (``_fetch_adjacent``) — the NEIGHBOUR entity must also
+   belong to the workspace, so a planted cross-tenant edge cannot leak.
+3. Edge-endpoint resolution (``_fetch_entity_by_id``) used to populate
+   the ``from``/``to`` names on result edges.  Any endpoint outside the
+   workspace causes the edge to be dropped entirely rather than surfaced
+   with partial information.
 """
 
 from __future__ import annotations
 
+import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
 import structlog
-from omniscience_core.db.models import Chunk, Edge, Entity
-from sqlalchemy import select
+from omniscience_core.db.models import Chunk, Edge, Entity, Source
+from sqlalchemy import ColumnElement, Select, null, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 log = structlog.get_logger(__name__)
@@ -102,8 +128,26 @@ class GraphResult:
 # ---------------------------------------------------------------------------
 
 
+def _workspace_predicate(workspace_id: uuid.UUID) -> ColumnElement[bool]:
+    """Return the WHERE predicate that confines a query to *workspace_id*.
+
+    Entities and edges do not carry workspace metadata directly — ownership
+    is inherited from the owning :class:`Source` via its ``tenant_id``
+    column.  Every query that applies this predicate MUST join
+    ``Entity.source_id == Source.id`` first.
+
+    ``NULL`` tenant_id rows are always included for backward compatibility
+    with legacy data that predates multi-tenancy.
+    """
+    return or_(Source.tenant_id == workspace_id, Source.tenant_id == null())
+
+
 class GraphQueryService:
     """Traverse the entity graph using BFS from a named seed entity.
+
+    All queries are workspace-scoped.  Callers supply an explicit
+    ``workspace_id`` on every invocation; there is no way to ask for a
+    cross-workspace view (by design — see issue #117).
 
     Parameters
     ----------
@@ -116,7 +160,9 @@ class GraphQueryService:
 
     async def get_related(
         self,
+        *,
         entity_name: str,
+        workspace_id: uuid.UUID,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResult:
@@ -126,8 +172,13 @@ class GraphQueryService:
         ----------
         entity_name:
             FQN (``name`` column) of the seed entity.
+        workspace_id:
+            REQUIRED workspace UUID.  Seed lookup AND every traversal hop
+            are confined to this workspace.  There is no "skip filtering"
+            sentinel value — a caller that cannot name a workspace must
+            fail upstream.
         max_depth:
-            Maximum number of hops from the seed (≥1).  Values <1 are
+            Maximum number of hops from the seed (>=1).  Values <1 are
             clamped to 1.
         edge_types:
             Optional allowlist of edge types to follow.  When ``None``,
@@ -142,14 +193,18 @@ class GraphQueryService:
         Raises
         ------
         ValueError
-            When no entity with the given name exists in the DB.
+            When no entity with the given name exists in the caller's
+            workspace.  Cross-workspace entities are indistinguishable
+            from "not found" by design — we never leak existence.
         """
         max_depth = max(1, max_depth)
 
         session: AsyncSession
         async with self._factory() as session:
-            # Resolve seed entity
-            seed_entity = await self._fetch_entity_by_name(session, entity_name)
+            # 1. Resolve seed entity within the caller's workspace only.
+            seed_entity = await self._fetch_entity_by_name(
+                session, entity_name, workspace_id=workspace_id
+            )
             if seed_entity is None:
                 raise ValueError(f"entity_not_found:{entity_name}")
 
@@ -178,32 +233,37 @@ class GraphQueryService:
                 if current_depth >= max_depth:
                     continue
 
-                # Fetch all edges originating from (outgoing) OR targeting
-                # (incoming) the current entity so the traversal is undirected.
-                next_hops = await self._fetch_adjacent(session, current_id, edge_types=edge_types)
+                # 2. Expand — only neighbours in the same workspace are
+                # returned.  A planted cross-tenant edge is invisible here.
+                next_hops = await self._fetch_adjacent(
+                    session,
+                    current_id,
+                    edge_types=edge_types,
+                    workspace_id=workspace_id,
+                )
 
                 for edge, neighbor_entity in next_hops:
                     neighbor_id = str(neighbor_entity.id)
-                    # Record the edge regardless of whether neighbor is new
-                    # (we add the edge only once per direction though).
-                    from_name = (
-                        seed_entity.name
-                        if edge.source_entity_id == seed_entity.id
-                        else neighbor_entity.name
-                    )
-                    # Determine proper from/to from the edge itself.
+                    # 3. Resolve the canonical from/to names for the edge,
+                    # re-applying the workspace predicate on both endpoints.
+                    # If either endpoint is outside the workspace, skip the
+                    # edge entirely — do not surface partial/mixed data.
                     from_entity_result = await self._fetch_entity_by_id(
-                        session, str(edge.source_entity_id)
+                        session,
+                        str(edge.source_entity_id),
+                        workspace_id=workspace_id,
                     )
                     to_entity_result = await self._fetch_entity_by_id(
-                        session, str(edge.target_entity_id)
+                        session,
+                        str(edge.target_entity_id),
+                        workspace_id=workspace_id,
                     )
-                    from_name = from_entity_result.name if from_entity_result else from_name
-                    to_name = to_entity_result.name if to_entity_result else neighbor_entity.name
+                    if from_entity_result is None or to_entity_result is None:
+                        continue
 
                     edge_result = EdgeResult(
-                        from_entity=from_name,
-                        to_entity=to_name,
+                        from_entity=from_entity_result.name,
+                        to_entity=to_entity_result.name,
                         edge_type=edge.edge_type,
                     )
                     # Deduplicate edges
@@ -230,6 +290,7 @@ class GraphQueryService:
         log.info(
             "graph_traversal_complete",
             seed=entity_name,
+            workspace_id=str(workspace_id),
             max_depth=max_depth,
             entities_found=1 + len(related_nodes),
             edges_traversed=len(result_edges),
@@ -238,27 +299,56 @@ class GraphQueryService:
         return GraphResult(seed=seed_node, related=related_nodes, edges=result_edges)
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Private helpers — every read pipes through the workspace predicate
     # ------------------------------------------------------------------
 
-    async def _fetch_entity_by_name(self, session: AsyncSession, name: str) -> Entity | None:
-        """Return the first Entity whose ``name`` matches exactly."""
-        result = await session.execute(select(Entity).where(Entity.name == name).limit(1))
+    async def _fetch_entity_by_name(
+        self,
+        session: AsyncSession,
+        name: str,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> Entity | None:
+        """Return the first matching Entity scoped to *workspace_id*."""
+        stmt: Select[Any] = (
+            select(Entity)
+            .join(Source, Entity.source_id == Source.id)
+            .where(Entity.name == name)
+            .where(_workspace_predicate(workspace_id))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def _fetch_entity_by_id(self, session: AsyncSession, entity_id: str) -> Entity | None:
-        """Return an Entity by its primary key."""
-        from uuid import UUID
-
-        return await session.get(Entity, UUID(entity_id))
+    async def _fetch_entity_by_id(
+        self,
+        session: AsyncSession,
+        entity_id: str,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> Entity | None:
+        """Return an Entity by PK, constrained to *workspace_id*."""
+        stmt: Select[Any] = (
+            select(Entity)
+            .join(Source, Entity.source_id == Source.id)
+            .where(Entity.id == uuid.UUID(entity_id))
+            .where(_workspace_predicate(workspace_id))
+            .limit(1)
+        )
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
     async def _fetch_chunk_text(self, session: AsyncSession, chunk_id: object) -> str | None:
-        """Return the first chunk's text for an entity, or None."""
+        """Return the chunk's text, or None.
+
+        Chunks do not carry workspace metadata directly; they are reached
+        only via entities we have already authorised, so fetching by PK
+        is safe once the owning entity has passed the workspace filter.
+        """
         if chunk_id is None:
             return None
-        from uuid import UUID
 
-        chunk = await session.get(Chunk, UUID(str(chunk_id)))
+        chunk = await session.get(Chunk, uuid.UUID(str(chunk_id)))
         return chunk.text if chunk is not None else None
 
     async def _fetch_adjacent(
@@ -266,29 +356,33 @@ class GraphQueryService:
         session: AsyncSession,
         entity_id: str,
         edge_types: list[str] | None,
+        *,
+        workspace_id: uuid.UUID,
     ) -> list[tuple[Edge, Entity]]:
-        """Return (edge, neighbor_entity) pairs for all adjacent edges.
+        """Return (edge, neighbor_entity) pairs whose NEIGHBOUR is in *workspace_id*.
 
         Traversal is bidirectional: we look at both outgoing
         (source_entity_id == entity_id) and incoming
-        (target_entity_id == entity_id) edges.
+        (target_entity_id == entity_id) edges.  For every hop, the
+        neighbour entity (and therefore its owning source) must itself
+        belong to the workspace — this closes the transitive leak path.
         """
-        from uuid import UUID
+        eid = uuid.UUID(entity_id)
 
-        eid = UUID(entity_id)
-
-        # Outgoing edges
-        outgoing_query = (
+        outgoing_query: Select[Any] = (
             select(Edge, Entity)
             .join(Entity, Edge.target_entity_id == Entity.id)
+            .join(Source, Entity.source_id == Source.id)
             .where(Edge.source_entity_id == eid)
+            .where(_workspace_predicate(workspace_id))
         )
 
-        # Incoming edges
-        incoming_query = (
+        incoming_query: Select[Any] = (
             select(Edge, Entity)
             .join(Entity, Edge.source_entity_id == Entity.id)
+            .join(Source, Entity.source_id == Source.id)
             .where(Edge.target_entity_id == eid)
+            .where(_workspace_predicate(workspace_id))
         )
 
         if edge_types:

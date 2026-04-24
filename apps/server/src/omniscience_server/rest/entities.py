@@ -6,6 +6,16 @@ GET /api/v1/entities/{name}/related
         edge_types  (list[str])       — comma-separated edge type filter
 
 Requires the ``search`` scope.
+
+Workspace scoping (issue #117)
+------------------------------
+
+The caller's ``workspace_id`` is resolved from the authenticated principal
+and propagated to :class:`~omniscience_retrieval.graph_query.GraphQueryService`.
+A token with no workspace is rejected with ``403 forbidden`` — graph
+retrieval is fail-closed, never fail-open — because the service layer
+requires an explicit workspace and we refuse to invent one on behalf of
+an unscoped caller.
 """
 
 from __future__ import annotations
@@ -15,16 +25,19 @@ from urllib.parse import unquote
 
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from omniscience_core.auth.middleware import require_scope
+from omniscience_core.auth.middleware import get_current_token, require_scope
 from omniscience_core.auth.scopes import Scope
+from omniscience_core.auth.workspace import get_workspace_id
+from omniscience_core.db.models import ApiToken
 from omniscience_retrieval.graph_query import GraphQueryService
 
 log = structlog.get_logger(__name__)
 
 router = APIRouter(tags=["entities"])
 
-# Module-level Depends singleton — avoids ruff B008
+# Module-level Depends singletons — avoids ruff B008
 _search_scope_dep: Any = Depends(require_scope(Scope.search))
+_current_token_dep: Any = Depends(get_current_token)
 
 # Query parameter annotations — avoids ruff B008 (no function calls in defaults)
 _MaxDepthQuery = Annotated[
@@ -47,6 +60,7 @@ async def get_related_entities(
     request: Request,
     max_depth: _MaxDepthQuery = 1,
     edge_types: _EdgeTypesQuery = None,
+    token: ApiToken = _current_token_dep,
 ) -> dict[str, Any]:
     """Traverse the entity graph starting from the named entity.
 
@@ -55,6 +69,7 @@ async def get_related_entities(
     associated chunk text for context.
 
     Requires scope: ``search``
+    Requires: token scoped to a workspace (fails closed with 403 otherwise).
     """
     # Path parameters are URL-encoded by FastAPI; decode forward-slashes etc.
     entity_name = unquote(name)
@@ -67,11 +82,29 @@ async def get_related_entities(
             detail={"code": "service_unavailable", "message": "Database not available"},
         )
 
+    # Resolve the caller's workspace.  A token with no workspace cannot be
+    # silently widened to the global graph — that is the exact bug in
+    # issue #117.  Fail closed.
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "graph_request_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "forbidden",
+                "message": "Graph retrieval requires a workspace-scoped token",
+            },
+        )
+
     service = GraphQueryService(factory)
 
     try:
         result = await service.get_related(
             entity_name=entity_name,
+            workspace_id=workspace_id,
             max_depth=max_depth,
             edge_types=edge_types if edge_types else None,
         )
@@ -93,6 +126,7 @@ async def get_related_entities(
     log.info(
         "entity_graph_traversal",
         entity=entity_name,
+        workspace_id=str(workspace_id),
         max_depth=max_depth,
         entities_found=result.stats["entities_found"],
         edges_traversed=result.stats["edges_traversed"],
