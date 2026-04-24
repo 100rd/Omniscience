@@ -184,6 +184,43 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ===========================================================================
+  # neo4j — Phase 2a graph store (issue #104, ADR-0005).
+  #
+  # Activates with:  docker compose --profile graph up
+  #
+  # Single-node Neo4j Community Edition.  Bolt on 7687, HTTP on 7474.
+  # Bolt TLS MUST be enabled in non-dev environments (not set here — this
+  # compose file is dev-only).  Credentials are read from .env via
+  # ${NEO4J_PASSWORD}; the default below is intentionally a placeholder
+  # that fails if POSTGRES_PASSWORD-style validation is applied downstream.
+  # ===========================================================================
+  neo4j:
+    image: neo4j:5.19-community
+    profiles:
+      - graph
+    ports:
+      - "127.0.0.1:7474:7474"
+      - "127.0.0.1:7687:7687"
+    environment:
+      NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-1G}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-2G}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-1G}
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4jdata:/data
+      - neo4jlogs:/logs
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "wget -q -O - http://localhost:7474 > /dev/null || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+
 volumes:
   pgdata:
   pgbackups:
@@ -192,3 +229,5 @@ volumes:
   prometheusdata:
   grafanadata:
   caddy_data:
+  neo4jdata:
+  neo4jlogs:
