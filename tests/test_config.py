@@ -10,7 +10,7 @@ def test_defaults_load() -> None:
     """Settings can be instantiated without any environment overrides."""
     s = Settings()
     assert s.app_name == "omniscience"
-    assert s.app_version == "0.1.0"
+    assert s.app_version == "0.2.0"
     assert s.environment == "development"
     assert s.log_level == "INFO"
     assert s.embedding_provider == "ollama"

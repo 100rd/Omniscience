@@ -99,14 +99,14 @@ class Settings(BaseSettings):
         description="Ollama model used by OllamaReranker for embedding-based scoring.",
     )
 
-    # --- Storage backends (Epic #96 — Neo4j + Qdrant migration) ---
+    # --- Storage backends (Epic #96 — Neo4j + Qdrant) ---
     storage_vector_backend: str = Field(
-        default="pgvector",
+        default="qdrant",
         description=(
-            "Vector-store backend: 'pgvector' (default) or 'qdrant'. "
-            "Switches the VectorStore implementation wired into the DI "
-            "container. See ADR-0006. Pgvector remains the default until "
-            "the cutover (#105) completes."
+            "Vector-store backend. Only 'qdrant' is supported as of v0.2 "
+            "(pgvector was removed at the #105 cutover). The field is kept "
+            "for forward compatibility should additional backends land; any "
+            "other value is rejected at startup. See ADR-0006."
         ),
     )
     qdrant_host: str = Field(
@@ -191,19 +191,20 @@ class Settings(BaseSettings):
 
     # --- Application identity ---
     app_name: str = Field(default="omniscience", description="Service name reported in telemetry.")
-    app_version: str = Field(default="0.1.0", description="Service version reported in telemetry.")
+    app_version: str = Field(default="0.2.0", description="Service version reported in telemetry.")
     environment: str = Field(
         default="development",
         description="Deployment environment: development, staging, production.",
     )
 
-    # --- Storage backend selection (Phase 2 / epic #96) ---
+    # --- Storage backend selection (Epic #96 — Neo4j + Qdrant) ---
     storage_graph_backend: str = Field(
-        default="pgvector",
+        default="neo4j",
         description=(
-            "Graph-store backend: 'pgvector' (default, Phase 1) or 'neo4j' "
-            "(Phase 2a, issue #104). Flip to 'neo4j' after running the "
-            "dual-write migration per ADR-0005."
+            "Graph-store backend. Only 'neo4j' is supported as of v0.2 "
+            "(pgvector was removed at the #105 cutover). The field is kept "
+            "for forward compatibility should additional backends land; any "
+            "other value is rejected at startup. See ADR-0005."
         ),
     )
 

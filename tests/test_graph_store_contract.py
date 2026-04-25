@@ -9,22 +9,27 @@ environment.
 Design
 ------
 
-- **pgvector**: parametrised via an in-memory fake adapter that proxies
-  to the existing isolation fixture from
-  ``tests.test_graph_workspace_isolation``.  No real Postgres is started.
 - **neo4j**: uses ``testcontainers[neo4j]`` to spin up a Neo4j 5.x
   Community Edition container per test session.  The container is
   expensive so each test re-uses the same instance; each test provisions
   a fresh database namespace via workspace_id scoping.
 
+Historical note
+---------------
+
+Prior to v0.2 this file also parametrised the ``pgvector`` lane
+against an in-memory fake adapter.  That lane was removed at the
+#105 cutover alongside the ``PgVectorGraphStore`` class itself.
+Only the Neo4j backend is supported going forward (ADR-0005).
+
 Rationale
 ---------
 
-ADR-0005 §Schema mandates the Neo4j adapter implements the exact
-``GraphStore`` protocol the pgvector adapter implements, so that the
-retrieval layer can swap backends behind a feature flag with zero code
-change.  This parametric suite is the regression fence for that
-guarantee — any behavioural drift between the two backends fails here.
+ADR-0005 §Schema mandates that the Neo4j adapter fulfils the
+``GraphStore`` protocol exactly, so that the retrieval layer can
+continue to depend on the protocol rather than any backend.  This
+suite is the regression fence for that guarantee — any behavioural
+drift fails here.
 """
 
 from __future__ import annotations
@@ -69,28 +74,6 @@ def _neo4j_available() -> bool:
         return False
 
 
-def _pgvector_factory() -> Callable[[], AsyncIterator[GraphStore]]:
-    """Factory for the pgvector adapter fed by an in-memory fake session.
-
-    Reuses the ``_FakeSession`` pattern from
-    :mod:`tests.test_graph_workspace_isolation` so we do not need a real
-    Postgres instance for the contract fence.
-    """
-    from omniscience_retrieval.adapters import PgVectorGraphStore
-
-    from tests.test_graph_workspace_isolation import (
-        _build_fixture,
-        _session_factory,
-    )
-
-    async def _factory() -> AsyncIterator[GraphStore]:
-        fx = _build_fixture()
-        store = PgVectorGraphStore(session_factory=_session_factory(fx))
-        yield store
-
-    return _factory
-
-
 def _neo4j_factory() -> Callable[[], AsyncIterator[GraphStore]]:
     """Factory that spins up a Neo4j testcontainer per test."""
     from omniscience_index.stores.neo4j_store import (
@@ -116,8 +99,6 @@ def _neo4j_factory() -> Callable[[], AsyncIterator[GraphStore]]:
             store = Neo4jGraphStore(config=config)
             await store.connect()
             try:
-                # Hydrate the Neo4j graph with the same two-workspace fixture
-                # the pgvector backend gets by reusing the write API.
                 await _seed_neo4j_with_fixture(store)
                 yield store
             finally:
@@ -129,10 +110,10 @@ def _neo4j_factory() -> Callable[[], AsyncIterator[GraphStore]]:
 async def _seed_neo4j_with_fixture(store: Any) -> None:
     """Populate a fresh Neo4j with the two-workspace contract fixture.
 
-    Mirrors the pgvector ``_build_fixture()`` — two entities named
-    ``svc.shared`` (one per workspace), each pointing to a workspace-
-    local neighbour via a ``calls`` edge, plus a planted cross-tenant
-    edge to verify isolation.
+    Two entities named ``svc.shared`` (one per workspace), each pointing
+    to a workspace-local neighbour via a ``calls`` edge.  The parallel
+    structure across workspaces is what makes the isolation assertions
+    meaningful (a leak would surface the *other* workspace's neighbour).
     """
     a_shared = EntityUpsert(
         id=uuid.uuid4(),
@@ -195,9 +176,7 @@ async def _seed_neo4j_with_fixture(store: Any) -> None:
 # ---------------------------------------------------------------------------
 
 
-_BACKENDS: list[tuple[str, Callable[[], Callable[[], AsyncIterator[GraphStore]]]]] = [
-    ("pgvector", _pgvector_factory),
-]
+_BACKENDS: list[tuple[str, Callable[[], Callable[[], AsyncIterator[GraphStore]]]]] = []
 
 if _neo4j_available():
     _BACKENDS.append(("neo4j", _neo4j_factory))
@@ -301,8 +280,6 @@ async def test_find_related_raises_entity_not_found_cross_workspace(
     graph_store: GraphStore,
 ) -> None:
     """Requesting a B-only entity from A looks like 404 on both backends."""
-    # ``svc.internal-b`` only exists in workspace B.  Asking for it from
-    # A must raise the not-found ValueError — never leak existence.
     with pytest.raises(ValueError, match=r"entity_not_found:svc\.internal-b"):
         await graph_store.find_related(
             entity_name="svc.internal-b",
@@ -315,7 +292,6 @@ async def test_get_entity_returns_none_for_cross_workspace(
     graph_store: GraphStore,
 ) -> None:
     """``get_entity`` returns None — NEVER leaks existence across workspaces."""
-    # ``svc.internal-a`` only in A.  Asking from B -> None.
     result = await graph_store.get_entity(
         entity_name="svc.internal-a",
         workspace_id=_WORKSPACE_B,

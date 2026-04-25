@@ -1,5 +1,16 @@
 # Architecture
 
+> **Status as of v0.2 (Epic #96 cutover, #105).** The diagrams and
+> descriptions below have been updated to reflect the Neo4j +
+> Qdrant backend split. Postgres is retained for **operational
+> metadata only** — sources, documents (row-level), chunks (text
+> + lineage), ingestion runs, API tokens, workspaces. All
+> chunk-level embeddings live in Qdrant; all graph data (entities
+> + edges) lives in Neo4j. Hybrid search is composed by
+> `GraphRAGComposer` (ADR-0005 / ADR-0006). For the original v0.1
+> layout with pgvector as the single store of truth, see the
+> `v0.1.x` tag.
+
 ## System overview
 
 ```

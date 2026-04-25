@@ -1,6 +1,6 @@
 [project]
 name = "omniscience-core"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared types, config, logging, telemetry for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
@@ -15,7 +15,6 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
-    "pgvector>=0.3.0",
     "nats-py>=2.7.0",
     "argon2-cffi>=23.1.0",
 ]

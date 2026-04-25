@@ -1,6 +1,31 @@
 #!/usr/bin/env python3
 """CLI entry point for the pgvector -> Neo4j + Qdrant migration (#108).
 
+As of v0.2 (#105 cutover) the pgvector code path has been removed
+from the running service; this script is preserved for operators
+who are still running pre-v0.2 installs with data and need to
+migrate before upgrading.  The script's read path is driven by the
+Postgres schema that was in place up to revision ``0003``; starting
+with revision ``0004`` (introduced in v0.2) the ``embedding`` column
+and ``vector`` extension are gone.
+
+Migration workflow for pre-v0.2 installs
+----------------------------------------
+
+1. Take a snapshot of the pre-v0.2 Postgres database.
+2. Stand up the v0.2 Qdrant + Neo4j backends alongside the existing
+   Postgres.
+3. Run this script against that Postgres **before** applying
+   alembic revision ``0004_drop_pgvector``.
+4. Verify the migration (``--verify``).
+5. Apply the ``0004`` migration to drop the pgvector column.
+
+The ``_round_trip_entities`` verification gate previously cross-
+checked each migrated entity against ``PgVectorGraphStore.get_entity``;
+that class was removed at the cutover, so verification now runs the
+count + isolation gates only.  Operators who require the deeper
+round-trip gate should run this script from a v0.1.x checkout.
+
 Usage examples::
 
     # Dry-run (counts only, no writes)
@@ -60,7 +85,6 @@ from omniscience_index.stores.neo4j_store import (
 )
 from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
-from omniscience_retrieval.adapters.pgvector_graph import PgVectorGraphStore
 from rich.console import Console
 from rich.table import Table
 
@@ -208,12 +232,18 @@ async def _run_async(*, config: MigrationConfig, verify_after: bool) -> int:
             _print_migration_report(report)
 
         if verify_after or config.verify_only:
+            # ``pgvector_graph_get_entity`` is intentionally ``None`` post
+            # v0.2: the pgvector adapter was removed at the #105 cutover,
+            # so the round-trip verification gate no longer runs.  Counts
+            # and isolation gates still run.  Operators who need the
+            # deeper round-trip gate must invoke this script from a
+            # v0.1.x checkout that still ships ``PgVectorGraphStore``.
             verify_runner = VerifyRunner(
                 config=config,
                 session_factory=session_factory,
                 graph_store=graph_store,
                 vector_store=vector_store,
-                pgvector_graph_get_entity=PgVectorGraphStore(session_factory=session_factory),
+                pgvector_graph_get_entity=None,
             )
             verification = await verify_runner.run()
             _print_verification_report(verification)

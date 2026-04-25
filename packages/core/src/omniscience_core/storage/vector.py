@@ -1,8 +1,9 @@
 """``VectorStore`` protocol: backend-neutral chunk persistence and search.
 
-This module defines the typed contract that the pgvector adapter
-(``omniscience_retrieval.adapters.pgvector_vector``) satisfies today
-and that the Qdrant adapter (issue #106) will satisfy in Phase 2.
+This module defines the typed contract that the Qdrant adapter
+(``omniscience_index.stores.qdrant_store``) satisfies.  Prior to v0.2
+the pgvector adapter (``omniscience_retrieval.adapters.pgvector_vector``)
+also satisfied this contract; it was removed at the #105 cutover.
 
 Design rules (ADR-0006 + issue #117)
 ------------------------------------
@@ -15,8 +16,8 @@ Design rules (ADR-0006 + issue #117)
 
 2. **Payload shape is a TypedDict.**  ``ChunkPayload`` is the canonical
    on-the-wire shape for a chunk going into the store; adapters
-   translate it to their native representation (Chunk ORM row for
-   pgvector; Qdrant Point.payload for Qdrant).
+   translate it to their native representation (Qdrant Point.payload
+   for the default Qdrant backend).
 
 3. **No SQLAlchemy dependency here.**  This module imports only stdlib
    and the retrieval response dataclasses — by design, the protocol
@@ -111,19 +112,15 @@ class VectorStore(Protocol):
 
     Implementations
     ---------------
-    - ``omniscience_retrieval.adapters.pgvector_vector.PgVectorVectorStore``
-      (pgvector-backed; today's behaviour).
-    - ``omniscience_vector_qdrant.QdrantVectorStore`` (Phase 2, issue
-      #106).
+    - ``omniscience_index.stores.qdrant_store.QdrantVectorStore`` —
+      the sole production backend as of v0.2 (ADR-0006, issue #106).
 
     ACL invariant
     -------------
     ``search`` takes ``workspace_id`` as a **keyword-only, required**
     parameter.  Adapters MUST confine result rows to the caller's
-    workspace.  The pgvector adapter today does not yet filter search
-    by workspace (documented follow-up; see adapter docstring and
-    issue tracker) — the protocol is correct so the Qdrant adapter
-    can enforce the invariant natively from day one.
+    workspace.  The Qdrant adapter enforces this natively via a
+    payload filter (ADR-0006 §ACL).
     """
 
     # ------------------------------------------------------------------
@@ -149,8 +146,8 @@ class VectorStore(Protocol):
         - Existing, same hash       → no-op
         - Existing, different hash  → replace chunks, bump version
 
-        Parameters mirror ``IndexWriter.upsert_document`` for zero-
-        behaviour-change compatibility.
+        Parameters mirror the legacy pgvector ingestion shape for
+        zero-behaviour-change compatibility with the connector layer.
         """
         ...
 
@@ -167,8 +164,7 @@ class VectorStore(Protocol):
 
         Note: "tombstone" means set ``tombstoned_at`` — hard deletion
         is deferred to ``delete_tombstoned``.  This preserves the
-        two-phase deletion semantics the existing pgvector writer
-        implements.
+        two-phase deletion semantics the ingestion layer relies on.
         """
         ...
 
@@ -177,7 +173,7 @@ class VectorStore(Protocol):
 
         Returns the number of documents removed.  Chunks cascade
         automatically via the FK ``ON DELETE CASCADE`` constraint in
-        the pgvector schema.
+        the operational-metadata schema.
         """
         ...
 
@@ -202,11 +198,8 @@ class VectorStore(Protocol):
             this to ``SearchRequest``.
         workspace_id:
             REQUIRED.  Adapters MUST confine every match to this
-            workspace.  Today's pgvector adapter carries a documented
-            gap here (workspace filtering is not yet applied on the
-            search path — tracked outside #103); the protocol is
-            correct so the Qdrant adapter can enforce the invariant
-            natively when it lands (#106).
+            workspace.  The Qdrant adapter enforces the invariant
+            natively via a payload filter.
 
         Returns
         -------

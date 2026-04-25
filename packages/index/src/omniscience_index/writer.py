@@ -19,11 +19,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 @dataclass
 class ChunkData:
-    """All fields needed to persist a single chunk."""
+    """All fields needed to persist a single chunk (Postgres-side metadata).
+
+    As of v0.2 the chunk embedding itself lives in Qdrant, not Postgres;
+    this dataclass no longer carries the vector payload.  The embedding
+    model / provider / parser / chunker identifiers remain on the
+    Postgres row so operational queries ("which model produced this
+    chunk?") still resolve without a Qdrant round-trip.
+    """
 
     ord: int
     text: str
-    embedding: list[float]
     symbol: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     embedding_model: str = ""
@@ -277,7 +283,6 @@ class IndexWriter:
                 document_id=document_id,
                 ord=chunk_data.ord,
                 text=chunk_data.text,
-                embedding=chunk_data.embedding or None,
                 symbol=chunk_data.symbol,
                 ingestion_run_id=ingestion_run_id,
                 embedding_model=chunk_data.embedding_model,

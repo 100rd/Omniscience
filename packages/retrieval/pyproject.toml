@@ -1,6 +1,6 @@
 [project]
 name = "omniscience-retrieval"
-version = "0.1.0"
+version = "0.2.0"
 description = "Hybrid retrieval service (vector + BM25 + RRF) for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
@@ -8,7 +8,6 @@ dependencies = [
     "omniscience-embeddings",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
-    "pgvector>=0.3.0",
     "httpx>=0.27.0",
 ]
 

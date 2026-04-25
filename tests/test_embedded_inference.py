@@ -1,4 +1,4 @@
-"""Tests for embedded (air-gapped) inference: local embedding provider and query rewriter.
+"""Tests for embedded (air-gapped) inference: local embedding provider.
 
 All tests that exercise LocalEmbeddingProvider mock sentence-transformers so
 they run in CI without requiring the actual library or model files.
@@ -9,9 +9,15 @@ Coverage
 7-12:  LocalEmbeddingProvider.embed — happy path, empty input, batching, thread pool
 13-15: LocalEmbeddingProvider.close behaviour
 16-17: LocalEmbeddingProvider ImportError when sentence-transformers is absent
-18-21: QueryRewriter.rewrite — pass-through, acronym, synonym, error fallback
-22-26: QueryRewriter.expand — deduplication, acronym, synonym, multi-match, error fallback
-27-30: Factory routing — "local" provider, settings fields, case-insensitive, unknown
+18-21: Factory routing — "local" provider, settings fields, case-insensitive
+
+Historical note
+---------------
+
+Prior to v0.2 this file also covered ``QueryRewriter`` (acronym /
+synonym expansion).  The query rewriter lived in the pgvector
+retrieval service and was removed at the #105 cutover alongside the
+rest of ``omniscience_retrieval.search``.
 """
 
 from __future__ import annotations
@@ -26,13 +32,6 @@ import pytest
 from omniscience_core.config import Settings
 from omniscience_embeddings import LocalEmbeddingProvider, create_embedding_provider
 from omniscience_embeddings.base import EmbeddingProvider
-from omniscience_retrieval.query_rewriter import (
-    QueryRewriter,
-    _apply_acronym_expansion,
-    _apply_synonym_expansion,
-    _deduplicate,
-    _tokenize,
-)
 
 # ---------------------------------------------------------------------------
 # Helpers — build a fake sentence-transformers module
@@ -245,94 +244,6 @@ def test_local_provider_import_error_mentions_install_hint() -> None:
 
 
 # ===========================================================================
-# 18-21: QueryRewriter.rewrite
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_rewrite_passthrough_when_no_rules_match() -> None:
-    rewriter = QueryRewriter()
-    result = await rewriter.rewrite("zirconium widget")
-    assert result == "zirconium widget"
-
-
-@pytest.mark.asyncio
-async def test_rewrite_expands_acronym() -> None:
-    rewriter = QueryRewriter()
-    result = await rewriter.rewrite("API authentication")
-    # "api" should be expanded to "application programming interface"
-    assert "application programming interface" in result.lower()
-
-
-@pytest.mark.asyncio
-async def test_rewrite_expands_synonym() -> None:
-    rewriter = QueryRewriter()
-    # "error" → "exception" per synonym map (no acronyms in this query)
-    result = await rewriter.rewrite("parse error handling")
-    assert result != "parse error handling"
-
-
-@pytest.mark.asyncio
-async def test_rewrite_falls_back_on_exception() -> None:
-    """rewrite() must return the original query if an internal exception occurs."""
-    rewriter = QueryRewriter()
-    with patch(
-        "omniscience_retrieval.query_rewriter._apply_acronym_expansion",
-        side_effect=RuntimeError("boom"),
-    ):
-        result = await rewriter.rewrite("some query")
-    assert result == "some query"
-
-
-# ===========================================================================
-# 22-26: QueryRewriter.expand
-# ===========================================================================
-
-
-@pytest.mark.asyncio
-async def test_expand_always_includes_original() -> None:
-    rewriter = QueryRewriter()
-    variants = await rewriter.expand("zirconium widget")
-    assert variants[0] == "zirconium widget"
-
-
-@pytest.mark.asyncio
-async def test_expand_acronym_produces_extra_variant() -> None:
-    rewriter = QueryRewriter()
-    variants = await rewriter.expand("LLM inference latency")
-    assert len(variants) >= 2
-    originals = {v.lower() for v in variants}
-    assert any("large language model" in v for v in originals)
-
-
-@pytest.mark.asyncio
-async def test_expand_synonym_produces_extra_variant() -> None:
-    rewriter = QueryRewriter()
-    variants = await rewriter.expand("database error log")
-    assert len(variants) >= 2
-
-
-@pytest.mark.asyncio
-async def test_expand_deduplicates_identical_variants() -> None:
-    rewriter = QueryRewriter()
-    # A query with no matching rules → only one variant
-    variants = await rewriter.expand("zirconium widget xyz")
-    assert variants == list(dict.fromkeys(variants))  # no duplicates
-
-
-@pytest.mark.asyncio
-async def test_expand_falls_back_on_exception() -> None:
-    """expand() must return [original] if an internal exception occurs."""
-    rewriter = QueryRewriter()
-    with patch(
-        "omniscience_retrieval.query_rewriter._apply_acronym_expansion",
-        side_effect=RuntimeError("boom"),
-    ):
-        variants = await rewriter.expand("some query")
-    assert variants == ["some query"]
-
-
-# ===========================================================================
 # 27-30: Factory routing for "local" provider + Settings fields
 # ===========================================================================
 
@@ -372,28 +283,3 @@ def test_settings_new_fields_have_correct_defaults() -> None:
     assert settings.local_model_name == "all-MiniLM-L6-v2"
     assert settings.local_model_device == "cpu"
     assert settings.query_rewriting_enabled is False
-
-
-# ===========================================================================
-# Helper unit tests (private functions)
-# ===========================================================================
-
-
-def test_tokenize_lowercases() -> None:
-    assert _tokenize("Hello World") == ["hello", "world"]
-
-
-def test_tokenize_strips_punctuation() -> None:
-    assert _tokenize("API-first design!") == ["api", "first", "design"]
-
-
-def test_acronym_expansion_returns_none_when_no_match() -> None:
-    assert _apply_acronym_expansion("zirconium widget") is None
-
-
-def test_synonym_expansion_returns_none_when_no_match() -> None:
-    assert _apply_synonym_expansion("zirconium widget") is None
-
-
-def test_deduplicate_preserves_order() -> None:
-    assert _deduplicate(["a", "b", "a", "c", "b"]) == ["a", "b", "c"]

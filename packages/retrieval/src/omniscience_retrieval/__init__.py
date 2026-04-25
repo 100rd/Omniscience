@@ -1,18 +1,29 @@
-"""Hybrid retrieval service (vector + BM25 + RRF) for Omniscience.
+"""GraphRAG retrieval composition for Omniscience.
 
-Implements staged hybrid retrieval: pgvector HNSW top-K, tsvector BM25,
-reciprocal rank fusion, ACL filter, and freshness filter.
-See docs/decisions/0004-retrieval-strategy-staged.md for the full design.
+As of v0.2 the canonical retrieval path is the GraphRAG composer
+(Neo4j + Qdrant); see ``docs/decisions/0005-neo4j-as-graph-store.md``
+and ``docs/decisions/0006-qdrant-as-vector-store.md``.
 
-Federation adds an optional fan-out layer: ``FederatedSearch`` wraps the
-local ``RetrievalService`` and queries one or more remote Omniscience
-instances in parallel, merging and deduplicating the combined result set.
+Federation adds an optional fan-out layer: ``FederatedSearch`` wraps
+any ``search(request)``-shaped object and queries one or more remote
+Omniscience instances in parallel, merging and deduplicating the
+combined result set.
 
-Query rewriting (v0.4+) provides optional heuristic expansion of search
-queries before retrieval to improve recall in air-gapped deployments.
+Historical note
+---------------
+
+Prior to v0.2 this package also exposed:
+
+- ``PgVectorGraphStore`` / ``PgVectorVectorStore`` pgvector adapters.
+- ``RetrievalService``: the hybrid pgvector+BM25 retrieval service.
+- ``QueryRewriter``, ``OllamaReranker``, ``NoopReranker``, and the
+  ``strategies`` sub-package.
+
+All of the above were removed at the #105 cutover when Neo4j + Qdrant
+became the only supported backends.  See ``CHANGELOG.md`` §0.2.0 for
+upgrade notes.
 """
 
-from .adapters import PgVectorGraphStore, PgVectorVectorStore
 from .federation import FederatedSearch
 from .federation_config import FederatedInstance, FederationConfig
 from .graph_query import EdgeResult, EntityNode, GraphQueryService, GraphResult
@@ -34,9 +45,6 @@ from .models import (
     SearchResult,
     SourceInfo,
 )
-from .query_rewriter import QueryRewriter
-from .reranker import NoopReranker, OllamaReranker, Reranker
-from .search import RetrievalService
 
 __all__ = [
     "ANCHOR_FILTER_KEY",
@@ -55,14 +63,7 @@ __all__ = [
     "GraphQueryService",
     "GraphRAGComposer",
     "GraphResult",
-    "NoopReranker",
-    "OllamaReranker",
-    "PgVectorGraphStore",
-    "PgVectorVectorStore",
-    "QueryRewriter",
     "QueryStats",
-    "Reranker",
-    "RetrievalService",
     "SearchHit",
     "SearchRequest",
     "SearchResult",

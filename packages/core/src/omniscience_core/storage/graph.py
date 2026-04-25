@@ -1,8 +1,9 @@
 """``GraphStore`` protocol: backend-neutral entity/edge persistence and traversal.
 
-This module defines the typed contract that the pgvector adapter
-(``omniscience_retrieval.adapters.pgvector_graph``) satisfies today and
-that the Neo4j adapter (issue #104) will satisfy in Phase 2.
+This module defines the typed contract that the Neo4j adapter
+(``omniscience_index.stores.neo4j_store``) satisfies.  Prior to v0.2
+the pgvector adapter (``omniscience_retrieval.adapters.pgvector_graph``)
+also satisfied this contract; it was removed at the #105 cutover.
 
 Design rules (ADR-0005 + issue #117)
 ------------------------------------
@@ -11,13 +12,11 @@ Design rules (ADR-0005 + issue #117)
    takes ``workspace_id: uuid.UUID`` as a **keyword-only, required**
    parameter.  There is no default, no ``None`` sentinel, no "admin"
    bypass.  An adapter MUST confine every read to the supplied
-   workspace, including transitive hops across edges.  See
-   ``packages/retrieval/src/omniscience_retrieval/graph_query.py`` for
-   the reference pgvector implementation of the invariant.
+   workspace, including transitive hops across edges.
 
-2. **Signatures mirror current call sites.**  The protocol is driven by
-   existing usage in ``IndexWriter`` and ``GraphQueryService``; it is
-   deliberately not a superset of either backend's capabilities.
+2. **Signatures mirror current call sites.**  The protocol is driven
+   by ingestion-time and retrieval-time use-cases; it is deliberately
+   not a superset of any single backend's capabilities.
 
 3. **View-model dataclasses are ORM-free.**  ``EntityNodeView`` and
    ``GraphEdgeView`` carry only primitive/uuid fields so a Neo4j or
@@ -113,9 +112,8 @@ class GraphStore(Protocol):
 
     Implementations
     ---------------
-    - ``omniscience_retrieval.adapters.pgvector_graph.PgVectorGraphStore``
-      (pgvector-backed; today's behaviour).
-    - ``omniscience_graph_neo4j.Neo4jGraphStore`` (Phase 2, issue #104).
+    - ``omniscience_index.stores.neo4j_store.Neo4jGraphStore`` — the
+      sole production backend as of v0.2 (ADR-0005, issue #104).
 
     ACL invariant
     -------------
@@ -147,9 +145,7 @@ class GraphStore(Protocol):
         both the parser's ``ExtractedEntity``/``ExtractedEdge`` shapes
         and the protocol-native ``EntityUpsert``/``EdgeUpsert``
         dataclasses — adapters duck-type the attribute names.  This is
-        the single hot ingestion path and is kept identical to the
-        existing ``IndexWriter.upsert_graph`` signature for zero-
-        behaviour-change compatibility.
+        the single hot ingestion path.
         """
         ...
 
@@ -159,13 +155,11 @@ class GraphStore(Protocol):
         entity: EntityUpsert,
         workspace_id: uuid.UUID,
     ) -> None:
-        """Insert or update a single entity (v0 adapters may no-op).
+        """Insert or update a single entity.
 
-        Granular upsert is provided for Phase 2 adapters (Neo4j) that
-        can write one node at a time efficiently.  The pgvector adapter
-        batches via ``upsert_graph`` today and raises
-        ``NotImplementedError`` on this method — callers should use
-        ``upsert_graph`` for pgvector.
+        Granular upsert is provided for backends (Neo4j) that can write
+        one node at a time efficiently.  Batch writes go through
+        :meth:`upsert_graph`.
         """
         ...
 
@@ -175,22 +169,20 @@ class GraphStore(Protocol):
         edge: EdgeUpsert,
         workspace_id: uuid.UUID,
     ) -> None:
-        """Insert or update a single edge (v0 adapters may no-op).
+        """Insert or update a single edge.
 
-        See ``upsert_entity`` — provided for Phase 2 parity; pgvector
-        adapter raises ``NotImplementedError``.
+        See :meth:`upsert_entity` — batch writes go through
+        :meth:`upsert_graph`.
         """
         ...
 
     async def delete_tombstoned(self) -> int:
         """Hard-delete entities orphaned by tombstoned documents.
 
-        Returns the number of entity rows removed.  For the pgvector
-        adapter today this is a no-op (zero) because entities cascade
-        from the owning ``sources`` row when a source is deleted;
-        tombstoning a *document* does not delete its entities by
-        design (re-ingestion replaces them).  Kept on the protocol so
-        the Neo4j adapter can implement proactive cleanup.
+        Returns the number of entity rows removed.  Tombstoning a
+        *document* does not delete its entities by design
+        (re-ingestion replaces them), but an adapter may implement
+        proactive cleanup for long-abandoned sources.
         """
         ...
 

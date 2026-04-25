@@ -1,6 +1,6 @@
 [project]
 name = "omniscience-plugin-example"
-version = "0.1.0"
+version = "0.2.0"
 description = "Example third-party connector plugin for Omniscience"
 requires-python = ">=3.12"
 license = "Apache-2.0"

@@ -4,7 +4,8 @@ Create the ASGI application by calling ``create_app()``.  The factory:
   - reads Settings from the environment
   - configures structured logging
   - initialises OpenTelemetry
-  - connects to Postgres, NATS JetStream, embedding provider
+  - connects to Postgres (operational metadata), NATS JetStream,
+    embedding provider, Neo4j (graph store), and Qdrant (vector store)
   - starts the ingestion worker (consumes document change events)
   - starts the freshness worker (periodic SLO evaluation + Prometheus metrics)
   - starts the scheduler worker (periodic stale-source re-sync triggers)
@@ -29,7 +30,6 @@ from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.logging import configure_logging
 from omniscience_core.queue import NatsConnection, ensure_streams
 from omniscience_core.queue.consumer import QueueConsumer
-from omniscience_core.storage.graph import GraphStore
 from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
 from omniscience_embeddings.base import EmbeddingProvider
@@ -37,14 +37,10 @@ from omniscience_index import IndexWriter
 from omniscience_index.stores import Neo4jGraphStore, Neo4jStoreConfig
 from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
-from omniscience_retrieval import (
-    GraphRAGComposer,
-    PgVectorGraphStore,
-    PgVectorVectorStore,
-    RetrievalService,
-)
+from omniscience_retrieval import GraphRAGComposer
 from omniscience_retrieval.federation import FederatedSearch
 from omniscience_retrieval.federation_config import FederationConfig
+from omniscience_retrieval.models import SearchRequest, SearchResult
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
@@ -59,6 +55,40 @@ from omniscience_server.routes import health_router, tokens_router
 from omniscience_server.scheduler import SchedulerWorker
 
 log = structlog.get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Backend values accepted by Settings.storage_*_backend after the #105
+# cutover.  Any other value causes startup to abort with a clear error so
+# ops that still have pre-v0.2 env vars get a loud failure, never a silent
+# boot on an unintended backend.
+# ---------------------------------------------------------------------------
+
+
+_SUPPORTED_GRAPH_BACKENDS: frozenset[str] = frozenset({"neo4j"})
+_SUPPORTED_VECTOR_BACKENDS: frozenset[str] = frozenset({"qdrant"})
+
+
+class _UnwiredLegacyService:
+    """Placeholder for ``GraphRAGComposer.legacy_service`` post-cutover.
+
+    After #105 removed the pgvector adapters, the composer always
+    dispatches to the Neo4j+Qdrant pipeline (``graphrag_active`` is
+    always True with the supported backend set).  The ``legacy_service``
+    branch is therefore unreachable at runtime; we still need to pass
+    *something* that satisfies the ``_LegacySearchCallable`` protocol.
+
+    Any accidental call (e.g. if the dispatch rules are refactored and
+    a bug re-enables the legacy path) must fail loudly rather than
+    silently degrade retrieval.
+    """
+
+    async def search(self, request: SearchRequest) -> SearchResult:
+        raise RuntimeError(
+            "legacy_retrieval_service_unwired: the pgvector retrieval path was "
+            "removed at the #105 cutover; all search requests must route through "
+            "the GraphRAG composer (Neo4j + Qdrant). See CHANGELOG.md §0.2.0."
+        )
 
 
 def _redact_url(url: str) -> str:
@@ -88,7 +118,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         environment=settings.environment,
     )
 
-    # --- Postgres connection ---
+    # --- Postgres connection (operational metadata only: sources, ---
+    # ingestion_runs, api_tokens, workspaces, locks).  Chunk text,
+    # chunk embeddings, and the symbol graph all live outside Postgres
+    # as of v0.2 (Qdrant + Neo4j).
     engine = create_async_engine(settings)
     session_factory = create_session_factory(engine)
     app.state.db_engine = engine
@@ -111,103 +144,83 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         dim=embedding_provider.dim,
     )
 
-    # --- Storage adapters (GraphStore / VectorStore protocols, issue #103) ---
-    # These wrap the pgvector writer + retriever behind the new backend-
-    # neutral protocols defined in ``omniscience_core.storage``.  Phase 2a
-    # (issue #104) selects the Neo4j graph backend behind the
-    # ``STORAGE_GRAPH_BACKEND`` feature flag; Phase 2b (issue #106) selects
-    # the Qdrant vector backend behind ``STORAGE_VECTOR_BACKEND``.
+    # --- Backend validation (Epic #96 cutover, issue #105) ---
+    # Only 'neo4j' + 'qdrant' are accepted as of v0.2.  An unknown
+    # value is rejected here, before any connections are opened, so
+    # operators with leftover ``*_BACKEND=pgvector`` env vars see a
+    # clear failure instead of a silently-degraded boot.
     graph_backend = str(settings.storage_graph_backend).lower()
-    graph_store: GraphStore
-    neo4j_graph_store: Neo4jGraphStore | None = None
-    if graph_backend == "neo4j":
-        neo4j_config = Neo4jStoreConfig.from_settings(settings)
-        neo4j_graph_store = Neo4jGraphStore(config=neo4j_config)
-        await neo4j_graph_store.connect()
-        graph_store = neo4j_graph_store
-    elif graph_backend == "pgvector":
-        graph_store = PgVectorGraphStore(session_factory=session_factory)
-    else:
+    if graph_backend not in _SUPPORTED_GRAPH_BACKENDS:
         raise ValueError(
-            f"unknown_storage_graph_backend:{graph_backend} (expected 'pgvector' or 'neo4j')"
+            f"unsupported_storage_graph_backend:{graph_backend!r} "
+            f"(supported: {sorted(_SUPPORTED_GRAPH_BACKENDS)}). "
+            "Pgvector was removed at the #105 cutover; see CHANGELOG.md §0.2.0."
         )
-    pgvector_store = PgVectorVectorStore(
-        session_factory=session_factory,
-        embedding_provider=embedding_provider,
-    )
-    app.state.graph_store = graph_store
-
-    # --- Vector backend selection (Epic #96, Phase 2b, issue #106) ---
-    # ``STORAGE_VECTOR_BACKEND`` toggles between the pgvector adapter
-    # (default) and the Qdrant adapter.  The pgvector retrieval service
-    # remains available on ``app.state`` for the hybrid/federation path
-    # until #107 (retrieval rewrite) composes over the new interface.
     vector_backend = str(settings.storage_vector_backend).lower()
-    if vector_backend == "qdrant":
-        qdrant_store = await _build_qdrant_store(settings, embedding_provider)
-        app.state.vector_store = qdrant_store
-        app.state.qdrant_store = qdrant_store
-        log.info(
-            "storage_adapters_ready",
-            graph_backend=graph_backend,
-            vector_backend="qdrant",
-            collection=qdrant_store.collection_name,
-        )
-    elif vector_backend == "pgvector":
-        app.state.vector_store = pgvector_store
-        app.state.qdrant_store = None
-        log.info(
-            "storage_adapters_ready",
-            graph_backend=graph_backend,
-            vector_backend="pgvector",
-        )
-    else:
+    if vector_backend not in _SUPPORTED_VECTOR_BACKENDS:
         raise ValueError(
-            f"STORAGE_VECTOR_BACKEND must be 'pgvector' or 'qdrant' (got {vector_backend!r})"
+            f"unsupported_storage_vector_backend:{vector_backend!r} "
+            f"(supported: {sorted(_SUPPORTED_VECTOR_BACKENDS)}). "
+            "Pgvector was removed at the #105 cutover; see CHANGELOG.md §0.2.0."
         )
+
+    # --- Graph store (Neo4j, ADR-0005) ---
+    neo4j_config = Neo4jStoreConfig.from_settings(settings)
+    neo4j_graph_store = Neo4jGraphStore(config=neo4j_config)
+    await neo4j_graph_store.connect()
+    app.state.graph_store = neo4j_graph_store
     app.state.neo4j_graph_store = neo4j_graph_store
 
-    # --- Retrieval service ---
-    # Keep the direct ``RetrievalService`` handle on app.state for the
-    # (still-in-flight) federation composition path.  New consumers
-    # should prefer ``app.state.vector_store``.  Retrieval is still
-    # pgvector-backed until #107 cuts over; the Qdrant store is wired
-    # in but not yet consulted by the hybrid search path.
-    local_retrieval = pgvector_store.retrieval_service
+    # --- Vector store (Qdrant, ADR-0006) ---
+    qdrant_store = await _build_qdrant_store(settings, embedding_provider)
+    app.state.vector_store = qdrant_store
+    app.state.qdrant_store = qdrant_store
+    log.info(
+        "storage_adapters_ready",
+        graph_backend=graph_backend,
+        vector_backend=vector_backend,
+        collection=qdrant_store.collection_name,
+    )
+
+    # --- Legacy retrieval handle (unwired after #105) ---
+    # The pgvector ``RetrievalService`` is no longer instantiated.
+    # Callers that require a non-workspace-scoped legacy fallback
+    # receive 503 from the REST/MCP layer.
+    app.state.retrieval_service = None
 
     # --- Federation (optional) ---
+    # Federation still operates over the ``RetrievalService`` shape so
+    # that remote v0.1 peers remain reachable; the local leg wraps the
+    # unwired placeholder, which the composer never invokes once the
+    # Neo4j+Qdrant pair is active.
     if settings.federation_enabled:
         fed_config = FederationConfig.from_json(settings.federation_instances)
         fed_config = fed_config.model_copy(
             update={"timeout_seconds": float(settings.federation_timeout_seconds)}
         )
-        retrieval_service: RetrievalService | FederatedSearch = FederatedSearch(
-            local_service=local_retrieval,
+        federated = FederatedSearch(
+            local_service=_UnwiredLegacyService(),
             config=fed_config,
         )
-        app.state.federated_search = retrieval_service
+        app.state.federated_search = federated
         log.info(
             "federation_enabled",
             peers=len(fed_config.enabled_instances),
             timeout_s=fed_config.timeout_seconds,
         )
     else:
-        retrieval_service = local_retrieval
+        federated = None
         app.state.federated_search = None
 
-    app.state.retrieval_service = retrieval_service
-    log.info("retrieval_service_ready", federated=settings.federation_enabled)
-
     # --- GraphRAG composer (issue #107) ---
-    # Wraps ``graph_store`` + ``vector_store`` and dispatches to the
-    # new composed path when both backends are the Neo4j+Qdrant pair,
-    # or delegates to the legacy ``retrieval_service`` otherwise.  The
-    # composer requires an explicit ``workspace_id`` per call; callers
-    # that cannot resolve one MUST fall back to ``retrieval_service``.
+    # Post-#105 the composer's type-based dispatch always lands on
+    # the GraphRAG path; the ``legacy_service`` parameter is held for
+    # backward compatibility of the constructor signature but is
+    # never invoked at runtime.  The placeholder raises if it ever is.
     graph_rag_composer = GraphRAGComposer(
-        graph_store=graph_store,
-        vector_store=app.state.vector_store,
-        legacy_service=retrieval_service,
+        graph_store=neo4j_graph_store,
+        vector_store=qdrant_store,
+        legacy_service=federated if federated is not None else _UnwiredLegacyService(),
     )
     app.state.graph_rag_composer = graph_rag_composer
     log.info(
@@ -216,6 +229,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     # --- Ingestion worker ---
+    # NOTE: the ingestion worker still drives the pgvector ``IndexWriter``
+    # for document + chunk metadata persistence.  Wiring ingestion to
+    # write vectors into Qdrant / entities into Neo4j is tracked as a
+    # follow-up to #105 — see the CHANGELOG Known-gaps section.
     index_writer = IndexWriter(session_factory)
     consumer: QueueConsumer[DocumentChangeEvent] = QueueConsumer(
         js=nats_conn.jetstream,
@@ -283,17 +300,12 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     worker_task.cancel()
     await embedding_provider.close()
 
-    # Close the Qdrant client if the qdrant backend is active (#106).
-    qdrant_store_on_shutdown: QdrantVectorStore | None = getattr(app.state, "qdrant_store", None)
-    if qdrant_store_on_shutdown is not None:
-        await qdrant_store_on_shutdown.close()
+    await qdrant_store.close()
 
-    # Close the federation HTTP client if federation is active.
-    if settings.federation_enabled and isinstance(retrieval_service, FederatedSearch):
-        await retrieval_service.close()
+    if federated is not None:
+        await federated.close()
 
-    if neo4j_graph_store is not None:
-        await neo4j_graph_store.close()
+    await neo4j_graph_store.close()
 
     await engine.dispose()
     await nats_conn.disconnect()

@@ -103,20 +103,20 @@ def _make_chunk(
 
 
 def _make_app(factory: Any = None) -> FastAPI:
-    """Build a minimal FastAPI app wired for the #103 GraphStore protocol.
+    """Build a minimal FastAPI app wired for the GraphStore protocol.
 
-    The MCP/REST handlers post-#103 consume ``app.state.graph_store``
-    (a ``PgVectorGraphStore``) rather than constructing
-    ``GraphQueryService`` from ``db_session_factory`` directly.  The
-    session factory is still kept on ``app.state`` for legacy code
-    paths (tokens, freshness, etc.) that have not yet migrated.
+    The MCP/REST handlers consume ``app.state.graph_store`` (a
+    ``GraphStore`` protocol implementation).  Production wires the
+    Neo4j adapter; these unit tests use a test-only proxy that
+    routes through ``GraphQueryService`` so we can exercise the
+    MCP/REST glue without spinning up a Neo4j container.
     """
-    from omniscience_retrieval.adapters import PgVectorGraphStore
+    from tests.support.graph_store_proxy import GraphQueryProxy
 
     app = FastAPI()
     app.state.db_session_factory = factory
     if factory is not None:
-        app.state.graph_store = PgVectorGraphStore(session_factory=factory)
+        app.state.graph_store = GraphQueryProxy(session_factory=factory)
     else:
         app.state.graph_store = None
     return app
@@ -662,12 +662,15 @@ def _make_rest_app(factory: Any = None) -> FastAPI:
     """Build a minimal app with the entities router registered.
 
     Lifespan does not run under an ``ASGITransport`` harness, so we
-    seed ``app.state.graph_store`` (a ``PgVectorGraphStore``) here —
-    mirroring what ``_lifespan`` does in production.
+    seed ``app.state.graph_store`` here — mirroring what
+    ``_lifespan`` does in production.  The test proxy routes through
+    ``GraphQueryService`` so we can exercise the REST glue without a
+    live Neo4j.
     """
     from omniscience_core.config import Settings
-    from omniscience_retrieval.adapters import PgVectorGraphStore
     from omniscience_server.app import create_app
+
+    from tests.support.graph_store_proxy import GraphQueryProxy
 
     settings = Settings(
         database_url="postgresql+asyncpg://test:test@localhost:5432/test",
@@ -679,7 +682,7 @@ def _make_rest_app(factory: Any = None) -> FastAPI:
     app = create_app(settings=settings)
     if factory is not None:
         app.state.db_session_factory = factory
-        app.state.graph_store = PgVectorGraphStore(session_factory=factory)
+        app.state.graph_store = GraphQueryProxy(session_factory=factory)
     return app
 
 
