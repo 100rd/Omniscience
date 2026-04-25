@@ -1,11 +1,12 @@
 """Storage interface layer for Omniscience.
 
 Defines the ``GraphStore`` and ``VectorStore`` protocols that decouple
-retrieval and writer code from any specific backend (pgvector today;
-Neo4j + Qdrant in Phase 2 per ADR-0005 and ADR-0006).
+retrieval and writer code from any specific backend.  As of v0.2 the
+production backends are Neo4j (graph) and Qdrant (vector) per
+ADR-0005 and ADR-0006.
 
 See ``docs/decisions/0005-neo4j-as-graph-store.md`` and
-``docs/decisions/0006-qdrant-as-vector-store.md`` for the migration
+``docs/decisions/0006-qdrant-as-vector-store.md`` for the design
 rationale.
 
 ACL invariant (issue #117 carry-forward)

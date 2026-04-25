@@ -414,11 +414,18 @@ def _chunked(items: list[Any], size: int) -> list[list[Any]]:
 def _chunk_to_payload(chunk: Chunk) -> ChunkPayload:
     """Translate a pgvector :class:`Chunk` row to a :class:`ChunkPayload`.
 
-    The embedding is normalised to ``list[float]`` because pgvector
-    returns ``numpy.ndarray`` from the ORM and Qdrant's client expects
-    plain Python floats on the wire.
+    The embedding is normalised to ``list[float]`` because pre-v0.2
+    pgvector returned ``numpy.ndarray`` from the ORM and Qdrant's
+    client expects plain Python floats on the wire.
+
+    As of v0.2 the ``embedding`` attribute has been removed from the
+    :class:`Chunk` ORM model (alembic revision ``0004``).  This
+    function reaches for the attribute via ``getattr`` so that it
+    remains import-safe inside the v0.2 package; operators who want
+    to migrate real pgvector data must run it against a pre-v0.2
+    schema where the column is still present.
     """
-    raw_embedding = chunk.embedding
+    raw_embedding = getattr(chunk, "embedding", None)
     embedding: list[float] = [] if raw_embedding is None else [float(x) for x in raw_embedding]
     payload: ChunkPayload = {
         "ord": int(chunk.ord),

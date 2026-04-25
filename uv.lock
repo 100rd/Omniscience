@@ -1232,7 +1232,7 @@ wheels = [
 
 [[package]]
 name = "omniscience"
-version = "0.1.0"
+version = "0.2.0"
 source = { virtual = "." }
 dependencies = [
     { name = "omniscience-cli" },
@@ -1301,7 +1301,7 @@ dev = [
 
 [[package]]
 name = "omniscience-cli"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/cli" }
 dependencies = [
     { name = "httpx" },
@@ -1320,7 +1320,7 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-connectors"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/connectors" }
 dependencies = [
     { name = "boto3" },
@@ -1343,7 +1343,7 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-core"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/core" }
 dependencies = [
     { name = "alembic" },
@@ -1354,7 +1354,6 @@ dependencies = [
     { name = "opentelemetry-exporter-otlp" },
     { name = "opentelemetry-instrumentation-fastapi" },
     { name = "opentelemetry-sdk" },
-    { name = "pgvector" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1372,7 +1371,6 @@ requires-dist = [
     { name = "opentelemetry-exporter-otlp", specifier = ">=1.25.0" },
     { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.46b0" },
     { name = "opentelemetry-sdk", specifier = ">=1.25.0" },
-    { name = "pgvector", specifier = ">=0.3.0" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0" },
@@ -1382,7 +1380,7 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-embeddings"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/embeddings" }
 dependencies = [
     { name = "httpx" },
@@ -1399,7 +1397,7 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-index"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/index" }
 dependencies = [
     { name = "asyncpg" },
@@ -1424,7 +1422,7 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-parsers"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/parsers" }
 dependencies = [
     { name = "markdown-it-py" },
@@ -1461,7 +1459,7 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-plugin-example"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "examples/plugin-example" }
 dependencies = [
     { name = "omniscience-connectors" },
@@ -1476,14 +1474,13 @@ requires-dist = [
 
 [[package]]
 name = "omniscience-retrieval"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/retrieval" }
 dependencies = [
     { name = "asyncpg" },
     { name = "httpx" },
     { name = "omniscience-core" },
     { name = "omniscience-embeddings" },
-    { name = "pgvector" },
     { name = "sqlalchemy", extra = ["asyncio"] },
 ]
 
@@ -1493,13 +1490,12 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
-    { name = "pgvector", specifier = ">=0.3.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
 ]
 
 [[package]]
 name = "omniscience-server"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "apps/server" }
 dependencies = [
     { name = "fastapi" },
@@ -1709,18 +1705,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/fa/36/e27608899f9b8d4dff0617b2d9ab17ca5608956ca44461ac14ac48b44015/pathspec-1.0.4.tar.gz", hash = "sha256:0210e2ae8a21a9137c0d470578cb0e595af87edaa6ebf12ff176f14a02e0e645", size = 131200, upload-time = "2026-01-27T03:59:46.938Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ef/3c/2c197d226f9ea224a9ab8d197933f9da0ae0aac5b6e0f884e2b8d9c8e9f7/pathspec-1.0.4-py3-none-any.whl", hash = "sha256:fb6ae2fd4e7c921a165808a552060e722767cfa526f99ca5156ed2ce45a5c723", size = 55206, upload-time = "2026-01-27T03:59:45.137Z" },
-]
-
-[[package]]
-name = "pgvector"
-version = "0.4.2"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "numpy" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/25/6c/6d8b4b03b958c02fa8687ec6063c49d952a189f8c91ebbe51e877dfab8f7/pgvector-0.4.2.tar.gz", hash = "sha256:322cac0c1dc5d41c9ecf782bd9991b7966685dee3a00bc873631391ed949513a", size = 31354, upload-time = "2025-12-05T01:07:17.87Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5a/26/6cee8a1ce8c43625ec561aff19df07f9776b7525d9002c86bceb3e0ac970/pgvector-0.4.2-py3-none-any.whl", hash = "sha256:549d45f7a18593783d5eec609ea1684a724ba8405c4cb182a0b2b08aeff04e08", size = 27441, upload-time = "2025-12-05T01:07:16.536Z" },
 ]
 
 [[package]]

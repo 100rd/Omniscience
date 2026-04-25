@@ -19,7 +19,6 @@ from omniscience_core.db.models import Chunk, Document, IngestionRun, Source
 from omniscience_core.storage import GraphResultView, GraphStore
 from omniscience_retrieval.graph_rag import GraphRAGComposer
 from omniscience_retrieval.models import SearchRequest
-from omniscience_retrieval.search import RetrievalService
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -48,13 +47,15 @@ async def mcp_search(
 ) -> dict[str, Any]:
     """Execute retrieval and return hits with citations.
 
-    When ``workspace_id`` is supplied AND the ``GraphRAGComposer`` is
-    wired on ``app.state`` (issue #107), the composer runs: it either
-    performs the full GraphRAG composition (Neo4j+Qdrant stack) or
-    transparently falls back to the legacy ``RetrievalService`` for
-    any other backend combination.  When ``workspace_id`` is absent
-    (stdio/legacy callers) we use the legacy service directly — the
-    composer's workspace invariant is non-negotiable.
+    As of v0.2 (#105 cutover) the canonical path is the
+    ``GraphRAGComposer`` (Neo4j + Qdrant).  Callers that cannot supply
+    a ``workspace_id`` receive a ``RuntimeError`` — workspace scoping
+    is a non-negotiable invariant (#117).
+
+    The legacy ``RetrievalService`` (pgvector + BM25) was removed in
+    v0.2; ``app.state.retrieval_service`` is preserved as an optional
+    escape hatch for operators that wire a custom federation-peer
+    shim, but it is never populated by default.
     """
     composer: GraphRAGComposer | None = getattr(app.state, "graph_rag_composer", None)
     request = SearchRequest(
@@ -71,11 +72,12 @@ async def mcp_search(
         result = await composer.search(request, workspace_id=workspace_id)
         return result.model_dump(mode="json")
 
-    service: RetrievalService | None = getattr(app.state, "retrieval_service", None)
+    service: Any | None = getattr(app.state, "retrieval_service", None)
     if service is None:
         raise RuntimeError("retrieval_service not available on app.state")
     result = await service.search(request)
-    return result.model_dump(mode="json")
+    dumped: dict[str, Any] = result.model_dump(mode="json")
+    return dumped
 
 
 # ---------------------------------------------------------------------------

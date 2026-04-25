@@ -1,4 +1,9 @@
-"""Omniscience index layer: atomic document + chunk upsert into PostgreSQL/pgvector."""
+"""Omniscience index layer.
+
+Atomic document + chunk-metadata upsert into PostgreSQL (operational
+metadata only as of v0.2), plus the Neo4j and Qdrant store adapters
+used by the retrieval composer.
+"""
 
 from omniscience_index.hashing import compute_content_hash
 from omniscience_index.linker import EntityLinker

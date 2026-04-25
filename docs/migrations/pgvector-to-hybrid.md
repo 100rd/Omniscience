@@ -1,7 +1,21 @@
 # Runbook: pgvector → Neo4j + Qdrant migration (issue #108)
 
-> Phase 4 of Epic #96. This is the last technical phase before the
-> Phase 5 cutover (#105). The tool is one-shot, idempotent, and safe
+> **Status (as of v0.2).** Epic #96 Phase 5 (#105) has landed, which
+> means pgvector has been removed from the running v0.2 service and
+> the `ankane/pgvector` image is no longer a default dependency. This
+> runbook is preserved for operators who are still running a
+> pre-v0.2 Omniscience install with production data and want to
+> migrate off pgvector before upgrading. A fresh v0.2 install does
+> **not** need to run this migration — it boots directly against
+> Neo4j + Qdrant.
+>
+> The verification gate that cross-checks migrated entities against
+> `PgVectorGraphStore.get_entity` is no longer wired in v0.2 (the
+> adapter was deleted at the cutover); the count-and-isolation gates
+> still run. Operators who need the deeper round-trip gate should
+> run this runbook from a v0.1.x checkout.
+
+> Phase 4 of Epic #96. The tool is one-shot, idempotent, and safe
 > to re-run.
 
 ## Overview

@@ -17,7 +17,6 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from pgvector.sqlalchemy import Vector  # type: ignore[import-untyped]
 from sqlalchemy import (
     BigInteger,
     Boolean,
@@ -273,7 +272,6 @@ class Chunk(Base):
         Computed("to_tsvector('english', text)", persisted=True),
         nullable=False,
     )
-    embedding: Mapped[Any] = mapped_column(Vector(768), nullable=True)
     symbol: Mapped[str | None] = mapped_column(Text, nullable=True)
     ingestion_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -298,13 +296,6 @@ class Chunk(Base):
     __table_args__ = (
         Index("ix_chunks_document_ord", "document_id", "ord"),
         Index("ix_chunks_text_tsv", "text_tsv", postgresql_using="gin"),
-        Index(
-            "ix_chunks_embedding_hnsw",
-            "embedding",
-            postgresql_using="hnsw",
-            postgresql_with={"m": 16, "ef_construction": 64},
-            postgresql_ops={"embedding": "vector_cosine_ops"},
-        ),
         Index(
             "ix_chunks_embedding_model_provider",
             "embedding_model",

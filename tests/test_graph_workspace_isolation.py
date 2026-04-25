@@ -26,7 +26,7 @@ We exercise three layers in one test file:
    that a cross-workspace request returns 404 (never a B-entity payload).
 4. **MCP tool** — same check through the MCP tool path.
 
-No real database is started; Postgres-specific column types (pgvector,
+No real database is started; Postgres-specific column types (
 tsvector) prevent an in-memory SQLite fallback.  The fake session below
 is a deliberate middle ground: it parses the compiled SQL parameters to
 emulate workspace scoping and serves from an in-memory row set.
@@ -518,17 +518,20 @@ def _make_rest_app() -> FastAPI:
 
 
 def _wire_graph_store(app: FastAPI, factory: Any) -> None:
-    """Attach ``PgVectorGraphStore`` to ``app.state`` for the #103 wiring.
+    """Attach a ``GraphStore`` test proxy to ``app.state``.
 
     Lifespan does not run under ``ASGITransport`` and the helper
     ``FastAPI()`` constructor in the MCP tests does not start one
     either — so every test site that pokes a session factory onto
-    ``app.state`` must also wire a ``graph_store`` adapter.
+    ``app.state`` must also wire a ``graph_store`` implementation.
+    This proxy routes ``GraphStore`` calls through
+    ``GraphQueryService`` (in-memory fake session) so we can exercise
+    the MCP/REST wiring without a live Neo4j backend.
     """
-    from omniscience_retrieval.adapters import PgVectorGraphStore
+    from tests.support.graph_store_proxy import GraphQueryProxy
 
     app.state.db_session_factory = factory
-    app.state.graph_store = PgVectorGraphStore(session_factory=factory)
+    app.state.graph_store = GraphQueryProxy(session_factory=factory)
 
 
 def _auth_token(workspace_id: uuid.UUID | None) -> tuple[MagicMock, str]:

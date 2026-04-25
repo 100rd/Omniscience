@@ -70,11 +70,16 @@ secrets:
   # OpenAI / Voyage API key (leave empty if using Ollama)
   openaiApiKey: ""
 
-# ── PostgreSQL ────────────────────────────────────────────────────────────────
+# ── PostgreSQL (operational metadata only — v0.2 cutover, see ADR-0005/0006) ─
 postgres:
   # Set to false to use an external managed database (RDS, CloudSQL, etc.)
   enabled: true
-  image: pgvector/pgvector:pg16
+  # v0.2 no longer requires the pgvector extension — a stock Postgres
+  # image is sufficient.  The previous default ``pgvector/pgvector:pg16``
+  # has been retired; operators upgrading from a pre-v0.2 install should
+  # run ``scripts/migrate_to_hybrid.py`` before re-deploying with this
+  # image change.
+  image: postgres:16-alpine
   database: omniscience
   user: omniscience
   # Storage size for the PostgreSQL PVC
@@ -82,6 +87,39 @@ postgres:
   storageClass: ""
   # Override full DATABASE_URL (disables the internal postgres service)
   externalUrl: ""
+
+# ── Neo4j (graph store — required as of v0.2) ────────────────────────────────
+# Required sub-chart dependency: the graph store is no longer optional.
+# Operators using an external managed Neo4j set ``enabled: false`` and
+# point ``externalUri`` at their cluster.
+neo4j:
+  enabled: true
+  image: neo4j:5.19-community
+  storageSize: 20Gi
+  storageClass: ""
+  # Bolt URI override — takes precedence over the in-cluster service
+  externalUri: ""
+  # Credentials — REQUIRED; override via --set neo4j.password=...
+  username: "neo4j"
+  password: ""
+
+# ── Qdrant (vector store — required as of v0.2) ───────────────────────────────
+# Required sub-chart dependency: the vector store is no longer optional.
+qdrant:
+  enabled: true
+  image: qdrant/qdrant:v1.12.4
+  storageSize: 50Gi
+  storageClass: ""
+  # gRPC is the primary transport per ADR-0006; HTTP is the fallback.
+  grpcPort: 6334
+  httpPort: 6333
+  preferGrpc: true
+  https: false
+  # REQUIRED in every non-dev environment — override via
+  # --set qdrant.apiKey=... (or wire a Secret in the deployment template).
+  apiKey: ""
+  # Connection override — takes precedence over the in-cluster service
+  externalHost: ""
 
 # ── NATS ──────────────────────────────────────────────────────────────────────
 nats:

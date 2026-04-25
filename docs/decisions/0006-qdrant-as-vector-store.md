@@ -1,8 +1,19 @@
 # ADR 0006 — Qdrant as vector store
 
-- **Status**: Proposed
+- **Status**: Implemented
 - **Date**: 2026-04-22
+- **Implemented**: 2026-04-24 (Epic #96 Phase 5 cutover, #105)
 - **Amends**: [ADR-0004](0004-retrieval-strategy-staged.md) on the vector-store-choice dimension only. The staged-retrieval strategy (hybrid → structural → GraphRAG-if-needed) in ADR-0004 still holds; this ADR replaces the pgvector substrate underneath it.
+
+## Implementation notes
+
+This ADR landed across three PRs:
+
+- **[#103](https://github.com/100rd/Omniscience/issues/103)** — introduced the backend-neutral `VectorStore` protocol and wrapped the legacy pgvector writer behind a feature flag. No behaviour change.
+- **[#106](https://github.com/100rd/Omniscience/issues/106)** — landed `QdrantVectorStore` as the Phase-2b vector backend with collection bootstrap and payload indexes, behind `STORAGE_VECTOR_BACKEND=qdrant`.
+- **[#107](https://github.com/100rd/Omniscience/issues/107)** — `GraphRAGComposer` routed vector search through `VectorStore.search(request, workspace_id=…)`; workspace scoping is now enforced natively in the adapter via a Qdrant payload filter.
+
+Phase 5 (**[#105](https://github.com/100rd/Omniscience/issues/105)**, v0.2.0) removed the pgvector adapter and made Qdrant the only supported vector backend. The `STORAGE_VECTOR_BACKEND` default flipped to `qdrant`; any other value is rejected at startup. The `embedding` column and HNSW index on the Postgres `chunks` table were dropped in alembic revision `0004`, along with the `vector` extension itself.
 
 ## Context
 

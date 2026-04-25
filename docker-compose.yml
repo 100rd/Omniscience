@@ -9,6 +9,10 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -52,6 +56,10 @@ services:
         condition: service_healthy
       nats:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -69,8 +77,14 @@ services:
         condition: service_healthy
     restart: unless-stopped
 
+  # ---------------------------------------------------------------------------
+  # postgres — operational metadata only (sources, documents row-level,
+  # ingestion_runs, api_tokens, workspaces, chunks text/lineage, entities,
+  # edges).  Vectors live in Qdrant and the symbol graph lives in Neo4j as
+  # of v0.2 (#105 cutover); the pgvector extension is no longer required.
+  # ---------------------------------------------------------------------------
   postgres:
-    image: pgvector/pgvector:pg16
+    image: postgres:16-alpine
     ports:
       - "127.0.0.1:5432:5432"
     environment:
@@ -185,9 +199,9 @@ services:
     restart: unless-stopped
 
   # ===========================================================================
-  # neo4j — Phase 2a graph store (issue #104, ADR-0005).
-  #
-  # Activates with:  docker compose --profile graph up
+  # neo4j — graph store (ADR-0005).  As of v0.2 this is a default-on
+  # dependency of the ``app`` service (Epic #96 cutover, #105); pre-v0.2
+  # this lived behind the ``graph`` profile.
   #
   # Single-node Neo4j Community Edition.  Bolt on 7687, HTTP on 7474.
   # Bolt TLS MUST be enabled in non-dev environments (not set here — this
@@ -197,8 +211,6 @@ services:
   # ===========================================================================
   neo4j:
     image: neo4j:5.19-community
-    profiles:
-      - graph
     ports:
       - "127.0.0.1:7474:7474"
       - "127.0.0.1:7687:7687"
@@ -222,18 +234,17 @@ services:
     restart: unless-stopped
 
   # ==========================================================================
-  # qdrant — Vector store (Epic #96, ADR-0006, issue #106)
+  # qdrant — Vector store (Epic #96, ADR-0006, issue #106).  As of v0.2
+  # this is a default-on dependency of the ``app`` service (#105 cutover);
+  # pre-v0.2 this lived behind the ``graph`` profile.
   # --------------------------------------------------------------------------
-  # Activates with:   docker compose --profile graph up
   # gRPC primary:     6334  (ADR-0006 §Transport)
   # HTTP fallback:    6333
   # Storage volume:   /qdrant/storage  (bind-mounted for persistence)
-  # API key:          QDRANT__SERVICE__API_KEY env (unset in dev profile)
+  # API key:          QDRANT__SERVICE__API_KEY env (unset in dev)
   # ==========================================================================
   qdrant:
     image: qdrant/qdrant:v1.12.4
-    profiles:
-      - graph
     ports:
       - "127.0.0.1:6333:6333"
       - "127.0.0.1:6334:6334"

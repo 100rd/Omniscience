@@ -1,8 +1,19 @@
 # ADR 0005 — Neo4j as graph store
 
-- **Status**: Proposed
+- **Status**: Implemented
 - **Date**: 2026-04-22
+- **Implemented**: 2026-04-24 (Epic #96 Phase 5 cutover, #105)
 - **Amends**: [ADR-0004](0004-retrieval-strategy-staged.md) — the "Use Neo4j as primary graph store" rejection
+
+## Implementation notes
+
+This ADR landed across three PRs:
+
+- **[#103](https://github.com/100rd/Omniscience/issues/103)** — introduced the backend-neutral `GraphStore` protocol and wrapped the legacy pgvector writer behind a feature flag. No behaviour change.
+- **[#104](https://github.com/100rd/Omniscience/issues/104)** — landed `Neo4jGraphStore` as the Phase-2a graph backend with full parity tests, behind `STORAGE_GRAPH_BACKEND=neo4j`.
+- **[#107](https://github.com/100rd/Omniscience/issues/107)** — `GraphRAGComposer` composed `GraphStore` + `VectorStore` into the single retrieval entry point consumed by MCP and REST.
+
+Phase 5 (**[#105](https://github.com/100rd/Omniscience/issues/105)**, v0.2.0) removed the pgvector adapter and made Neo4j the only supported graph backend. The `STORAGE_GRAPH_BACKEND` default flipped to `neo4j`; any other value is rejected at startup. Operational metadata (sources, ingestion runs, tokens, workspaces) remains in Postgres.
 
 ## Context
 

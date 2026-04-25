@@ -41,7 +41,7 @@ async def test_health_checks_keys(client: AsyncClient) -> None:
 async def test_health_version_from_settings(client: AsyncClient) -> None:
     """GET /health returns the version from Settings, not a hardcoded string."""
     response = await client.get("/health")
-    assert response.json()["version"] == "0.1.0"
+    assert response.json()["version"] == "0.2.0"
 
 
 @pytest.mark.asyncio

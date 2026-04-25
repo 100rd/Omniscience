@@ -32,7 +32,6 @@ def _chunk(chunk_ord: int = 0, text: str = "hello") -> ChunkData:
     return ChunkData(
         ord=chunk_ord,
         text=text,
-        embedding=[0.1, 0.2, 0.3],
         symbol=None,
         metadata={},
         embedding_model="bge-large-en-v1.5",

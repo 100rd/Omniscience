@@ -1,7 +1,12 @@
-"""POST /api/v1/search — hybrid search over the knowledge base.
+"""POST /api/v1/search — search over the knowledge base.
 
-Accepts a SearchRequest body, delegates to RetrievalService, and returns
-a SearchResult.  Requires the ``search`` scope.
+Accepts a SearchRequest body, routes through the GraphRAG composer
+(Neo4j + Qdrant, ADR-0005/0006) when the caller's token carries a
+workspace, and returns a SearchResult.  Requires the ``search`` scope.
+
+Tokens without a workspace receive 503 — the legacy pgvector
+``RetrievalService`` was removed at the #105 cutover, and non-workspace
+retrieval has no supported default backend.
 """
 
 from __future__ import annotations
@@ -40,19 +45,18 @@ async def search(
     request: Request,
     token: ApiToken = _current_token_dep,
 ) -> SearchResult:
-    """Execute a hybrid search query against indexed knowledge.
+    """Execute a search query against indexed knowledge.
 
     Body mirrors the MCP ``search`` tool input.  Response mirrors the MCP
     ``search`` tool output.
 
     Requires scope: ``search``.
 
-    When the caller's token is workspace-scoped and the
-    :class:`GraphRAGComposer` (issue #107) is wired, the request is
-    routed through the composer — which either runs GraphRAG composed
-    retrieval (Neo4j+Qdrant stack) or transparently falls back to the
-    legacy ``RetrievalService``.  Tokens without a workspace hit the
-    legacy service directly.
+    Workspace-scoped tokens route through the :class:`GraphRAGComposer`
+    (Neo4j + Qdrant, ADR-0005/0006).  Tokens without a workspace fall
+    back to ``app.state.retrieval_service`` when operators have wired
+    a custom shim; by default that attribute is ``None`` and such
+    requests return 503.
     """
     composer: GraphRAGComposer | None = getattr(request.app.state, "graph_rag_composer", None)
     retrieval_service = getattr(request.app.state, "retrieval_service", None)

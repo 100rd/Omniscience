@@ -136,18 +136,23 @@ class EntityLinkerProtocol(Protocol):
 
 
 class _RawChunk:
-    """Minimal chunk produced by the placeholder chunker stage."""
+    """Minimal chunk produced by the placeholder chunker stage.
+
+    As of v0.2 embeddings live in Qdrant rather than Postgres, so the
+    vector is no longer carried on the chunk record itself; the
+    embedding is still computed in the pipeline (it will be pushed
+    to the vector store once ingestion is wired to Qdrant — see the
+    #105 CHANGELOG follow-up).
+    """
 
     def __init__(
         self,
         text: str,
-        embedding: list[float],
         embedding_model: str,
         embedding_provider: str,
     ) -> None:
         self.ord = 0
         self.text = text
-        self.embedding = embedding
         self.symbol: str | None = None
         self.metadata: dict[str, Any] = {}
         self.embedding_model = embedding_model
@@ -385,14 +390,18 @@ class IngestionPipeline:
         t0 = time.monotonic()
         try:
             content_hash = _compute_content_hash(content_text)
+            # ``embeddings`` is still materialised per the pipeline's
+            # ``_stage_embed`` contract; the vectors are intended for the
+            # Qdrant write path once ingestion is wired end-to-end (the
+            # #105 cutover deferred that wiring — see CHANGELOG notes).
+            _ = embeddings
             chunks = [
                 _RawChunk(
                     text=text,
-                    embedding=vec,
                     embedding_model=self._embedding_provider.model_name,
                     embedding_provider=self._embedding_provider.provider_name,
                 )
-                for text, vec in zip(chunks_text, embeddings, strict=True)
+                for text in chunks_text
             ]
             result = await self._index_writer.upsert_document(
                 source_id=event.source_id,

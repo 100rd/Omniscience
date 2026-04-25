@@ -11,8 +11,8 @@ Workspace scoping (issue #117)
 ------------------------------
 
 The caller's ``workspace_id`` is resolved from the authenticated principal
-and propagated to the ``GraphStore`` protocol (pgvector adapter today;
-Neo4j in Phase 2).  A token with no workspace is rejected with
+and propagated to the ``GraphStore`` protocol (Neo4j as of v0.2).
+A token with no workspace is rejected with
 ``403 forbidden`` — graph retrieval is fail-closed, never fail-open —
 because the protocol layer requires an explicit workspace and we refuse
 to invent one on behalf of an unscoped caller.

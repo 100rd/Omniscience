@@ -17,11 +17,13 @@ Backwards-compatibility
 -----------------------
 
 When the injected ``graph_store`` / ``vector_store`` pair is not the
-new Neo4j+Qdrant stack, :meth:`GraphRAGComposer.search` delegates to
-the legacy ``RetrievalService`` (or ``FederatedSearch``) unchanged.
-The dispatch is **type-based** — see :func:`_should_use_graphrag` —
-so a shadow-read deployment that mixes backends deliberately still
-lands on the correct path.
+Neo4j+Qdrant stack (for example, a custom test double), the composer
+delegates to the ``legacy_service`` it was constructed with — kept in
+the signature for forward-compatibility with alternative backends and
+for federation-peer adapters.  In the default v0.2 server wiring the
+composer always lands on the GraphRAG path; the legacy branch is
+unreachable at runtime.  The dispatch is **type-based** — see
+:func:`_should_use_graphrag`.
 
 ACL invariant (non-negotiable — mirrors #117 / #119 / ADR-0005 / ADR-0006)
 -------------------------------------------------------------------------
@@ -151,7 +153,8 @@ _COMPOSED_QUERIES_TOTAL: Counter = Counter(
     documentation=(
         "Count of GraphRAG composed queries by dispatch path: "
         "'graphrag' when the Neo4j+Qdrant stack was used, 'legacy' "
-        "when the call fell back to the pgvector RetrievalService."
+        "when the call was forwarded to the injected legacy_service "
+        "(unreachable in the default v0.2 wiring — see CHANGELOG §0.2.0)."
     ),
     labelnames=["path"],
 )
@@ -165,9 +168,9 @@ _COMPOSED_QUERIES_TOTAL: Counter = Counter(
 class _VectorSearchCallable(Protocol):
     """Narrow protocol: any object with ``async search(request, workspace_id)``.
 
-    Accepts both :class:`QdrantVectorStore` and
-    :class:`PgVectorVectorStore` without importing either — keeps the
-    module free of a static dependency on ``omniscience_index``.
+    Accepts :class:`QdrantVectorStore` and any forward-compatible
+    vector store without importing it — keeps the module free of a
+    static dependency on ``omniscience_index``.
     """
 
     async def search(
@@ -181,10 +184,10 @@ class _VectorSearchCallable(Protocol):
 class _LegacySearchCallable(Protocol):
     """Narrow protocol for the legacy fallback path.
 
-    ``RetrievalService.search`` and ``FederatedSearch.search`` both
-    satisfy this signature.  Kept unaware of workspace scoping because
-    the pgvector retrieval path pre-dates #117 and that gap is tracked
-    separately (see ``PgVectorVectorStore`` docstring).
+    ``FederatedSearch.search`` satisfies this signature, as do any
+    forward-compatible custom shims operators may wire.  Kept unaware
+    of workspace scoping by design: the caller that falls back here
+    is, by definition, running in a non-GraphRAG configuration.
     """
 
     async def search(self, request: SearchRequest) -> SearchResult: ...
@@ -199,13 +202,13 @@ def _should_use_graphrag(
     graph_store: GraphStore,
     vector_store: Any,
 ) -> bool:
-    """Return ``True`` iff the new Neo4j+Qdrant composition path is active.
+    """Return ``True`` iff the Neo4j+Qdrant composition path is active.
 
-    The rule (issue #107 flag-semantics clarification): activate
-    GraphRAG only when **both** backends are the new ones.  Any other
-    combination (pgvector+pgvector, pgvector+qdrant, neo4j+pgvector)
-    falls back to the legacy service so shadow-read deployments keep
-    working.
+    GraphRAG activates only when **both** stores are the canonical
+    Neo4j / Qdrant adapters.  Any other combination (test doubles,
+    custom shims) is routed through the injected ``legacy_service``.
+    In the default v0.2 wiring both stores are always the canonical
+    ones, so the legacy branch is unreachable at runtime.
 
     Type-based rather than flag-sniffing so an operator that wires
     custom stores for a blue/green rollout can still land on the
