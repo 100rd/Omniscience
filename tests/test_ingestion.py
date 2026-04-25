@@ -85,6 +85,7 @@ def _make_index_writer(upsert_action: str = "created") -> MagicMock:
     result = MagicMock()
     result.action = upsert_action
     result.chunks_written = 1
+    result.document_id = uuid.uuid4()
 
     writer = MagicMock(spec=IndexWriterProtocol)
     writer.upsert_document = AsyncMock(return_value=result)
@@ -92,31 +93,86 @@ def _make_index_writer(upsert_action: str = "created") -> MagicMock:
     return writer
 
 
-def _make_session_factory() -> MagicMock:
-    """Return a minimal async session factory mock."""
-    session = AsyncMock()
-    session.begin = MagicMock(return_value=session)
-    session.add = MagicMock()
-    session.flush = AsyncMock()
-    session.execute = AsyncMock(
-        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=None))
+def _make_graph_store() -> MagicMock:
+    """Return a mock GraphStore for the pipeline / worker tests."""
+    store = MagicMock()
+    store.upsert_graph = AsyncMock(return_value=None)
+    store.delete_tombstoned = AsyncMock(return_value=0)
+    return store
+
+
+def _make_vector_store() -> MagicMock:
+    """Return a mock VectorStore for the pipeline / worker tests."""
+    outcome = MagicMock()
+    outcome.action = "created"
+    outcome.chunks_written = 1
+    outcome.document_id = uuid.uuid4()
+    outcome.doc_version = 1
+
+    store = MagicMock()
+    store.upsert_chunks = AsyncMock(return_value=outcome)
+    store.delete_by_document = AsyncMock(return_value=True)
+    return store
+
+
+def _make_session_factory(source: Any = None) -> MagicMock:
+    """Return a minimal async session factory mock.
+
+    The session yields a mock execute() that defaults to scalar_one_or_none
+    -> ``source`` (a Source row).  Tests that drive workspace resolution
+    pass a Source with an explicit ``tenant_id``.  RunTracker tests still
+    rely on ``None`` for the document lookup; both code paths use the
+    same factory shape.
+    """
+    inner_session = AsyncMock()
+    inner_session.begin = MagicMock(return_value=inner_session)
+    inner_session.add = MagicMock()
+    inner_session.flush = AsyncMock()
+    inner_session.execute = AsyncMock(
+        return_value=MagicMock(scalar_one_or_none=MagicMock(return_value=source))
     )
 
+    # Make the factory() result an async context manager that yields the
+    # inner session (mirrors how the real async_sessionmaker behaves).
+    factory_cm = MagicMock()
+    factory_cm.__aenter__ = AsyncMock(return_value=inner_session)
+    factory_cm.__aexit__ = AsyncMock(return_value=False)
+
     factory = MagicMock()
-    factory.return_value = session
+    factory.return_value = factory_cm
+    factory.session = inner_session  # expose for assertions when needed
     return factory
+
+
+def _make_source(tenant_id: uuid.UUID | None = None, name: str = "test-source") -> Any:
+    """Build a duck-typed Source row carrying the tenant_id needed by ACL."""
+    src = MagicMock()
+    src.id = uuid.uuid4()
+    src.name = name
+    src.tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
+    return src
 
 
 def _make_pipeline(
     connector: MagicMock | None = None,
     embedding_provider: MagicMock | None = None,
     index_writer: MagicMock | None = None,
+    graph_store: MagicMock | None = None,
+    vector_store: MagicMock | None = None,
 ) -> IngestionPipeline:
     return IngestionPipeline(
         connector=connector or _make_connector(),
         embedding_provider=embedding_provider or _make_embedding_provider(),
         index_writer=index_writer or _make_index_writer(),
+        graph_store=graph_store or _make_graph_store(),
+        vector_store=vector_store or _make_vector_store(),
     )
+
+
+# Default workspace_id used by every pipeline test that does not care
+# about the exact value.  Module-level so the same UUID flows through
+# any helper that wants to assert it round-trips intact.
+_DEFAULT_WORKSPACE_ID: uuid.UUID = uuid.uuid4()
 
 
 def _get_counter_value(counter: Any, labels: dict[str, str]) -> float:
@@ -153,7 +209,9 @@ class TestIngestionPipelineHappyPath:
     async def test_created_document_returns_created_action(self) -> None:
         pipeline = _make_pipeline()
         event = _make_event(action="created")
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "created"
         assert result.source_id == event.source_id
         assert result.external_id == event.external_id
@@ -164,7 +222,9 @@ class TestIngestionPipelineHappyPath:
         writer = _make_index_writer(upsert_action="updated")
         pipeline = _make_pipeline(index_writer=writer)
         event = _make_event(action="updated")
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "updated"
 
     @pytest.mark.asyncio
@@ -172,7 +232,7 @@ class TestIngestionPipelineHappyPath:
         connector = _make_connector()
         pipeline = _make_pipeline(connector=connector)
         event = _make_event()
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         connector.fetch.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -180,7 +240,7 @@ class TestIngestionPipelineHappyPath:
         provider = _make_embedding_provider()
         pipeline = _make_pipeline(embedding_provider=provider)
         event = _make_event()
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         provider.embed.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -188,14 +248,16 @@ class TestIngestionPipelineHappyPath:
         writer = _make_index_writer()
         pipeline = _make_pipeline(index_writer=writer)
         event = _make_event()
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         writer.upsert_document.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_duration_ms_is_positive(self) -> None:
         pipeline = _make_pipeline()
         event = _make_event()
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.duration_ms >= 0.0
 
     @pytest.mark.asyncio
@@ -204,7 +266,7 @@ class TestIngestionPipelineHappyPath:
         writer = _make_index_writer()
         pipeline = _make_pipeline(index_writer=writer)
         event = _make_event(source_id=sid)
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         call_kwargs = writer.upsert_document.call_args.kwargs
         assert call_kwargs["source_id"] == sid
 
@@ -216,7 +278,9 @@ class TestIngestionPipelineHashDedup:
         writer = _make_index_writer(upsert_action="unchanged")
         pipeline = _make_pipeline(index_writer=writer)
         event = _make_event(action="updated")
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "unchanged"
 
     @pytest.mark.asyncio
@@ -226,7 +290,7 @@ class TestIngestionPipelineHashDedup:
         provider = _make_embedding_provider()
         pipeline = _make_pipeline(embedding_provider=provider, index_writer=writer)
         event = _make_event(action="updated")
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         provider.embed.assert_awaited_once()
 
 
@@ -236,7 +300,9 @@ class TestIngestionPipelineDeletedDocument:
         writer = _make_index_writer()
         pipeline = _make_pipeline(index_writer=writer)
         event = _make_event(action="deleted")
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "deleted"
         writer.tombstone.assert_awaited_once_with(event.source_id, event.external_id)
 
@@ -245,7 +311,7 @@ class TestIngestionPipelineDeletedDocument:
         provider = _make_embedding_provider()
         pipeline = _make_pipeline(embedding_provider=provider)
         event = _make_event(action="deleted")
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         provider.embed.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -254,7 +320,9 @@ class TestIngestionPipelineDeletedDocument:
         writer.tombstone = AsyncMock(return_value=False)
         pipeline = _make_pipeline(index_writer=writer)
         event = _make_event(action="deleted")
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "unchanged"
 
 
@@ -265,7 +333,9 @@ class TestIngestionPipelineFetchError:
         connector.fetch = AsyncMock(side_effect=RuntimeError("network timeout"))
         pipeline = _make_pipeline(connector=connector)
         event = _make_event()
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "error"
         assert result.error is not None
         assert "network timeout" in result.error
@@ -281,7 +351,7 @@ class TestIngestionPipelineFetchError:
         before = _get_counter_value(
             INGESTION_ERRORS_TOTAL, {"source_type": source_type, "stage": "fetch"}
         )
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         after = _get_counter_value(
             INGESTION_ERRORS_TOTAL, {"source_type": source_type, "stage": "fetch"}
         )
@@ -294,7 +364,7 @@ class TestIngestionPipelineFetchError:
         provider = _make_embedding_provider()
         pipeline = _make_pipeline(connector=connector, embedding_provider=provider)
         event = _make_event()
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         provider.embed.assert_not_awaited()
 
 
@@ -305,7 +375,9 @@ class TestIngestionPipelineEmbedError:
         provider.embed = AsyncMock(side_effect=RuntimeError("model overloaded"))
         pipeline = _make_pipeline(embedding_provider=provider)
         event = _make_event()
-        result = await pipeline.run(event, config=None, secrets={})
+        result = await pipeline.run(
+            event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
         assert result.action == "error"
         assert result.error is not None
 
@@ -320,7 +392,7 @@ class TestIngestionPipelineEmbedError:
         before = _get_counter_value(
             INGESTION_ERRORS_TOTAL, {"source_type": source_type, "stage": "embed"}
         )
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         after = _get_counter_value(
             INGESTION_ERRORS_TOTAL, {"source_type": source_type, "stage": "embed"}
         )
@@ -333,7 +405,7 @@ class TestIngestionPipelineEmbedError:
         writer = _make_index_writer()
         pipeline = _make_pipeline(embedding_provider=provider, index_writer=writer)
         event = _make_event()
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         writer.upsert_document.assert_not_awaited()
 
 
@@ -348,7 +420,7 @@ class TestIngestionMetrics:
         pipeline = _make_pipeline()
         event = _make_event()
         before = _get_histogram_count(INGESTION_STAGE_DURATION_SECONDS, {"stage": "fetch"})
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         after = _get_histogram_count(INGESTION_STAGE_DURATION_SECONDS, {"stage": "fetch"})
         assert after > before
 
@@ -357,7 +429,7 @@ class TestIngestionMetrics:
         pipeline = _make_pipeline()
         event = _make_event()
         before = _get_histogram_count(INGESTION_STAGE_DURATION_SECONDS, {"stage": "embed"})
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         after = _get_histogram_count(INGESTION_STAGE_DURATION_SECONDS, {"stage": "embed"})
         assert after > before
 
@@ -366,7 +438,7 @@ class TestIngestionMetrics:
         pipeline = _make_pipeline()
         event = _make_event()
         before = _get_histogram_count(INGESTION_STAGE_DURATION_SECONDS, {"stage": "index"})
-        await pipeline.run(event, config=None, secrets={})
+        await pipeline.run(event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID)
         after = _get_histogram_count(INGESTION_STAGE_DURATION_SECONDS, {"stage": "index"})
         assert after > before
 
@@ -518,18 +590,25 @@ def _make_worker(
     connector: MagicMock | None = None,
     provider: MagicMock | None = None,
     writer: MagicMock | None = None,
+    graph_store: MagicMock | None = None,
+    vector_store: MagicMock | None = None,
+    source: Any = None,
 ) -> tuple[IngestionWorker, MagicMock]:
     queue_consumer = _make_queue_consumer(events or [])
     registry = _make_connector_registry(connector or _make_connector())
     embedding_provider = provider or _make_embedding_provider()
     index_writer = writer or _make_index_writer()
-    session_factory = _make_session_factory()
+    # Default: tenant-bound source so the worker resolves a workspace.
+    src = source if source is not None else _make_source()
+    session_factory = _make_session_factory(source=src)
 
     worker = IngestionWorker(
         queue_consumer=queue_consumer,
         connector_registry=registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
+        graph_store=graph_store or _make_graph_store(),
+        vector_store=vector_store or _make_vector_store(),
         session_factory=session_factory,
     )
     return worker, queue_consumer
@@ -574,6 +653,7 @@ class TestIngestionWorkerHappyPath:
             result = MagicMock()
             result.action = "created"
             result.chunks_written = 1
+            result.document_id = uuid.uuid4()
             return result
 
         writer.upsert_document = AsyncMock(side_effect=_upsert)
@@ -615,7 +695,9 @@ class TestIngestionWorkerErrors:
             connector_registry=_make_connector_registry(connector),
             embedding_provider=_make_embedding_provider(),
             index_writer=_make_index_writer(),
-            session_factory=_make_session_factory(),
+            graph_store=_make_graph_store(),
+            vector_store=_make_vector_store(),
+            session_factory=_make_session_factory(source=_make_source()),
         )
 
         with (
@@ -652,7 +734,9 @@ class TestIngestionWorkerErrors:
             connector_registry=_make_connector_registry(),
             embedding_provider=provider,
             index_writer=_make_index_writer(),
-            session_factory=_make_session_factory(),
+            graph_store=_make_graph_store(),
+            vector_store=_make_vector_store(),
+            session_factory=_make_session_factory(source=_make_source()),
         )
 
         with (

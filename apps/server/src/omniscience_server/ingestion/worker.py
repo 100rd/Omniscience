@@ -4,18 +4,34 @@
 ``INGEST_CHANGES`` stream, passes each through :class:`IngestionPipeline`,
 updates :class:`RunTracker` counters, and acks/naks the broker accordingly.
 
+Responsibilities (issue #126)
+-----------------------------
+
+The worker is the single place where ``Source.tenant_id`` is converted
+into the ``workspace_id`` that every Neo4j / Qdrant adapter call must
+carry.  Doing this BEFORE the pipeline runs means:
+
+1. The pipeline never has to handle a ``None`` workspace.
+2. A tenant-less source is rejected with a clear, structured-log error
+   (``workspace_resolution_failed``) and surfaced as a hard failure so
+   the broker NAKs the message and (after ``max_deliver``) routes it
+   to the DLQ via the existing failure path.
+3. Adapter-side ``MissingWorkspaceError``-equivalents bubble up as
+   pipeline errors and are treated identically to other adapter
+   failures — never swallowed.
+
 Design decisions:
-- A ``nak()`` is issued on pipeline errors so the broker can redeliver up to
-  ``max_deliver`` times.  After ``max_deliver`` the queue framework routes the
-  message to the DLQ transparently.
-- ``stop()`` signals the consumer iterator to drain the current batch and exit;
-  the worker coroutine completes cleanly.
-- One ``IngestionRun`` row covers the entire worker lifetime so counters
-  aggregate across all processed documents.
+- A ``nak()`` is issued on pipeline errors so the broker can redeliver
+  up to ``max_deliver`` times.  After ``max_deliver`` the queue
+  framework routes the message to the DLQ transparently.
+- ``stop()`` signals the consumer iterator to drain the current batch
+  and exit; the worker coroutine completes cleanly.
+- One ``IngestionRun`` row covers the entire worker lifetime so
+  counters aggregate across all processed documents.
 - Secrets are resolved at message-processing time via
-  :class:`~omniscience_core.secrets.SecretsResolver`.  Resolution failures
-  (missing env vars, unreadable files) produce an error result so the broker
-  can redeliver or route to the DLQ.
+  :class:`~omniscience_core.secrets.SecretsResolver`.  Resolution
+  failures (missing env vars, unreadable files) produce an error
+  result so the broker can redeliver or route to the DLQ.
 """
 
 from __future__ import annotations
@@ -24,9 +40,14 @@ import uuid
 
 import structlog
 from omniscience_connectors.registry import ConnectorRegistry
+from omniscience_core.db.models import Source
 from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.secrets import SecretsResolver
+from omniscience_core.storage.graph import GraphStore
+from omniscience_core.storage.vector import VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
+from omniscience_index.workspace import MissingWorkspaceError, resolve_source_workspace
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from omniscience_server.ingestion.events import DocumentChangeEvent, ProcessResult
@@ -44,8 +65,11 @@ class IngestionWorker:
         queue_consumer: Typed consumer for ``DocumentChangeEvent`` messages.
         connector_registry: Registry used to look up connectors by source type.
         embedding_provider: Backend used to generate embedding vectors.
-        index_writer: Writer for the document/chunk index.
-        session_factory: SQLAlchemy async session factory for run tracking.
+        index_writer: Writer for the Postgres operational metadata.
+        graph_store: Neo4j adapter used by the pipeline's graph stage.
+        vector_store: Qdrant adapter used by the pipeline's vector stage.
+        session_factory: SQLAlchemy async session factory for run tracking
+            and workspace resolution.
         secrets_resolver: Resolver for ``secrets_ref`` strings.  When ``None``
             a default :class:`~omniscience_core.secrets.SecretsResolver` is
             created automatically.
@@ -57,6 +81,8 @@ class IngestionWorker:
         connector_registry: ConnectorRegistry,
         embedding_provider: EmbeddingProvider,
         index_writer: IndexWriterProtocol,
+        graph_store: GraphStore,
+        vector_store: VectorStore,
         session_factory: async_sessionmaker[AsyncSession],
         secrets_resolver: SecretsResolver | None = None,
     ) -> None:
@@ -64,6 +90,9 @@ class IngestionWorker:
         self._connector_registry = connector_registry
         self._embedding_provider = embedding_provider
         self._index_writer = index_writer
+        self._graph_store = graph_store
+        self._vector_store = vector_store
+        self._session_factory = session_factory
         self._run_tracker = RunTracker(session_factory)
         self._secrets_resolver = secrets_resolver or SecretsResolver()
         self._run_id: uuid.UUID | None = None
@@ -112,13 +141,36 @@ class IngestionWorker:
     async def process_document(self, event: DocumentChangeEvent) -> ProcessResult:
         """Fetch, parse, embed, and index a single document change event.
 
-        Secrets are resolved from the ``secrets_ref`` attribute on the event
-        (when present) via :class:`~omniscience_core.secrets.SecretsResolver`.
-        When the event carries no ``secrets_ref`` an empty dict is used.
+        Workflow per document:
 
-        Resolution failures surface as error results so the broker can
-        redeliver the message or route it to the DLQ after ``max_deliver``.
+        1. Resolve ``workspace_id`` from the source row's ``tenant_id``.
+           A null tenant produces an error result (structured log
+           ``workspace_resolution_failed``) and the broker NAKs.
+        2. Resolve secrets from the event's ``secrets_ref`` (when set).
+        3. Run the per-document :class:`IngestionPipeline` with the
+           resolved workspace.
+
+        Resolution failures and adapter ``MissingWorkspaceError`` raises
+        surface as ``action="error"`` so the broker redelivers /
+        routes to the DLQ.
         """
+        try:
+            workspace_id = await self._resolve_workspace(event.source_id)
+        except MissingWorkspaceError as exc:
+            log.error(
+                "workspace_resolution_failed",
+                source_id=str(event.source_id),
+                source_name=exc.source_name,
+                external_id=event.external_id,
+            )
+            return ProcessResult(
+                source_id=event.source_id,
+                external_id=event.external_id,
+                action="error",
+                duration_ms=0.0,
+                error=str(exc),
+            )
+
         connector = self._connector_registry.get(event.source_type)
 
         # Resolve secrets for this source. The secrets_ref attribute may be
@@ -131,11 +183,14 @@ class IngestionWorker:
             connector=connector,
             embedding_provider=self._embedding_provider,
             index_writer=self._index_writer,
+            graph_store=self._graph_store,
+            vector_store=self._vector_store,
         )
         result = await pipeline.run(
             event=event,
             config=None,
             secrets=secrets,
+            workspace_id=workspace_id,
             ingestion_run_id=self._run_id,
         )
         INGESTION_DOCUMENTS_PROCESSED_TOTAL.labels(
@@ -143,6 +198,45 @@ class IngestionWorker:
             action=result.action,
         ).inc()
         return result
+
+    # ------------------------------------------------------------------
+    # Workspace resolution
+    # ------------------------------------------------------------------
+
+    async def _resolve_workspace(self, source_id: uuid.UUID) -> uuid.UUID:
+        """Look up the ``Source`` and resolve its ``workspace_id``.
+
+        Reuses :func:`omniscience_index.workspace.resolve_source_workspace`
+        — the same helper the migration runner uses — so live ingestion
+        and the legacy backfill follow identical ACL rules.
+
+        Raises
+        ------
+        MissingWorkspaceError
+            When the source row is missing OR its ``tenant_id`` is null.
+            The worker treats both as the same hard failure: a document
+            has no business being indexed without a workspace anchor.
+        """
+        async with self._session_factory() as session:
+            source = await self._fetch_source(session, source_id)
+        if source is None:
+            # Treat a missing source row as the same fail-closed outcome
+            # as a tenant-less source — the worker has no workspace to
+            # write under either way.  We construct an explicit
+            # MissingWorkspaceError so the caller's error handling path
+            # is identical to the canonical case.
+            raise MissingWorkspaceError(
+                source_id=source_id,
+                source_name="<source-not-found>",
+            )
+        return resolve_source_workspace(source)
+
+    @staticmethod
+    async def _fetch_source(session: AsyncSession, source_id: uuid.UUID) -> Source | None:
+        """Fetch a single ``Source`` row by id.  Read-only query."""
+        stmt = select(Source).where(Source.id == source_id)
+        result = await session.execute(stmt)
+        return result.scalar_one_or_none()
 
     # ------------------------------------------------------------------
     # Run tracking helpers

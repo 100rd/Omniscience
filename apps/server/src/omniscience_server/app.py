@@ -229,10 +229,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     # --- Ingestion worker ---
-    # NOTE: the ingestion worker still drives the pgvector ``IndexWriter``
-    # for document + chunk metadata persistence.  Wiring ingestion to
-    # write vectors into Qdrant / entities into Neo4j is tracked as a
-    # follow-up to #105 — see the CHANGELOG Known-gaps section.
+    # As of issue #126 the worker drives all three stores: Postgres
+    # (operational metadata via ``IndexWriter``), Neo4j (entities + edges
+    # via ``graph_store``), and Qdrant (chunk embeddings via
+    # ``vector_store``).  ``workspace_id`` is resolved from
+    # ``Source.tenant_id`` per document before any adapter call — the
+    # ACL invariant from ADR-0005/0006 carries through the live path the
+    # same way the migration runner enforces it for backfills.
     index_writer = IndexWriter(session_factory)
     consumer: QueueConsumer[DocumentChangeEvent] = QueueConsumer(
         js=nats_conn.jetstream,
@@ -247,6 +250,8 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         connector_registry=connector_registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
+        graph_store=neo4j_graph_store,
+        vector_store=qdrant_store,
         session_factory=session_factory,
     )
     worker_task = asyncio.create_task(worker.start())
