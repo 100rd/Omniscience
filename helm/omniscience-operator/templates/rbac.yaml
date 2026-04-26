@@ -1,0 +1,66 @@
+{{- if .Values.rbac.create -}}
+# v0.2 RBAC: cluster-scoped read-only on Pods. Adding kinds is a follow-up
+# issue per epic #98 — keep this list minimal.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Leader election lease — namespaced; gated to the operator's own namespace
+  # below.
+  {{- if .Values.leaderElection.enabled }}
+  # (see RoleBinding below for the namespaced lease permission)
+  {{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "omniscience-operator.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "omniscience-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- if .Values.leaderElection.enabled }}
+---
+# Lease object lives in the operator's own namespace; this is the only
+# write capability the operator has, and it is namespaced rather than cluster-wide.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}-leader
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "omniscience-operator.fullname" . }}-leader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "omniscience-operator.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
+{{- end }}

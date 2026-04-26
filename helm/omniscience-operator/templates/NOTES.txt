@@ -1,0 +1,22 @@
+omniscience-operator {{ .Chart.AppVersion }} installed in namespace {{ .Release.Namespace }}.
+
+Workspace ID:    {{ .Values.workspaceId }}
+Cluster name:    {{ .Values.clusterName }}
+NATS endpoint:   {{ .Values.nats.url }}
+Subject prefix:  {{ .Values.nats.subjectPrefix }}.{{ .Values.workspaceId }}
+
+Verify the operator is healthy:
+
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "omniscience-operator.fullname" . }}
+
+Tail the logs:
+
+  kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/name={{ include "omniscience-operator.name" . }} -f
+
+Smoke test — create a Pod and watch for the entity:
+
+  kubectl run hello --image=nginx:1.27 --namespace=default
+  # Within ~5 seconds: query Omniscience for k8s_resource/Pod/default/hello
+
+See https://github.com/100rd/Omniscience/blob/main/docs/decisions/0007-k8s-operator-architecture.md
+for the architecture decisions.

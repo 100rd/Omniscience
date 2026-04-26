@@ -1,0 +1,16 @@
+apiVersion: v2
+name: omniscience-operator
+description: Kubernetes operator for Omniscience — watches resources and publishes change events to NATS JetStream. See ADR-0007.
+type: application
+version: 0.1.0
+appVersion: "0.2.0"
+keywords:
+  - omniscience
+  - operator
+  - kubernetes
+  - watch
+home: https://github.com/100rd/Omniscience
+sources:
+  - https://github.com/100rd/Omniscience
+maintainers:
+  - name: Omniscience maintainers
