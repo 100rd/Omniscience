@@ -585,6 +585,72 @@ class QdrantVectorStore:
         document_ids = {r.payload.get(PAYLOAD_DOCUMENT_ID) for r in records if r.payload}
         return len({d for d in document_ids if d is not None})
 
+    # ------------------------------------------------------------------
+    # Stats API (issue #111) — workspace-scoped chunk counts
+    # ------------------------------------------------------------------
+
+    async def count_chunks(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        source_id: uuid.UUID | None = None,
+    ) -> int:
+        """Count active (non-tombstoned) chunk points within a workspace.
+
+        Uses the native Qdrant ``count`` API, which evaluates the filter
+        on the server and returns a single integer — no point payloads
+        traverse the wire.  Mandatory ``workspace_id`` is enforced via
+        ``QdrantFilterBuilder``.
+        """
+        builder = QdrantFilterBuilder(workspace_id=workspace_id).exclude_tombstoned()
+        if source_id is not None:
+            builder = builder.with_source_ids([source_id])
+        flt = builder.build()
+        result = await self._qc.count(
+            collection_name=self._collection_name,
+            count_filter=flt,
+            exact=True,
+        )
+        return int(result.count)
+
+    async def count_chunks_by_source(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Per-source histogram of active chunk points within a workspace.
+
+        Streams payloads (only the ``source_id`` field) and aggregates
+        client-side: Qdrant has no group-by primitive in the Python
+        client.  The pull is bounded by the workspace and excludes
+        tombstoned points so the working-set size is the live chunk
+        count, not the historical total.
+        """
+        flt = QdrantFilterBuilder(workspace_id=workspace_id).exclude_tombstoned().build()
+        offset: qm.ExtendedPointId | None = None
+        page_size = 1000
+        counts: dict[str, int] = {}
+        while True:
+            records, next_offset = await self._qc.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=flt,
+                limit=page_size,
+                with_payload=qm.PayloadSelectorInclude(include=[PAYLOAD_SOURCE_ID]),
+                with_vectors=False,
+                offset=offset,
+            )
+            for r in records:
+                payload = r.payload or {}
+                src = payload.get(PAYLOAD_SOURCE_ID)
+                if src is None:
+                    continue
+                key = str(src)
+                counts[key] = counts.get(key, 0) + 1
+            if next_offset is None:
+                break
+            offset = next_offset
+        return counts
+
 
 # ---------------------------------------------------------------------------
 # Free functions (small, pure, easy to unit-test)

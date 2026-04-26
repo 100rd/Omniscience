@@ -11,14 +11,22 @@ class Scope(enum.StrEnum):
     search = "search"
     sources_read = "sources:read"
     sources_write = "sources:write"
+    stats_read = "stats:read"
     admin = "admin"
 
 
 # admin scope implies all other scopes
 SCOPE_HIERARCHY: dict[Scope, set[Scope]] = {
-    Scope.admin: {Scope.search, Scope.sources_read, Scope.sources_write, Scope.admin},
+    Scope.admin: {
+        Scope.search,
+        Scope.sources_read,
+        Scope.sources_write,
+        Scope.stats_read,
+        Scope.admin,
+    },
     Scope.sources_write: {Scope.sources_write},
     Scope.sources_read: {Scope.sources_read},
+    Scope.stats_read: {Scope.stats_read},
     Scope.search: {Scope.search},
 }
 
