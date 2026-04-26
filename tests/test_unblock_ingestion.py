@@ -198,15 +198,37 @@ def _make_worker(
     embedding_provider.provider_name = "test-provider"
 
     index_writer = MagicMock()
+    graph_store = MagicMock()
+    graph_store.upsert_graph = AsyncMock(return_value=None)
+    vector_store = MagicMock()
+    vector_store.upsert_chunks = AsyncMock(return_value=MagicMock(action="created"))
 
-    session_factory = AsyncMock()
-    session_factory.return_value = AsyncMock()
+    # Session factory: return a Source row with a non-null tenant_id so
+    # workspace resolution succeeds.  These tests stub IngestionPipeline.run,
+    # so the only DB interaction is the worker's source lookup.
+    fake_source = MagicMock()
+    fake_source.id = uuid.uuid4()
+    fake_source.name = "unblock-test-source"
+    fake_source.tenant_id = uuid.uuid4()
+
+    inner_session = AsyncMock()
+    scalar_result = MagicMock()
+    scalar_result.scalar_one_or_none = MagicMock(return_value=fake_source)
+    inner_session.execute = AsyncMock(return_value=scalar_result)
+
+    factory_cm = MagicMock()
+    factory_cm.__aenter__ = AsyncMock(return_value=inner_session)
+    factory_cm.__aexit__ = AsyncMock(return_value=False)
+
+    session_factory = MagicMock(return_value=factory_cm)
 
     worker = IngestionWorker(
         queue_consumer=mock_consumer,
         connector_registry=mock_registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
+        graph_store=graph_store,
+        vector_store=vector_store,
         session_factory=session_factory,
         secrets_resolver=secrets_resolver,
     )
