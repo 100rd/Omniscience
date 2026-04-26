@@ -10,6 +10,7 @@ from omniscience_server.rest.freshness import router as freshness_router
 from omniscience_server.rest.ingestion_runs import router as ingestion_runs_router
 from omniscience_server.rest.search import router as search_router
 from omniscience_server.rest.sources import router as sources_router
+from omniscience_server.rest.stats import router as stats_router
 from omniscience_server.rest.webhooks import router as webhooks_router
 
 api_v1_router = APIRouter(prefix="/api/v1")
@@ -21,5 +22,6 @@ api_v1_router.include_router(entities_router)
 api_v1_router.include_router(ingestion_runs_router)
 api_v1_router.include_router(webhooks_router)
 api_v1_router.include_router(freshness_router)
+api_v1_router.include_router(stats_router)
 
 __all__ = ["api_v1_router"]

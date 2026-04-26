@@ -255,6 +255,39 @@ _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
 # (entity exists, no neighbours).
 _SEED_ONLY_CYPHER: Final[str] = _GET_ENTITY_BY_NAME_CYPHER
 
+# --- Stats queries (issue #111) -------------------------------------------
+#
+# Each statement carries the ``workspace_id`` predicate so the import-time
+# regression guard accepts the template.  The Cypher is index-backed by
+# ``entity_workspace_kind``, ``entity_workspace_name`` (entities) and
+# ``edge_workspace_id`` (edges) created in the bootstrap DDL.
+
+_COUNT_ENTITIES_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+RETURN count(n) AS total
+"""
+
+_COUNT_ENTITIES_BY_KIND_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+RETURN n.kind AS kind, count(n) AS total
+ORDER BY kind
+"""
+
+_COUNT_ENTITIES_BY_SOURCE_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+RETURN n.source_id AS source_id, count(n) AS total
+"""
+
+# Edges: ``MATCH ()-[r]-()`` would double-count undirected relationships,
+# so we anchor on ``()-[r]->()`` and rely on the workspace property on
+# the relationship itself (mirrored from the upsert path).
+_COUNT_EDGES_BY_TYPE_CYPHER: Final[str] = """
+MATCH ()-[r]->()
+WHERE r.workspace_id = $workspace_id
+RETURN r.edge_type AS edge_type, count(r) AS total
+ORDER BY edge_type
+"""
+
 
 # ---------------------------------------------------------------------------
 # Import-time regression guards
@@ -289,6 +322,10 @@ _ensure_workspace_predicate(_UPSERT_EDGE_CYPHER_TEMPLATE, "_UPSERT_EDGE_CYPHER_T
 _ensure_workspace_predicate(_DELETE_BY_SOURCE_CYPHER, "_DELETE_BY_SOURCE_CYPHER")
 _ensure_workspace_predicate(_GET_ENTITY_BY_NAME_CYPHER, "_GET_ENTITY_BY_NAME_CYPHER")
 _ensure_workspace_predicate(_TRAVERSE_CYPHER_TEMPLATE, "_TRAVERSE_CYPHER_TEMPLATE")
+_ensure_workspace_predicate(_COUNT_ENTITIES_CYPHER, "_COUNT_ENTITIES_CYPHER")
+_ensure_workspace_predicate(_COUNT_ENTITIES_BY_KIND_CYPHER, "_COUNT_ENTITIES_BY_KIND_CYPHER")
+_ensure_workspace_predicate(_COUNT_ENTITIES_BY_SOURCE_CYPHER, "_COUNT_ENTITIES_BY_SOURCE_CYPHER")
+_ensure_workspace_predicate(_COUNT_EDGES_BY_TYPE_CYPHER, "_COUNT_EDGES_BY_TYPE_CYPHER")
 
 
 # ---------------------------------------------------------------------------
@@ -641,6 +678,64 @@ class Neo4jGraphStore:
             max_depth=max_depth,
             edge_types=edge_types,
         )
+
+    # ------------------------------------------------------------------
+    # Stats API (issue #111) — workspace-scoped
+    # ------------------------------------------------------------------
+
+    async def count_entities(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> int:
+        """Count all entities visible in ``workspace_id``."""
+        params: dict[str, Any] = {_WORKSPACE_PARAM: str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, _COUNT_ENTITIES_CYPHER, params)
+        if not rows:
+            return 0
+        return int(rows[0].get("total", 0))
+
+    async def count_entities_by_kind(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Histogram of entity kinds within ``workspace_id``."""
+        params: dict[str, Any] = {_WORKSPACE_PARAM: str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(
+                _run_read_stmt, _COUNT_ENTITIES_BY_KIND_CYPHER, params
+            )
+        return {str(r["kind"]): int(r["total"]) for r in rows if r.get("kind") is not None}
+
+    async def count_edges_by_type(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Histogram of edge types within ``workspace_id``."""
+        params: dict[str, Any] = {_WORKSPACE_PARAM: str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, _COUNT_EDGES_BY_TYPE_CYPHER, params)
+        return {
+            str(r["edge_type"]): int(r["total"]) for r in rows if r.get("edge_type") is not None
+        }
+
+    async def count_entities_by_source(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Per-source entity histogram within ``workspace_id``."""
+        params: dict[str, Any] = {_WORKSPACE_PARAM: str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(
+                _run_read_stmt, _COUNT_ENTITIES_BY_SOURCE_CYPHER, params
+            )
+        return {
+            str(r["source_id"]): int(r["total"]) for r in rows if r.get("source_id") is not None
+        }
 
 
 # ---------------------------------------------------------------------------

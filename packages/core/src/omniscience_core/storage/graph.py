@@ -262,6 +262,61 @@ class GraphStore(Protocol):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # Stats API — issue #111 (workspace-scoped histograms + totals)
+    # ------------------------------------------------------------------
+
+    async def count_entities(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> int:
+        """Return total number of entities visible in ``workspace_id``.
+
+        Workspace-scoped per the protocol's ACL invariant; cross-workspace
+        widening is forbidden.  Used by the stats overview endpoint.
+        """
+        ...
+
+    async def count_entities_by_kind(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Return a histogram of entity kinds within ``workspace_id``.
+
+        Map keys are the entity ``kind`` strings (e.g. ``"function"``,
+        ``"terraform_resource"``); values are non-negative counts.
+        """
+        ...
+
+    async def count_edges_by_type(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Return a histogram of edge types within ``workspace_id``.
+
+        Map keys are the edge ``edge_type`` strings (e.g. ``"calls"``);
+        values are non-negative counts.  Edges are counted once even when
+        they connect entities across multiple sources within the same
+        workspace.
+        """
+        ...
+
+    async def count_entities_by_source(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Return a per-source entity count map within ``workspace_id``.
+
+        Map keys are the stringified ``source_id`` UUIDs; values are
+        non-negative counts.  Used to assemble the per-source stats
+        table without N+1 queries.
+        """
+        ...
+
 
 __all__ = [
     "EdgeUpsert",

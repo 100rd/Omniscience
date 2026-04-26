@@ -216,6 +216,41 @@ class VectorStore(Protocol):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # Stats API — issue #111 (workspace-scoped chunk totals)
+    # ------------------------------------------------------------------
+
+    async def count_chunks(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        source_id: uuid.UUID | None = None,
+    ) -> int:
+        """Return the number of active (non-tombstoned) chunk points.
+
+        Workspace-scoped per the protocol's ACL invariant.  When
+        ``source_id`` is supplied the count is further narrowed to that
+        source, otherwise the whole workspace is summed.
+
+        Used by the stats overview endpoint and by the per-source stats
+        table.  Tombstoned chunk points are excluded.
+        """
+        ...
+
+    async def count_chunks_by_source(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Return a per-source chunk count map within ``workspace_id``.
+
+        Map keys are the stringified ``source_id`` UUIDs; values are
+        non-negative counts of active (non-tombstoned) chunk points.
+        Used to assemble the per-source stats table in a single
+        backend round-trip rather than N source-id queries.
+        """
+        ...
+
 
 __all__ = [
     "ChunkPayload",
