@@ -131,7 +131,14 @@ _WRITE_WORKSPACE_PARAM: Final[str] = "workspace_id"
 
 # --- Bootstrap DDL ---------------------------------------------------------
 
+# Label name for per-version `(:EntityState)` snapshots — see ADR-0008 §2.
+# Identity nodes are still `:Entity`; each version is reachable from its
+# identity via `[:HAD_STATE]`, with the still-current version mirrored on
+# the identity node so current-state reads stay one MERGE.
+_ENTITY_STATE_LABEL: Final[str] = "EntityState"
+
 _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
+    # --- ADR-0005 carry-forward — unchanged. -------------------------------
     # Composite uniqueness including workspace_id — same source id across
     # workspaces must not collide.  (ADR-0005 §Schema.)
     f"CREATE CONSTRAINT entity_workspace_id_unique IF NOT EXISTS "
@@ -146,6 +153,39 @@ _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     # supports relationship property indexes.
     "CREATE INDEX edge_workspace_id IF NOT EXISTS FOR ()-[r]-() ON (r.workspace_id)",
     "CREATE INDEX edge_source_id IF NOT EXISTS FOR ()-[r]-() ON (r.source_id)",
+    # --- ADR-0008 §4 — bitemporal schema (issue #130). ---------------------
+    # Each statement below is copied verbatim from ADR-0008 §4.  Every
+    # index is composite on `workspace_id` first per ADR-0008
+    # §Consequences-security #1 and the ACL carry-forward from #117/#119.
+    # `IF NOT EXISTS` keeps bootstrap idempotent — re-runs are no-ops.
+    #
+    # New EntityState uniqueness — one row per (workspace_id, id, valid_from).
+    # Per ADR-0008 §4: same valid_from twice for the same identity is corruption
+    # (a writer race); recorded_at is NOT in the uniqueness key because
+    # monotonicity (§1) makes it redundant for distinguishing rows.
+    f"CREATE CONSTRAINT entity_state_workspace_id_valid_from_unique IF NOT EXISTS "
+    f"FOR (s:{_ENTITY_STATE_LABEL}) "
+    f"REQUIRE (s.workspace_id, s.id, s.valid_from) IS UNIQUE",
+    # Hot-path identity by ingestion freshness; used by the dominant
+    # "current state" read narrowing and by the retention worker for
+    # hot -> warm eviction (ADR-0009 §2).
+    f"CREATE INDEX entity_workspace_recorded_at IF NOT EXISTS "
+    f"FOR (n:{_ENTITY_LABEL}) ON (n.workspace_id, n.recorded_at)",
+    # Validity-window seek for as_of reads.  Composite ordering matters
+    # per ADR-0008 §4: planner narrows by (workspace_id, id) first, then
+    # ranges over (valid_from, valid_to) — the shape §5's predicate emits.
+    f"CREATE INDEX entity_state_workspace_valid_window IF NOT EXISTS "
+    f"FOR (s:{_ENTITY_STATE_LABEL}) "
+    f"ON (s.workspace_id, s.id, s.valid_from, s.valid_to)",
+    # Retention-side EntityState lookup by ingestion freshness — used by
+    # the retention worker (ADR-0009).
+    f"CREATE INDEX entity_state_workspace_recorded_at IF NOT EXISTS "
+    f"FOR (s:{_ENTITY_STATE_LABEL}) ON (s.workspace_id, s.recorded_at)",
+    # Edge bitemporal seek (relationship property index, Neo4j 5.x).
+    "CREATE INDEX edge_workspace_valid_window IF NOT EXISTS "
+    "FOR ()-[r]-() ON (r.workspace_id, r.valid_from, r.valid_to)",
+    "CREATE INDEX edge_workspace_recorded_at IF NOT EXISTS "
+    "FOR ()-[r]-() ON (r.workspace_id, r.recorded_at)",
 )
 
 
@@ -207,6 +247,100 @@ WHERE n.tombstoned_at IS NOT NULL
 DETACH DELETE n
 RETURN count(n) AS deleted
 """
+
+
+# --- Bitemporal backfill (ADR-0008 §8 phase 1, issue #130) ---------------
+#
+# These statements are kept SEPARATE from `_BOOTSTRAP_STATEMENTS` so the
+# `connect()` startup path stays sub-200ms on a 1M-node graph.  They are
+# operator-driven (invoked from a one-shot CLI), never run from the
+# FastAPI lifespan.  See `Neo4jGraphStore.backfill_bitemporal`.
+#
+# The migration is idempotent: every SET is guarded by `WHERE n.valid_from
+# IS NULL` per ADR-0008 §8, so re-runs are no-ops on rows already migrated.
+# Every MATCH is workspace-scoped — the caller pins `$workspace_id` so
+# workspace A's backfill never touches workspace B (ADR-0008 §Consequences-
+# security #1, ACL carry-forward from #117/#119).
+
+# Default batch size for the chunked backfill loop.  ADR-0008 §Risks names
+# "chunked, resumable, never a `MATCH (n) SET ...` that locks the entire
+# graph" as a non-negotiable; 500 keeps individual transactions well under
+# Neo4j's default 30s tx timeout on the v0.5 envelope while amortising
+# session overhead.  Raise via `batch_size=` kwarg if a wider window is
+# desired during a maintenance window.
+BACKFILL_DEFAULT_BATCH_SIZE: Final[int] = 500
+
+# Phase 1a — populate the bitemporal triple on existing identity `:Entity`
+# nodes that pre-date the schema.  Maps `created_at`/`updated_at` (the
+# pre-bitemporal property names from `_UPSERT_ENTITY_CYPHER`) onto the new
+# `valid_from`/`recorded_at` per ADR-0008 §8 phase 1.  `valid_to` is set
+# to NULL — the still-valid sentinel from §1.  Returns the number of rows
+# touched so the caller can loop until zero (resumable per §8).
+_BACKFILL_ENTITY_PROPS_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+WHERE n.valid_from IS NULL
+WITH n LIMIT $batch_size
+SET n.valid_from = n.created_at,
+    n.valid_to = NULL,
+    n.recorded_at = n.updated_at
+RETURN count(n) AS modified
+"""
+
+# Phase 1b — materialize the initial `(:EntityState)` row for every
+# identity that does not yet have one, and link it via `[:HAD_STATE]`
+# (ADR-0008 §2, §8).  The MERGE on `(:EntityState {workspace_id, id,
+# valid_from})` is keyed by the new uniqueness constraint, so re-running
+# this query is a no-op once the chain exists for an identity.
+#
+# Runs only on identities that already carry the bitemporal triple
+# (Phase 1a populates that triple), so the order of phases is fixed:
+# props first, state nodes second.
+_BACKFILL_ENTITY_STATE_NODES_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+WHERE n.valid_from IS NOT NULL
+  AND NOT (n)-[:HAD_STATE]->(:{_ENTITY_STATE_LABEL})
+WITH n LIMIT $batch_size
+MERGE (s:{_ENTITY_STATE_LABEL} {{
+    workspace_id: n.workspace_id,
+    id: n.id,
+    valid_from: n.valid_from
+}})
+ON CREATE SET
+    s.valid_to = n.valid_to,
+    s.recorded_at = n.recorded_at,
+    s.kind = n.kind,
+    s.name = n.name,
+    s.display_name = n.display_name,
+    s.source_id = n.source_id,
+    s.chunk_id = n.chunk_id,
+    s.metadata = n.metadata
+MERGE (n)-[:HAD_STATE]->(s)
+RETURN count(s) AS modified
+"""
+
+# Phase 1c — populate the bitemporal triple on existing relationships.
+# Edges remain identity-to-identity per ADR-0008 §3; only the relationship
+# properties carry the new triple.  Mirrors phase 1a's idempotence guard.
+_BACKFILL_EDGE_PROPS_CYPHER: Final[str] = """
+MATCH ()-[r]->()
+WHERE r.workspace_id = $workspace_id
+  AND r.valid_from IS NULL
+WITH r LIMIT $batch_size
+SET r.valid_from = r.created_at,
+    r.valid_to = NULL,
+    r.recorded_at = r.updated_at
+RETURN count(r) AS modified
+"""
+
+# Group the templates so the import-time guard treats them as a unit and
+# anyone touching them sees the §8 contract together.  Tuple ordering is
+# the execution order: props -> state nodes -> edges.  The state-nodes
+# pass depends on phase 1a, so re-ordering breaks idempotence.
+_BITEMPORAL_BACKFILL_STATEMENTS: Final[tuple[str, ...]] = (
+    _BACKFILL_ENTITY_PROPS_CYPHER,
+    _BACKFILL_ENTITY_STATE_NODES_CYPHER,
+    _BACKFILL_EDGE_PROPS_CYPHER,
+)
 
 
 # --- Read queries ----------------------------------------------------------
@@ -326,6 +460,14 @@ _ensure_workspace_predicate(_COUNT_ENTITIES_CYPHER, "_COUNT_ENTITIES_CYPHER")
 _ensure_workspace_predicate(_COUNT_ENTITIES_BY_KIND_CYPHER, "_COUNT_ENTITIES_BY_KIND_CYPHER")
 _ensure_workspace_predicate(_COUNT_ENTITIES_BY_SOURCE_CYPHER, "_COUNT_ENTITIES_BY_SOURCE_CYPHER")
 _ensure_workspace_predicate(_COUNT_EDGES_BY_TYPE_CYPHER, "_COUNT_EDGES_BY_TYPE_CYPHER")
+# ADR-0008 §Consequences-security #1: every bitemporal backfill template
+# is workspace-scoped so a per-workspace backfill never touches another
+# tenant's data.  Drop the predicate, the module fails to import.
+_ensure_workspace_predicate(_BACKFILL_ENTITY_PROPS_CYPHER, "_BACKFILL_ENTITY_PROPS_CYPHER")
+_ensure_workspace_predicate(
+    _BACKFILL_ENTITY_STATE_NODES_CYPHER, "_BACKFILL_ENTITY_STATE_NODES_CYPHER"
+)
+_ensure_workspace_predicate(_BACKFILL_EDGE_PROPS_CYPHER, "_BACKFILL_EDGE_PROPS_CYPHER")
 
 
 # ---------------------------------------------------------------------------
@@ -614,6 +756,78 @@ class Neo4jGraphStore:
         return int(rows[0].get("deleted", 0))
 
     # ------------------------------------------------------------------
+    # Bitemporal backfill (ADR-0008 §8 phase 1, issue #130)
+    # ------------------------------------------------------------------
+
+    async def backfill_bitemporal(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        batch_size: int = BACKFILL_DEFAULT_BATCH_SIZE,
+    ) -> int:
+        """Populate the bitemporal triple on legacy nodes/edges in one workspace.
+
+        ADR-0008 §8 phase 1.  Maps the pre-bitemporal `created_at` /
+        `updated_at` properties onto `valid_from` / `recorded_at` and
+        sets `valid_to = NULL` (the still-valid sentinel from §1) on
+        every existing `:Entity` and every existing relationship in
+        ``workspace_id``, then materializes the initial
+        ``(:EntityState)`` row plus a single ``[:HAD_STATE]`` link from
+        the identity per §2.
+
+        The method runs the three phase-1 templates as a chunked loop
+        until each pass touches zero rows; the caller can re-invoke
+        safely (the migration is idempotent — re-runs are no-ops on
+        already-migrated rows because every SET is guarded by
+        ``WHERE n.valid_from IS NULL``).
+
+        ACL invariant per ADR-0008 §Consequences-security #1: every
+        Cypher template iterates ONE workspace at a time and filters
+        every MATCH on ``workspace_id``.  Workspace A's backfill never
+        touches workspace B; the cross-workspace isolation regression
+        test in ``tests/test_graph_workspace_isolation.py`` exercises
+        this contract.
+
+        Returns the total number of rows modified across all three
+        phases, summed across all chunks.  A return value of zero on a
+        fresh invocation means the workspace is already fully migrated.
+
+        NOT auto-invoked at ``connect()`` — this is operator-driven, run
+        via the admin CLI scheduled by issue #135 or a sibling admin
+        endpoint.  The FastAPI lifespan never runs the backfill.
+        """
+        if batch_size < 1:
+            raise ValueError(f"backfill_batch_size_must_be_positive:{batch_size}")
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "batch_size": int(batch_size),
+        }
+        total_modified = 0
+        for cypher in _BITEMPORAL_BACKFILL_STATEMENTS:
+            total_modified += await self._run_backfill_phase(cypher, params)
+        return total_modified
+
+    async def _run_backfill_phase(
+        self,
+        cypher: str,
+        params: dict[str, Any],
+    ) -> int:
+        """Loop one phase's Cypher until a chunk modifies zero rows.
+
+        Each chunk is its own write transaction so a transient error
+        rolls back only that chunk; re-invocation resumes from where
+        the previous run stopped because every guard is `IS NULL`.
+        """
+        phase_total = 0
+        while True:
+            async with self._driver.session(database=self._config.database) as session:
+                rows = await session.execute_write(_run_write_returning, cypher, params)
+            modified = int(rows[0].get("modified", 0)) if rows else 0
+            if modified == 0:
+                return phase_total
+            phase_total += modified
+
+    # ------------------------------------------------------------------
     # Read API
     # ------------------------------------------------------------------
 
@@ -858,6 +1072,7 @@ def _rows_to_graph_result(row: dict[str, Any]) -> GraphResultView:
 
 
 __all__ = [
+    "BACKFILL_DEFAULT_BATCH_SIZE",
     "Neo4jGraphStore",
     "Neo4jStoreConfig",
 ]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -251,6 +253,20 @@ class Settings(BaseSettings):
         description=(
             "Default BFS depth cap for find_related traversals when the "
             "caller does not supply one. Hard ceiling is 6."
+        ),
+    )
+
+    # --- Bitemporal schema rollout (ADR-0008 §8 phase 2, issue #130) ---
+    graph_bitemporal: Literal["enabled", "disabled"] = Field(
+        default="disabled",
+        description=(
+            "Bitemporal write-path rollout flag for the Neo4j graph. "
+            "Default 'disabled' keeps the writer behaviour from PR #104 "
+            "verbatim; 'enabled' is wired through DI but is a no-op in "
+            "this PR (gates issue #131's writer changes per ADR-0008 §8). "
+            "The flag flips after the bootstrap DDL lands and the "
+            "operator-driven backfill (`Neo4jGraphStore.backfill_bitemporal`) "
+            "completes on a representative dataset."
         ),
     )
 
