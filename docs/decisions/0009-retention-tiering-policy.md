@@ -1,4 +1,4 @@
-# ADR 0008 — Retention tiering policy and storage layout
+# ADR 0009 — Retention tiering policy and storage layout
 
 - **Status**: Proposed
 - **Date**: 2026-04-24
@@ -23,9 +23,9 @@ Two ADRs already in flight observe that retention is the dominant cost shape on 
 - [ADR-0005](0005-neo4j-as-graph-store.md) §Negative-operational: *"Disk footprint grows with temporal retention; 1-year warm retention (§5.3) will be the dominant storage cost."*
 - [ADR-0006](0006-qdrant-as-vector-store.md) §Negative-operational: HNSW RAM cost is the dominant cost for the vector path; bounded only by retention-driven point-count caps and (in v0.6) by quantization.
 
-The bitemporal ADR ([#128](https://github.com/100rd/Omniscience/issues/128), `0007-bitemporal-schema-for-neo4j.md`, parallel sibling in this wave) defines the property semantics, units, identity model, "still valid" sentinel, and interval convention for `valid_from`, `valid_to`, and `recorded_at`. **This ADR cites ADR-0007 as the source of truth for those semantics and does not redefine them.** ADR-0008 fixes the operational shape of the tiers and the worker that moves data between them. The two ADRs are co-equal in epic [#97](https://github.com/100rd/Omniscience/issues/97) Wave 1 and reconcile in Wave 6 ([#139](https://github.com/100rd/Omniscience/issues/139)).
+The bitemporal ADR ([#128](https://github.com/100rd/Omniscience/issues/128), `0008-bitemporal-schema-for-neo4j.md`, parallel sibling in this wave) defines the property semantics, units, identity model, "still valid" sentinel, and interval convention for `valid_from`, `valid_to`, and `recorded_at`. **This ADR cites ADR-0008 as the source of truth for those semantics and does not redefine them.** ADR-0009 fixes the operational shape of the tiers and the worker that moves data between them. The two ADRs are co-equal in epic [#97](https://github.com/100rd/Omniscience/issues/97) Wave 1 and reconcile in Wave 6 ([#139](https://github.com/100rd/Omniscience/issues/139)).
 
-The decision center for ADR-0008 is the warm-tier shape. Vision commits to "snapshot granularity" but does not pick a unit; the warm window is 275 days (90d → 365d), and storage cost scales linearly with snapshot frequency over that window. The wrong choice here is the difference between a multi-tenant Neo4j instance fitting on a single PVC and a multi-instance shard story arriving years earlier than intended. The architect memo on epic #97 flagged this open question and deferred to the ADR author with cost numbers.
+The decision center for ADR-0009 is the warm-tier shape. Vision commits to "snapshot granularity" but does not pick a unit; the warm window is 275 days (90d → 365d), and storage cost scales linearly with snapshot frequency over that window. The wrong choice here is the difference between a multi-tenant Neo4j instance fitting on a single PVC and a multi-instance shard story arriving years earlier than intended. The architect memo on epic #97 flagged this open question and deferred to the ADR author with cost numbers.
 
 ## Decision
 
@@ -35,7 +35,7 @@ The decision center for ADR-0008 is the warm-tier shape. Vision commits to "snap
 
 - Full bitemporal fidelity. Every version of every node, every end-dated edge, every `recorded_at` ingestion timestamp is present.
 - Lives in the live Neo4j store ([ADR-0005](0005-neo4j-as-graph-store.md) deployment posture). Same database, same indexes, same Bolt port.
-- Queryable via MCP / REST `as_of` at arbitrary timestamp precision. The `(workspace_id, recorded_at)` composite index from ADR-0007 backs the predicate.
+- Queryable via MCP / REST `as_of` at arbitrary timestamp precision. The `(workspace_id, recorded_at)` composite index from ADR-0008 backs the predicate.
 - Queryable via batch tools (Cypher shell, neo4j-admin export). Same store.
 - Restore SLA: **N/A** — hot is the live store.
 
@@ -44,7 +44,7 @@ The decision center for ADR-0008 is the warm-tier shape. Vision commits to "snap
 **Decision: snapshot-per-day.** One frozen graph state per UTC day, materialized as separate node and relationship rows under a `:Snapshot:Daily` discriminator label, in the same Neo4j database as hot.
 
 - Snapshot identity: `(workspace_id, snapshot_date_utc)`. The retention worker emits one snapshot per workspace per day.
-- Snapshot content: every entity and edge whose `recorded_at` falls within the snapshot day, projected through the bitemporal interval convention from ADR-0007 — i.e. each entity's "as-of-end-of-day" state, with intermediate intra-day versions collapsed.
+- Snapshot content: every entity and edge whose `recorded_at` falls within the snapshot day, projected through the bitemporal interval convention from ADR-0008 — i.e. each entity's "as-of-end-of-day" state, with intermediate intra-day versions collapsed.
 - Storage shape: `(:EntitySnapshot:Daily {workspace_id, entity_id, snapshot_date, valid_from, valid_to, recorded_at_at_snapshot, ...properties})` and `(:RelationshipSnapshot:Daily {workspace_id, edge_id, snapshot_date, ...})`. Discriminator labels keep snapshot rows out of the live `:Entity` indexes — performance isolation for hot reads is index-backed, not query-rewrite-only.
 - Queryable via MCP / REST `as_of` at **day** precision. A request with `as_of=2025-11-12T14:30:00Z` against a date in the warm window resolves to the `2025-11-12` snapshot. Sub-day precision is rounded to the snapshot boundary; the response envelope carries a `tier: "warm"` and `snapshot_date` field for caller observability.
 - Queryable via batch tools — yes, same store.
@@ -66,16 +66,16 @@ The choice of **per-day** over per-week or compacted-by-day is justified in §Al
 
 ### §2 Eviction triggers
 
-- **Time-based**, on `recorded_at` only. ADR-0007 fixes `recorded_at` as the operator-time clock; ADR-0008 evicts on operator time, never on world time. The boundary is configurable (§10) but defaults to 90 days (hot→warm) and 365 days (warm→archive).
+- **Time-based**, on `recorded_at` only. ADR-0008 fixes `recorded_at` as the operator-time clock; ADR-0008 evicts on operator time, never on world time. The boundary is configurable (§10) but defaults to 90 days (hot→warm) and 365 days (warm→archive).
 - **Eligibility predicate** (Cypher shape, indicative — final form in [#135](https://github.com/100rd/Omniscience/issues/135)):
   ```
   MATCH (n) WHERE n.workspace_id = $workspace_id
     AND n.recorded_at < $hot_cutoff
     AND NOT (n:Snapshot)
   ```
-  Composite-index-backed via `(workspace_id, recorded_at)` from ADR-0007. The worker iterates per-workspace; cross-tenant batches are forbidden (see §Consequences-security).
-- **Edge end-dating does NOT trigger eviction.** A relationship with `valid_to` set in the past (per ADR-0007 §3 tombstone semantics) remains in the hot tier as long as its `recorded_at` is within the hot window. World-time end-dating and operator-time eviction are orthogonal concerns. This ADR states the boundary explicitly to forestall the most likely operator-vs-world confusion.
-- **Eviction granularity: per-version.** A node identity whose latest version is hot but whose history extends into warm has its older versions evicted to warm while the latest stays hot. The writer-side query (per ADR-0007's identity model — property-versioned-via-state-relationship is the most likely pick, but ADR-0008 is agnostic) must support per-version eligibility selection. The alternative (per-identity, "all versions stay together") is rejected in §Alternatives-rejected: it makes hot footprint unbounded for long-lived entities.
+  Composite-index-backed via `(workspace_id, recorded_at)` from ADR-0008. The worker iterates per-workspace; cross-tenant batches are forbidden (see §Consequences-security).
+- **Edge end-dating does NOT trigger eviction.** A relationship with `valid_to` set in the past (per ADR-0008 §3 tombstone semantics) remains in the hot tier as long as its `recorded_at` is within the hot window. World-time end-dating and operator-time eviction are orthogonal concerns. This ADR states the boundary explicitly to forestall the most likely operator-vs-world confusion.
+- **Eviction granularity: per-version.** A node identity whose latest version is hot but whose history extends into warm has its older versions evicted to warm while the latest stays hot. The writer-side query (per ADR-0008's identity model — property-versioned-via-state-relationship is the most likely pick, but ADR-0008 is agnostic) must support per-version eligibility selection. The alternative (per-identity, "all versions stay together") is rejected in §Alternatives-rejected: it makes hot footprint unbounded for long-lived entities.
 
 ### §3 Worker shape
 
@@ -89,7 +89,7 @@ The choice of **per-day** over per-week or compacted-by-day is justified in §Al
   2. **Mark** in a short write transaction: set `n.tier = 'warm_pending'` (or `'archive_pending'`) on each eligible id. Cheap property update, no relationship writes, no identity churn.
   3. **Move** in a follower transaction: read marked records, write the snapshot row (warm) or stream-upload the Parquet object (archive), then delete the live row in a separate transaction. The split prevents a single long-lived write transaction from blocking ingestion.
 
-  The writer-side query (per ADR-0007 §1) ignores rows with `tier != 'hot'` on the hot path — it does not see in-flight warm/archive movers, so live ingestion proceeds without coordination.
+  The writer-side query (per ADR-0008 §1) ignores rows with `tier != 'hot'` on the hot path — it does not see in-flight warm/archive movers, so live ingestion proceeds without coordination.
 - **Dry-run mode (mandatory)**: `OMNISCIENCE_RETENTION_DRY_RUN=true` makes the worker emit metrics, log eligible counts, and produce a structured "would-evict" report without writing anything. Required for ops review before flipping the worker to live in production for the first time on each deployment.
 - **Per-tenant iteration**: the worker iterates workspaces sequentially within a run; eviction batches are workspace-scoped. The ACL invariant is structural — there is no cross-workspace query in the eviction path at all (see §Consequences-security).
 
@@ -119,7 +119,7 @@ The choice of **per-day** over per-week or compacted-by-day is justified in §Al
 
 ### §6 Postgres operational metadata
 
-Postgres tables (`sources`, `ingestion_runs`, `documents`, `chunks`, `tokens`, `workspaces`) are **NOT subject to graph retention tiers.** Their lifecycle is the existing tombstone/janitor model documented in `docs/schema.md` §"Tombstones not deletes". This boundary is the same one ADR-0007 §7 draws and the same one the architect memo on epic #97 calls out explicitly. The ADR states it here to forestall a well-meaning future PR that drags retention into Alembic migrations.
+Postgres tables (`sources`, `ingestion_runs`, `documents`, `chunks`, `tokens`, `workspaces`) are **NOT subject to graph retention tiers.** Their lifecycle is the existing tombstone/janitor model documented in `docs/schema.md` §"Tombstones not deletes". This boundary is the same one ADR-0008 §7 draws and the same one the architect memo on epic #97 calls out explicitly. The ADR states it here to forestall a well-meaning future PR that drags retention into Alembic migrations.
 
 The architect memo is precise: *"Sources are configured or not; ingestion runs happened or didn't; tokens are valid or revoked. The existing tombstone/janitor model is the right shape for that data. Adding bitemporal columns to those tables would multiply Postgres churn for a property that none of those tables need."* The same logic applies to retention tiering — none of the operational tables have a "what did this look like at as-of" semantic.
 
@@ -150,7 +150,7 @@ Required Prometheus metrics on the existing `/metrics` surface:
 ### §9 Failure modes
 
 - **Worker crash during a run**: the next scheduled run resumes from idempotency (per §3). Crash count is observable via `omniscience_retention_worker_duration_seconds` (missing data points correlate with crash) and via the existing FastAPI lifespan error path. No data loss — read-then-mark-then-move is crash-safe.
-- **Eviction lag past 7 days**: P1 alert via the existing alert path (the same one freshness uses). Runbook: check worker logs, check `omniscience_retention_worker_duration_seconds` histogram for slow phase, check Neo4j query plan for the eligibility predicate (most likely cause: index missed because `(workspace_id, recorded_at)` from ADR-0007 didn't backfill).
+- **Eviction lag past 7 days**: P1 alert via the existing alert path (the same one freshness uses). Runbook: check worker logs, check `omniscience_retention_worker_duration_seconds` histogram for slow phase, check Neo4j query plan for the eligibility predicate (most likely cause: index missed because `(workspace_id, recorded_at)` from ADR-0008 didn't backfill).
 - **Archive read failure during a `degraded_response`**: the `degraded_response` envelope itself does not synchronously read archive. The runbook applies only to the offline-restore CLI (separate sub-issue).
 - **Object storage outage**: archive writes fail, retention worker logs and exits the move phase early; eligible records remain marked but not moved. Next run retries. Manageable: object storage outages on AWS S3 are minutes-to-hours, not days; a backlog of unmoved-archive records does not affect query correctness (they remain in warm and are queryable).
 - **Snapshot inconsistency between Neo4j and Qdrant**: cross-store consistency is a property-test target ([#138](https://github.com/100rd/Omniscience/issues/138)); a divergence beyond a per-cohort tolerance (TBD in [#138](https://github.com/100rd/Omniscience/issues/138)) escalates to a P2 alert. Mitigation in v1: re-run the worker; if persistent, trigger a per-workspace re-sync from Postgres `chunks` (the canonical source for vector lineage).
@@ -188,7 +188,7 @@ Rejected, but more reluctantly. The cost story is attractive: rowcount in the wa
 The reasons to reject:
 
 1. **Writer-side complexity.** The retention worker has to evaluate "which of N versions emitted this day is the latest" on the move phase, which adds an aggregation pass to every run. The per-day snapshot approach reads the live store row-by-row and emits one snapshot row per entity per day with no aggregation — the dumber, more debuggable shape.
-2. **Round-trip semantics.** Compacted-by-day loses the "Omniscience learned this fact at 14:00Z and revised it at 16:00Z" trace. ADR-0007 fixes `recorded_at` as the operator-time clock, and a property of the bitemporal model is that operator-time learning history is itself queryable. Dropping intermediate `recorded_at` versions in the warm tier loses that property silently — the warm-tier `recorded_at` field would be unreliable in a way no other tier exhibits.
+2. **Round-trip semantics.** Compacted-by-day loses the "Omniscience learned this fact at 14:00Z and revised it at 16:00Z" trace. ADR-0008 fixes `recorded_at` as the operator-time clock, and a property of the bitemporal model is that operator-time learning history is itself queryable. Dropping intermediate `recorded_at` versions in the warm tier loses that property silently — the warm-tier `recorded_at` field would be unreliable in a way no other tier exhibits.
 3. **The cost saving is bounded.** At v0.5 scale, per-day's 2.75M rows per workspace over 275 days is well within the 100GB SSD envelope ([ADR-0005](0005-neo4j-as-graph-store.md)). Compacted-by-day saves ≈30-50% of that, which moves the squeeze date from "year 5 at 100× growth" to "year 6 at 100× growth" — not material to v0.5 design.
 
 Compacted-by-day is the right answer if the storage squeeze materializes earlier than expected. It is captured as a Revisit trigger.
@@ -255,7 +255,7 @@ Rejected. Long-lived entities (a Kubernetes namespace that has existed for 2 yea
 
 Specific carry-forward:
 
-1. The retention worker's eligibility predicate MUST include `n.workspace_id = $workspace_id` in every Cypher template — index-backed via the `(workspace_id, recorded_at)` composite from ADR-0007. The worker's iteration shape is per-workspace (§3) — at no point does a single Cypher query cross workspaces, even for batch efficiency.
+1. The retention worker's eligibility predicate MUST include `n.workspace_id = $workspace_id` in every Cypher template — index-backed via the `(workspace_id, recorded_at)` composite from ADR-0008. The worker's iteration shape is per-workspace (§3) — at no point does a single Cypher query cross workspaces, even for batch efficiency.
 2. The Qdrant retention path follows ADR-0006's `must`-clause filter on `workspace_id` for every read, every scroll, every count. The retention adapter constructs `Filter(must=[FieldCondition(key="workspace_id", match=MatchValue(value=workspace_id)), ...])` via the typed filter-builder; raw `Filter` construction is review-rejected.
 3. The archive bucket layout (`s3://{bucket}/{workspace_id}/{year}/{month}/{day}/snapshot.parquet`) puts `workspace_id` at the top-level prefix. IAM policies on the archive bucket SHOULD scope per-prefix so a compromised retention worker credential can only write to the workspace-scoped prefix. (IAM policy is operational; this ADR specifies the layout that makes per-prefix scoping possible.)
 4. The `degraded_response` envelope for archive reads MUST NOT leak existence information across workspaces. A request to workspace A for an `as_of` in archive returns the same envelope shape regardless of whether workspace A has any archive at that timestamp or whether it has been offboarded entirely. The "have you ever existed" bit is workspace-scoped and unobservable from the response. Same posture as the cross-workspace isolation contract test that ADR-0006 mandates for Qdrant.
@@ -282,8 +282,8 @@ The dominant cost remains the hot+warm Neo4j+Qdrant footprint, exactly as ADR-00
 - **Schema-migration interaction with snapshots.** A future ADR that changes entity properties opens a question: do warm snapshots in the old schema get migrated, dropped, or read with version-aware adapters? This ADR does not pre-empt the answer; the schema-migration runbook (separate doc, separate sub-issue) decides per-migration. Documented as a known long-tail risk.
 - **Customer-config drift.** Tier boundaries are global-only in v1 (§10). The first customer ask for per-tenant boundaries is the moment the global-only choice becomes a migration. The migration path is documented (move boundaries to the `workspaces` Postgres table) — not implemented.
 - **Cross-store consistency between Neo4j and Qdrant** under retention. The eviction worker handles both stores in one run, but an inconsistency window exists between the Neo4j move and the Qdrant move. Property tests in [#138](https://github.com/100rd/Omniscience/issues/138) are the gate; if the divergence budget is breached in production, the runbook escalates to a full per-workspace re-sync.
-- **ADR-0007 numbering collision** (cross-ADR alignment risk). The K8s operator ADR ([#101](https://github.com/100rd/Omniscience/issues/101), epic #98, merged in PR #142) already occupies `0007-k8s-operator-architecture.md`. The bitemporal sibling sub-issue ([#128](https://github.com/100rd/Omniscience/issues/128)) is specified to write `0007-bitemporal-schema-for-neo4j.md`, which collides on the prefix. ADR-0008 cites the bitemporal ADR by its specified filename and ADR number; if the sibling architect picks a different filename to resolve the collision, [#139](https://github.com/100rd/Omniscience/issues/139) (Wave 6) is the moment the references reconcile. **No semantic decision in this ADR depends on which filename the sibling picks** — the ADR identity is the bitemporal contract, not the file path.
-- **ADR-0007 alignment risk on `recorded_at` units and "still valid" sentinel.** ADR-0008 §1 (snapshot identity, eligibility predicate) and §2 (per-version eviction) operate on `recorded_at`. ADR-0007 fixes the units (Cypher datetime is the most likely pick per the architect memo) and the "still valid" sentinel for `valid_to` (`NULL` is the SQL-bitemporal default). If ADR-0007 picks a different sentinel (e.g. `+infinity` epoch-ms), the §2 eligibility predicate's interaction with end-dated edges still holds — eviction is on `recorded_at` only, never `valid_to`. The conservative path is taken: this ADR does not assume the sentinel value, only that ADR-0007 fixes it.
+- **ADR numbering reconciliation** (resolved at PR-open time). The K8s operator ADR ([#101](https://github.com/100rd/Omniscience/issues/101), epic #98, merged in PR #142) occupies `0007-k8s-operator-architecture.md`; the bitemporal sibling ([#128](https://github.com/100rd/Omniscience/issues/128)) consequently lands at `0008-bitemporal-schema-for-neo4j.md` (ADR-0008); this retention ADR lands at `0009-retention-tiering-policy.md` (ADR-0009). All cross-references in this file use the resolved numbering. **No semantic decision depends on the file path** — the ADR identity is the bitemporal/retention contract, not the prefix.
+- **ADR-0008 alignment on `recorded_at` units and "still valid" sentinel.** ADR-0009 §1 (snapshot identity, eligibility predicate) and §2 (per-version eviction) operate on `recorded_at`. ADR-0008 fixes the units (Cypher datetime is the most likely pick per the architect memo) and the "still valid" sentinel for `valid_to` (`NULL` is the SQL-bitemporal default). If ADR-0008 picks a different sentinel (e.g. `+infinity` epoch-ms), the §2 eligibility predicate's interaction with end-dated edges still holds — eviction is on `recorded_at` only, never `valid_to`. The conservative path is taken: this ADR does not assume the sentinel value, only that ADR-0008 fixes it.
 
 ## Revisit triggers
 
@@ -298,12 +298,12 @@ The dominant cost remains the hot+warm Neo4j+Qdrant footprint, exactly as ADR-00
 
 ## Cross-doc consequences
 
-- [`docs/decisions/0005-neo4j-as-graph-store.md`](0005-neo4j-as-graph-store.md) §Negative-operational has a one-line cross-reference to add: "Retention shape and worker behaviour fixed in ADR-0008." Amendment lands in a follow-up sub-issue, not this PR (per scope guardrails).
-- [`docs/decisions/0006-qdrant-as-vector-store.md`](0006-qdrant-as-vector-store.md) §Deployment-posture has a one-line cross-reference: "Qdrant retention mirror specified in ADR-0008 §5." Amendment lands in a follow-up sub-issue, not this PR.
-- ADR-0007 (bitemporal schema, parallel sibling — `0007-bitemporal-schema-for-neo4j.md` per [#128](https://github.com/100rd/Omniscience/issues/128); see Risks for the numbering collision note) is the canonical source for `recorded_at` units, "still valid" sentinel, and identity model. ADR-0008 cites; ADR-0007 is amended in Wave 6 ([#139](https://github.com/100rd/Omniscience/issues/139)) only if reconciliation requires it.
-- [`docs/schema.md`](../schema.md) — no change required. The Postgres operational tables are explicitly out of scope for graph retention tiers (§6); the existing tombstone/janitor model is unchanged. A one-line cross-reference ("Graph retention tiers and the lifecycle separation are specified in ADR-0008 §6") is appropriate as a follow-up amendment, not in this PR.
+- [`docs/decisions/0005-neo4j-as-graph-store.md`](0005-neo4j-as-graph-store.md) §Negative-operational has a one-line cross-reference to add: "Retention shape and worker behaviour fixed in ADR-0009." Amendment lands in a follow-up sub-issue, not this PR (per scope guardrails).
+- [`docs/decisions/0006-qdrant-as-vector-store.md`](0006-qdrant-as-vector-store.md) §Deployment-posture has a one-line cross-reference: "Qdrant retention mirror specified in ADR-0009 §5." Amendment lands in a follow-up sub-issue, not this PR.
+- ADR-0008 (bitemporal schema, parallel sibling — `0008-bitemporal-schema-for-neo4j.md` per [#128](https://github.com/100rd/Omniscience/issues/128); see Risks for the numbering collision note) is the canonical source for `recorded_at` units, "still valid" sentinel, and identity model. ADR-0009 cites; ADR-0008 is amended in Wave 6 ([#139](https://github.com/100rd/Omniscience/issues/139)) only if reconciliation requires it.
+- [`docs/schema.md`](../schema.md) — no change required. The Postgres operational tables are explicitly out of scope for graph retention tiers (§6); the existing tombstone/janitor model is unchanged. A one-line cross-reference ("Graph retention tiers and the lifecycle separation are specified in ADR-0009 §6") is appropriate as a follow-up amendment, not in this PR.
 - [`docs/deploy.md`](../deploy.md) — needs updates for the archive bucket configuration (Helm value `omniscience.archive.bucket`, KMS key reference, IAM policy guidance) and for the global retention boundaries (§10). Lands in [#135](https://github.com/100rd/Omniscience/issues/135) or [#136](https://github.com/100rd/Omniscience/issues/136) as part of the implementation PR, not in this ADR.
-- [`docs/vision.md`](../vision.md) §5.3 already names the three-tier shape; cross-link this ADR alongside ADR-0007. One-line addition is in scope for a Wave 6 amendment, not this PR.
+- [`docs/vision.md`](../vision.md) §5.3 already names the three-tier shape; cross-link this ADR alongside ADR-0008. One-line addition is in scope for a Wave 6 amendment, not this PR.
 - A new `docs/runbooks/retention-worker-runbook.md` lands with [#136](https://github.com/100rd/Omniscience/issues/136) (alert/dashboard PR), covering §9 failure modes.
 - The offline-restore CLI sub-issue is opened in epic [#97](https://github.com/100rd/Omniscience/issues/97) before [#139](https://github.com/100rd/Omniscience/issues/139) closes; its design lives in a separate ADR if non-trivial, otherwise in `docs/runbooks/archive-restore.md`.
 
@@ -311,7 +311,7 @@ The dominant cost remains the hot+warm Neo4j+Qdrant footprint, exactly as ADR-00
 
 - Parent epic: [#97](https://github.com/100rd/Omniscience/issues/97)
 - This issue: [#129](https://github.com/100rd/Omniscience/issues/129)
-- Parallel sibling (canonical bitemporal contract): [#128](https://github.com/100rd/Omniscience/issues/128) — `0007-bitemporal-schema-for-neo4j.md`
+- Parallel sibling (canonical bitemporal contract): [#128](https://github.com/100rd/Omniscience/issues/128) — `0008-bitemporal-schema-for-neo4j.md`
 - Blocks: [#135](https://github.com/100rd/Omniscience/issues/135) (retention worker), [#136](https://github.com/100rd/Omniscience/issues/136) (retention metrics)
 - Wave 6 reconciliation: [#138](https://github.com/100rd/Omniscience/issues/138) (property tests), [#139](https://github.com/100rd/Omniscience/issues/139) (flip Status to Implemented)
 - Pairs with: [ADR-0005](0005-neo4j-as-graph-store.md) (Neo4j graph store), [ADR-0006](0006-qdrant-as-vector-store.md) (Qdrant vector store)
