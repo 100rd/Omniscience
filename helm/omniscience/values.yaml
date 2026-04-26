@@ -61,6 +61,47 @@ config:
   # CORS origins (comma-separated)
   corsOrigins: ""
 
+# ── Retention worker (ADR-0009, issue #135) ──────────────────────────────────
+# Tier boundaries are global-only in v1 per ADR-0009 §10.  Per-tenant
+# overrides are out of scope; the migration path is documented in the
+# ADR for the first customer ask.
+retention:
+  # Hot tier retention boundary in days (ADR-0009 §1).  EntityState rows,
+  # edges, and chunks with `recorded_at < now - hotDays` are evicted to
+  # warm.
+  hotDays: 90
+  # Warm tier retention boundary in days, cumulative (ADR-0009 §1).
+  # EntitySnapshot:Daily rows older than warmDays are archived to S3.
+  warmDays: 365
+  # Archive horizon in years.  Beyond this the bucket lifecycle rule
+  # deletes objects; the worker does NOT enforce archive expiry.
+  archiveYears: 7
+  # Worker tick interval in seconds (default 6 hours per ADR-0009 §3).
+  tickSeconds: 21600
+  # Dry-run mode.  REQUIRED before first live activation per deployment
+  # (ADR-0009 §3): operators review the dry-run report via
+  # GET /api/v1/admin/retention/report, then flip this to false.
+  dryRun: false
+  # Master switch for the worker.  Set false only for environments
+  # where retention is intentionally deferred (CI fixtures, etc).
+  enabled: true
+  # S3-compatible bucket for archive parquet writes (ADR-0009 §7).
+  # REQUIRED in non-dev — when empty, warm-to-archive is skipped and
+  # warm rows remain queryable until configured.
+  archiveBucket: ""
+  # KMS key ARN for archive encryption (ADR-0009 §1: KMS-managed keys
+  # mandatory in non-dev).  When empty, falls back to SSE-S3 (AES256),
+  # which is acceptable in dev only.
+  archiveKmsKeyArn: ""
+  # Custom S3 endpoint URL for MinIO / Ceph / etc.  Empty = AWS S3.
+  archiveS3EndpointUrl: ""
+  # Region for the archive S3 client.
+  archiveS3Region: "us-east-1"
+  # Rows touched per Neo4j transaction (ADR-0009 §3).
+  batchSize: 500
+  # Sample size for the dry-run report.
+  sampleSize: 20
+
 # ── Secrets (values are base64-encoded by default in Secret template) ─────────
 secrets:
   # PostgreSQL password — REQUIRED; override via --set secrets.postgresPassword=...

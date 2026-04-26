@@ -38,7 +38,7 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Final
 
 import structlog
@@ -144,6 +144,14 @@ _WRITE_WORKSPACE_PARAM: Final[str] = "workspace_id"
 # identity via `[:HAD_STATE]`, with the still-current version mirrored on
 # the identity node so current-state reads stay one MERGE.
 _ENTITY_STATE_LABEL: Final[str] = "EntityState"
+
+# Discriminator labels for warm-tier snapshot rows (ADR-0009 §1 / §7).
+# Snapshot rows live in the same Neo4j database as hot but carry these
+# discriminator labels so the hot-path indexes (composite on `:Entity`
+# / `:EntityState`) never see them.  Performance isolation is index-
+# backed, not query-rewrite-only.
+_ENTITY_SNAPSHOT_LABELS: Final[str] = "EntitySnapshot:Daily"
+_RELATIONSHIP_SNAPSHOT_LABELS: Final[str] = "RelationshipSnapshot:Daily"
 
 _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     # --- ADR-0005 carry-forward — unchanged. -------------------------------
@@ -514,6 +522,274 @@ _BITEMPORAL_BACKFILL_STATEMENTS: Final[tuple[str, ...]] = (
 )
 
 
+# --- Retention Cypher (ADR-0009 §2 / §3, issue #135) --------------------
+#
+# Per-version eviction (ADR-0009 §2): a node identity whose latest version
+# is hot but whose history extends into warm has its older versions
+# evicted to warm while the latest stays hot.  The eligibility predicate
+# selects `:EntityState` rows whose `recorded_at < $hot_cutoff` AND which
+# are NOT the still-current version (`valid_to IS NOT NULL`).  This
+# preserves the identity-stability invariant from ADR-0008 §9 #4: the
+# `valid_to IS NULL` row for an identity never moves to warm.
+#
+# Edge end-dating does NOT trigger eviction (ADR-0009 §2): a relationship
+# with `valid_to` set in the past stays hot as long as its `recorded_at`
+# is within the hot window.  The eligibility predicate is on
+# `recorded_at`, never on `valid_to`.
+#
+# Every Cypher template below is composite on `workspace_id` (ADR-0009
+# §Consequences-security #1, ACL carry-forward from ADR-0005/#117/#119).
+# The retention worker iterates per-workspace; cross-tenant batches are
+# forbidden.
+
+# Phase 1 (read): count rows eligible for hot-to-warm eviction.  Used by
+# the dry-run reporter and the live worker to size batches.  No mutation.
+_COUNT_HOT_TO_WARM_ENTITY_STATE_ELIGIBLE: Final[str] = f"""
+MATCH (s:{_ENTITY_STATE_LABEL} {{workspace_id: $workspace_id}})
+WHERE s.recorded_at < $hot_cutoff
+  AND s.valid_to IS NOT NULL
+RETURN count(s) AS eligible
+"""
+
+_COUNT_HOT_TO_WARM_EDGE_ELIGIBLE: Final[str] = """
+MATCH ()-[r]->()
+WHERE r.workspace_id = $workspace_id
+  AND r.recorded_at < $hot_cutoff
+  AND r.valid_to IS NOT NULL
+RETURN count(r) AS eligible
+"""
+
+# Phase 1 (read): sample eligible rows for the dry-run report.  Bounded
+# limit; `id` and `recorded_at` only — no full row payload.
+_SAMPLE_HOT_TO_WARM_ENTITY_STATE: Final[str] = f"""
+MATCH (s:{_ENTITY_STATE_LABEL} {{workspace_id: $workspace_id}})
+WHERE s.recorded_at < $hot_cutoff
+  AND s.valid_to IS NOT NULL
+RETURN s.id AS id, s.valid_from AS valid_from, s.recorded_at AS recorded_at
+ORDER BY s.recorded_at ASC
+LIMIT $limit
+"""
+
+# Phase 1 (read): oldest eligible `recorded_at` for the lag SLO.
+# Returns NULL when nothing is overdue.
+_OLDEST_ELIGIBLE_HOT_RECORDED_AT: Final[str] = f"""
+MATCH (s:{_ENTITY_STATE_LABEL} {{workspace_id: $workspace_id}})
+WHERE s.recorded_at < $hot_cutoff
+  AND s.valid_to IS NOT NULL
+RETURN min(s.recorded_at) AS oldest
+"""
+
+# Phase 2 (mark): tag eligible :EntityState rows with `tier_pending = 'warm'`
+# in batches.  Idempotent — already-marked rows are skipped.  The marker
+# is the resumability anchor per ADR-0009 §3: a crash between mark and
+# move leaves rows in a re-runnable state.
+_MARK_HOT_TO_WARM_ENTITY_STATE: Final[str] = f"""
+MATCH (s:{_ENTITY_STATE_LABEL} {{workspace_id: $workspace_id}})
+WHERE s.recorded_at < $hot_cutoff
+  AND s.valid_to IS NOT NULL
+  AND coalesce(s.tier_pending, '') <> 'warm'
+WITH s LIMIT $batch_size
+SET s.tier_pending = 'warm'
+RETURN count(s) AS marked
+"""
+
+_MARK_HOT_TO_WARM_EDGE: Final[str] = """
+MATCH ()-[r]->()
+WHERE r.workspace_id = $workspace_id
+  AND r.recorded_at < $hot_cutoff
+  AND r.valid_to IS NOT NULL
+  AND coalesce(r.tier_pending, '') <> 'warm'
+WITH r LIMIT $batch_size
+SET r.tier_pending = 'warm'
+RETURN count(r) AS marked
+"""
+
+# Phase 3 (move): project marked :EntityState rows to :EntitySnapshot:Daily
+# rows under the snapshot-per-day projection (ADR-0009 §1 warm tier).
+# `snapshot_date` is `date(recorded_at)` — UTC calendar day.  The MERGE
+# on (workspace_id, id, snapshot_date) makes this idempotent so multiple
+# eligible versions on the same day collapse into one snapshot row
+# (the as-of-end-of-day projection is implemented by ordering on
+# `valid_from` DESC and keeping the latest version for each (id, day)).
+#
+# Returns the count of (workspace_id, id, snapshot_date) triples
+# materialized.  After the snapshot row is in place the source
+# :EntityState row is deleted in the same transaction — we do not leave
+# a half-evicted state where the row exists in both tiers.
+_MOVE_HOT_TO_WARM_ENTITY_STATE: Final[str] = f"""
+MATCH (s:{_ENTITY_STATE_LABEL} {{workspace_id: $workspace_id}})
+WHERE s.tier_pending = 'warm'
+WITH s LIMIT $batch_size
+WITH s, date(datetime(s.recorded_at)) AS snap_date
+MERGE (snap:{_ENTITY_SNAPSHOT_LABELS} {{
+    workspace_id: s.workspace_id,
+    id: s.id,
+    snapshot_date: snap_date
+}})
+ON CREATE SET
+    snap.valid_from = s.valid_from,
+    snap.valid_to = s.valid_to,
+    snap.recorded_at = s.recorded_at,
+    snap.kind = s.kind,
+    snap.name = s.name,
+    snap.display_name = s.display_name,
+    snap.source_id = s.source_id,
+    snap.chunk_id = s.chunk_id,
+    snap.metadata = s.metadata
+ON MATCH SET
+    snap.valid_from =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.valid_from
+             ELSE snap.valid_from END,
+    snap.valid_to =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.valid_to
+             ELSE snap.valid_to END,
+    snap.recorded_at =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.recorded_at
+             ELSE snap.recorded_at END,
+    snap.kind =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.kind
+             ELSE snap.kind END,
+    snap.name =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.name
+             ELSE snap.name END,
+    snap.display_name =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.display_name
+             ELSE snap.display_name END,
+    snap.source_id =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.source_id
+             ELSE snap.source_id END,
+    snap.chunk_id =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.chunk_id
+             ELSE snap.chunk_id END,
+    snap.metadata =
+        CASE WHEN s.valid_from > snap.valid_from THEN s.metadata
+             ELSE snap.metadata END
+DETACH DELETE s
+RETURN count(snap) AS moved
+"""
+
+# Phase 3 (move): project marked relationships to :RelationshipSnapshot:Daily.
+# Edges remain identity-to-identity; the snapshot carries the bitemporal
+# triple at the day boundary.  Post-snapshot the source relationship is
+# deleted.  The MERGE key is
+# (workspace_id, source_id, target_id, edge_type, snapshot_date) —
+# multiple eligible versions on the same day collapse identically.
+_MOVE_HOT_TO_WARM_EDGE: Final[str] = f"""
+MATCH (a:{_ENTITY_LABEL})-[r]->(b:{_ENTITY_LABEL})
+WHERE r.workspace_id = $workspace_id
+  AND r.tier_pending = 'warm'
+WITH a, r, b LIMIT $batch_size
+WITH a, r, b, date(datetime(r.recorded_at)) AS snap_date
+MERGE (snap:{_RELATIONSHIP_SNAPSHOT_LABELS} {{
+    workspace_id: r.workspace_id,
+    source_entity_id: a.id,
+    target_entity_id: b.id,
+    edge_type: r.edge_type,
+    snapshot_date: snap_date
+}})
+ON CREATE SET
+    snap.valid_from = r.valid_from,
+    snap.valid_to = r.valid_to,
+    snap.recorded_at = r.recorded_at,
+    snap.source_id = r.source_id,
+    snap.metadata = r.metadata
+DELETE r
+RETURN count(snap) AS moved
+"""
+
+# Phase 1 (read): count rows eligible for warm-to-archive transition.
+# `:EntitySnapshot:Daily` rows are eligible when their `snapshot_date`
+# is older than `now - warm_days` (ADR-0009 §1 archive boundary).
+_COUNT_WARM_TO_ARCHIVE_ELIGIBLE: Final[str] = f"""
+MATCH (snap:{_ENTITY_SNAPSHOT_LABELS} {{workspace_id: $workspace_id}})
+WHERE snap.snapshot_date < $warm_cutoff_date
+RETURN count(snap) AS eligible
+"""
+
+# Phase 1 (read): list distinct snapshot dates eligible for archive,
+# bounded.  The archive worker writes one parquet object per
+# (workspace_id, snapshot_date), so the unit of work is the date.
+_LIST_WARM_TO_ARCHIVE_DATES: Final[str] = f"""
+MATCH (snap:{_ENTITY_SNAPSHOT_LABELS} {{workspace_id: $workspace_id}})
+WHERE snap.snapshot_date < $warm_cutoff_date
+RETURN DISTINCT snap.snapshot_date AS snapshot_date
+ORDER BY snapshot_date ASC
+LIMIT $limit
+"""
+
+# Phase 1 (read): fetch all entity-snapshot rows for one (workspace_id,
+# snapshot_date), used by the parquet writer.  Returns the full payload
+# so the writer can serialise without a second round-trip.
+_FETCH_WARM_ENTITY_SNAPSHOT_ROWS: Final[str] = f"""
+MATCH (snap:{_ENTITY_SNAPSHOT_LABELS} {{
+    workspace_id: $workspace_id,
+    snapshot_date: $snapshot_date
+}})
+RETURN
+    snap.id AS id,
+    snap.kind AS kind,
+    snap.name AS name,
+    snap.display_name AS display_name,
+    snap.source_id AS source_id,
+    snap.chunk_id AS chunk_id,
+    toString(snap.valid_from) AS valid_from,
+    toString(snap.valid_to) AS valid_to,
+    toString(snap.recorded_at) AS recorded_at,
+    snap.metadata AS metadata
+"""
+
+# Phase 1 (read): fetch all relationship-snapshot rows for one
+# (workspace_id, snapshot_date).
+_FETCH_WARM_RELATIONSHIP_SNAPSHOT_ROWS: Final[str] = f"""
+MATCH (snap:{_RELATIONSHIP_SNAPSHOT_LABELS} {{
+    workspace_id: $workspace_id,
+    snapshot_date: $snapshot_date
+}})
+RETURN
+    snap.source_entity_id AS source_entity_id,
+    snap.target_entity_id AS target_entity_id,
+    snap.edge_type AS edge_type,
+    snap.source_id AS source_id,
+    toString(snap.valid_from) AS valid_from,
+    toString(snap.valid_to) AS valid_to,
+    toString(snap.recorded_at) AS recorded_at,
+    snap.metadata AS metadata
+"""
+
+# Phase 3 (move): hard-delete warm rows for one (workspace_id, snapshot_date)
+# AFTER the parquet write succeeded.  Keep entity and relationship
+# snapshot deletes in separate templates so a relationship delete does
+# not block on a missing entity snapshot.
+_DELETE_WARM_ENTITY_SNAPSHOT: Final[str] = f"""
+MATCH (snap:{_ENTITY_SNAPSHOT_LABELS} {{
+    workspace_id: $workspace_id,
+    snapshot_date: $snapshot_date
+}})
+DETACH DELETE snap
+RETURN count(snap) AS deleted
+"""
+
+_DELETE_WARM_RELATIONSHIP_SNAPSHOT: Final[str] = f"""
+MATCH (snap:{_RELATIONSHIP_SNAPSHOT_LABELS} {{
+    workspace_id: $workspace_id,
+    snapshot_date: $snapshot_date
+}})
+DELETE snap
+RETURN count(snap) AS deleted
+"""
+
+# Stats: count records by tier for the metrics gauge.
+_COUNT_HOT_ENTITY_STATES: Final[str] = f"""
+MATCH (s:{_ENTITY_STATE_LABEL} {{workspace_id: $workspace_id}})
+RETURN count(s) AS total
+"""
+
+_COUNT_WARM_ENTITY_SNAPSHOTS: Final[str] = f"""
+MATCH (snap:{_ENTITY_SNAPSHOT_LABELS} {{workspace_id: $workspace_id}})
+RETURN count(snap) AS total
+"""
+
+
 # --- Read queries ----------------------------------------------------------
 
 _GET_ENTITY_BY_NAME_CYPHER: Final[str] = f"""
@@ -649,6 +925,34 @@ _ensure_workspace_predicate(_UPSERT_ENTITY_BITEMPORAL_CYPHER, "_UPSERT_ENTITY_BI
 _ensure_workspace_predicate(
     _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE, "_UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE"
 )
+# ADR-0009 §Consequences-security #1: every retention Cypher template
+# iterates ONE workspace at a time and filters every MATCH on
+# `workspace_id`.  Cross-tenant batches are forbidden — drop the
+# predicate and the module fails to import.
+_ensure_workspace_predicate(
+    _COUNT_HOT_TO_WARM_ENTITY_STATE_ELIGIBLE,
+    "_COUNT_HOT_TO_WARM_ENTITY_STATE_ELIGIBLE",
+)
+_ensure_workspace_predicate(_COUNT_HOT_TO_WARM_EDGE_ELIGIBLE, "_COUNT_HOT_TO_WARM_EDGE_ELIGIBLE")
+_ensure_workspace_predicate(_SAMPLE_HOT_TO_WARM_ENTITY_STATE, "_SAMPLE_HOT_TO_WARM_ENTITY_STATE")
+_ensure_workspace_predicate(_OLDEST_ELIGIBLE_HOT_RECORDED_AT, "_OLDEST_ELIGIBLE_HOT_RECORDED_AT")
+_ensure_workspace_predicate(_MARK_HOT_TO_WARM_ENTITY_STATE, "_MARK_HOT_TO_WARM_ENTITY_STATE")
+_ensure_workspace_predicate(_MARK_HOT_TO_WARM_EDGE, "_MARK_HOT_TO_WARM_EDGE")
+_ensure_workspace_predicate(_MOVE_HOT_TO_WARM_ENTITY_STATE, "_MOVE_HOT_TO_WARM_ENTITY_STATE")
+_ensure_workspace_predicate(_MOVE_HOT_TO_WARM_EDGE, "_MOVE_HOT_TO_WARM_EDGE")
+_ensure_workspace_predicate(_COUNT_WARM_TO_ARCHIVE_ELIGIBLE, "_COUNT_WARM_TO_ARCHIVE_ELIGIBLE")
+_ensure_workspace_predicate(_LIST_WARM_TO_ARCHIVE_DATES, "_LIST_WARM_TO_ARCHIVE_DATES")
+_ensure_workspace_predicate(_FETCH_WARM_ENTITY_SNAPSHOT_ROWS, "_FETCH_WARM_ENTITY_SNAPSHOT_ROWS")
+_ensure_workspace_predicate(
+    _FETCH_WARM_RELATIONSHIP_SNAPSHOT_ROWS,
+    "_FETCH_WARM_RELATIONSHIP_SNAPSHOT_ROWS",
+)
+_ensure_workspace_predicate(_DELETE_WARM_ENTITY_SNAPSHOT, "_DELETE_WARM_ENTITY_SNAPSHOT")
+_ensure_workspace_predicate(
+    _DELETE_WARM_RELATIONSHIP_SNAPSHOT, "_DELETE_WARM_RELATIONSHIP_SNAPSHOT"
+)
+_ensure_workspace_predicate(_COUNT_HOT_ENTITY_STATES, "_COUNT_HOT_ENTITY_STATES")
+_ensure_workspace_predicate(_COUNT_WARM_ENTITY_SNAPSHOTS, "_COUNT_WARM_ENTITY_SNAPSHOTS")
 
 
 # ---------------------------------------------------------------------------
@@ -732,6 +1036,45 @@ def _coerce_metadata(value: Any) -> dict[str, Any]:
         # Re-type explicitly — mypy --strict refuses ``dict`` without params.
         return {str(k): v for k, v in value.items()}
     raise TypeError(f"metadata must be dict, got {type(value).__name__}")
+
+
+def _coerce_to_datetime(value: Any) -> datetime:
+    """Coerce a Neo4j temporal-like value to a Python aware ``datetime``.
+
+    Neo4j returns its own ``DateTime`` type from the driver, which
+    duck-types ``to_native()`` returning ``datetime.datetime``.  ISO-8601
+    strings (the form we round-trip via ``isoformat()``) are also
+    accepted.  Naive datetimes are stamped UTC so all comparisons in
+    the worker happen in one timezone.
+    """
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=UTC)
+    if hasattr(value, "to_native"):
+        native = value.to_native()
+        if isinstance(native, datetime):
+            return native if native.tzinfo else native.replace(tzinfo=UTC)
+    if isinstance(value, str):
+        # ISO-8601 string; isoformat round-trip from the writer.
+        parsed = datetime.fromisoformat(value)
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    raise TypeError(f"cannot coerce to datetime: {type(value).__name__}")
+
+
+def _coerce_to_date(value: Any) -> date:
+    """Coerce a Neo4j-like temporal value to ``datetime.date``."""
+    if isinstance(value, date) and not isinstance(value, datetime):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    if hasattr(value, "to_native"):
+        native = value.to_native()
+        if isinstance(native, datetime):
+            return native.date()
+        if isinstance(native, date):
+            return native
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    raise TypeError(f"cannot coerce to date: {type(value).__name__}")
 
 
 # ---------------------------------------------------------------------------
@@ -1160,6 +1503,282 @@ class Neo4jGraphStore:
             if modified == 0:
                 return phase_total
             phase_total += modified
+
+    # ------------------------------------------------------------------
+    # Retention worker support (ADR-0009 §3, issue #135)
+    # ------------------------------------------------------------------
+    #
+    # Every method below pins ``workspace_id`` at the parameter level —
+    # the worker iterates per-workspace and the adapter never sees a
+    # cross-workspace batch.  This is the structural ACL invariant from
+    # ADR-0009 §Consequences-security #1.
+
+    async def count_hot_to_warm_eligible(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        hot_cutoff: datetime,
+    ) -> tuple[int, int]:
+        """Return (entity_state_count, edge_count) eligible for hot->warm.
+
+        ADR-0009 §2 per-version semantics: only :EntityState rows with
+        ``valid_to IS NOT NULL`` are eligible; the still-current version
+        of every identity is preserved in hot regardless of age.  Edges
+        are eligible when end-dated AND old; pure age does not evict
+        live edges (ADR-0009 §2 — edge end-dating does NOT trigger
+        eviction by itself, only end-dated-and-old does).
+        """
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "hot_cutoff": hot_cutoff.isoformat(),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            es_rows = await session.execute_read(
+                _run_read_stmt, _COUNT_HOT_TO_WARM_ENTITY_STATE_ELIGIBLE, params
+            )
+            edge_rows = await session.execute_read(
+                _run_read_stmt, _COUNT_HOT_TO_WARM_EDGE_ELIGIBLE, params
+            )
+        es_count = int(es_rows[0].get("eligible", 0)) if es_rows else 0
+        edge_count = int(edge_rows[0].get("eligible", 0)) if edge_rows else 0
+        return es_count, edge_count
+
+    async def sample_hot_to_warm_eligible(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        hot_cutoff: datetime,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return up to ``limit`` eligible :EntityState rows (id-only payload)."""
+        if limit <= 0:
+            return []
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "hot_cutoff": hot_cutoff.isoformat(),
+            "limit": int(limit),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(
+                _run_read_stmt, _SAMPLE_HOT_TO_WARM_ENTITY_STATE, params
+            )
+        # Coerce Neo4j temporal types to ISO strings for JSON serialisation.
+        sampled: list[dict[str, Any]] = []
+        for row in rows:
+            sampled.append(
+                {
+                    "id": str(row.get("id")) if row.get("id") is not None else None,
+                    "valid_from": (
+                        str(row.get("valid_from")) if row.get("valid_from") is not None else None
+                    ),
+                    "recorded_at": (
+                        str(row.get("recorded_at")) if row.get("recorded_at") is not None else None
+                    ),
+                }
+            )
+        return sampled
+
+    async def oldest_hot_to_warm_recorded_at(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        hot_cutoff: datetime,
+    ) -> datetime | None:
+        """Return the oldest eligible ``recorded_at`` or ``None``.
+
+        Used by the worker to compute the lag SLO gauge per ADR-0009 §8.
+        """
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "hot_cutoff": hot_cutoff.isoformat(),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(
+                _run_read_stmt, _OLDEST_ELIGIBLE_HOT_RECORDED_AT, params
+            )
+        if not rows:
+            return None
+        oldest = rows[0].get("oldest")
+        if oldest is None:
+            return None
+        return _coerce_to_datetime(oldest)
+
+    async def mark_hot_to_warm(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        hot_cutoff: datetime,
+        batch_size: int,
+    ) -> tuple[int, int]:
+        """Tag eligible :EntityState rows + edges with ``tier_pending='warm'``.
+
+        Returns (entity_states_marked, edges_marked).  Loops batches
+        until a pass marks zero rows — bounded by the workspace's
+        eligible cohort.  Each batch is its own transaction so a crash
+        leaves a re-runnable state.
+        """
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "hot_cutoff": hot_cutoff.isoformat(),
+            "batch_size": int(batch_size),
+        }
+        es_total = await self._loop_count_query(_MARK_HOT_TO_WARM_ENTITY_STATE, params, "marked")
+        edge_total = await self._loop_count_query(_MARK_HOT_TO_WARM_EDGE, params, "marked")
+        return es_total, edge_total
+
+    async def move_hot_to_warm(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        batch_size: int,
+    ) -> tuple[int, int]:
+        """Project marked rows to :EntitySnapshot:Daily / :RelationshipSnapshot:Daily.
+
+        Returns (entity_states_moved, edges_moved).  The MERGE on
+        (workspace_id, id, snapshot_date) makes intra-day collapsing
+        idempotent — multiple eligible versions on the same UTC day fold
+        into one snapshot row, with the latest ``valid_from`` winning
+        (ADR-0009 §1: as-of-end-of-day projection).  Each batch deletes
+        the source :EntityState in the same transaction so partial
+        progress never leaves a row visible in two tiers.
+        """
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "batch_size": int(batch_size),
+        }
+        es_total = await self._loop_count_query(_MOVE_HOT_TO_WARM_ENTITY_STATE, params, "moved")
+        edge_total = await self._loop_count_query(_MOVE_HOT_TO_WARM_EDGE, params, "moved")
+        return es_total, edge_total
+
+    async def _loop_count_query(
+        self,
+        cypher: str,
+        params: dict[str, Any],
+        return_key: str,
+    ) -> int:
+        """Run ``cypher`` repeatedly in fresh tx until a pass returns 0."""
+        total = 0
+        while True:
+            async with self._driver.session(database=self._config.database) as session:
+                rows = await session.execute_write(_run_write_returning, cypher, params)
+            count = int(rows[0].get(return_key, 0)) if rows else 0
+            if count == 0:
+                return total
+            total += count
+
+    async def count_warm_to_archive_eligible(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        warm_cutoff_date: date,
+    ) -> int:
+        """Count :EntitySnapshot:Daily rows older than ``warm_cutoff_date``."""
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "warm_cutoff_date": warm_cutoff_date.isoformat(),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(
+                _run_read_stmt, _COUNT_WARM_TO_ARCHIVE_ELIGIBLE, params
+            )
+        return int(rows[0].get("eligible", 0)) if rows else 0
+
+    async def list_warm_to_archive_dates(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        warm_cutoff_date: date,
+        limit: int,
+    ) -> list[date]:
+        """Distinct snapshot dates eligible for warm->archive, ASC."""
+        if limit <= 0:
+            return []
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "warm_cutoff_date": warm_cutoff_date.isoformat(),
+            "limit": int(limit),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, _LIST_WARM_TO_ARCHIVE_DATES, params)
+        out: list[date] = []
+        for row in rows:
+            raw = row.get("snapshot_date")
+            if raw is None:
+                continue
+            out.append(_coerce_to_date(raw))
+        return out
+
+    async def fetch_warm_snapshot_rows(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        snapshot_date: date,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Return (entity_rows, edge_rows) for one (workspace_id, date) snapshot.
+
+        Used by the archive writer to build the parquet payload.  Both
+        lists carry primitive types only (str, dict[str, Any]) so the
+        parquet serialiser does not need to convert Neo4j temporal types.
+        """
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "snapshot_date": snapshot_date.isoformat(),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            entity_rows = await session.execute_read(
+                _run_read_stmt, _FETCH_WARM_ENTITY_SNAPSHOT_ROWS, params
+            )
+            edge_rows = await session.execute_read(
+                _run_read_stmt, _FETCH_WARM_RELATIONSHIP_SNAPSHOT_ROWS, params
+            )
+        return list(entity_rows), list(edge_rows)
+
+    async def delete_warm_snapshot(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        snapshot_date: date,
+    ) -> tuple[int, int]:
+        """Hard-delete warm rows for (workspace_id, snapshot_date).
+
+        Run AFTER the parquet write to S3 succeeded.  Returns
+        (entity_rows_deleted, edge_rows_deleted).
+        """
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "snapshot_date": snapshot_date.isoformat(),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            es_rows = await session.execute_write(
+                _run_write_returning, _DELETE_WARM_ENTITY_SNAPSHOT, params
+            )
+            edge_rows = await session.execute_write(
+                _run_write_returning, _DELETE_WARM_RELATIONSHIP_SNAPSHOT, params
+            )
+        es_deleted = int(es_rows[0].get("deleted", 0)) if es_rows else 0
+        edge_deleted = int(edge_rows[0].get("deleted", 0)) if edge_rows else 0
+        return es_deleted, edge_deleted
+
+    async def count_records_by_tier(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Return {'hot': int, 'warm': int} record counts for the workspace.
+
+        Used to populate the ``omniscience_graph_records_total`` gauge
+        per ADR-0009 §8.
+        """
+        params: dict[str, Any] = {_WORKSPACE_PARAM: str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            hot_rows = await session.execute_read(_run_read_stmt, _COUNT_HOT_ENTITY_STATES, params)
+            warm_rows = await session.execute_read(
+                _run_read_stmt, _COUNT_WARM_ENTITY_SNAPSHOTS, params
+            )
+        return {
+            "hot": int(hot_rows[0].get("total", 0)) if hot_rows else 0,
+            "warm": int(warm_rows[0].get("total", 0)) if warm_rows else 0,
+        }
 
     # ------------------------------------------------------------------
     # Read API

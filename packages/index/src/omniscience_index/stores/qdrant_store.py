@@ -27,7 +27,7 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from omniscience_core.storage.vector import (
@@ -58,17 +58,23 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_ORD,
     PAYLOAD_PARSER_VERSION,
     PAYLOAD_RECORDED_AT,
+    PAYLOAD_SNAPSHOT_DATE,
     PAYLOAD_SOURCE_ID,
     PAYLOAD_SYMBOL,
     PAYLOAD_TEXT,
+    PAYLOAD_TIER,
     PAYLOAD_TITLE,
     PAYLOAD_TOMBSTONED_AT,
     PAYLOAD_URI,
     PAYLOAD_WORKSPACE_ID,
+    TIER_WARM,
 )
 from omniscience_index.stores.qdrant_filters import (
     QdrantFilterBuilder,
+    build_retention_eligible_filter,
     build_tombstone_sweep_filter,
+    build_warm_archive_filter,
+    build_warm_tier_filter,
 )
 
 if TYPE_CHECKING:  # Lazy type-only import to avoid a core <-> retrieval cycle.
@@ -257,6 +263,8 @@ class QdrantVectorStore:
         """Map payload field name to its Qdrant index schema type."""
         if field_name in (PAYLOAD_RECORDED_AT, PAYLOAD_TOMBSTONED_AT):
             return qm.PayloadSchemaType.DATETIME
+        # `snapshot_date` is stored as ISO calendar-day string; KEYWORD
+        # gives O(1) point-lookup which is the warm-tier read pattern.
         return qm.PayloadSchemaType.KEYWORD
 
     # ------------------------------------------------------------------
@@ -612,6 +620,186 @@ class QdrantVectorStore:
             exact=True,
         )
         return int(result.count)
+
+    # ------------------------------------------------------------------
+    # Retention worker support (ADR-0009 §5, issue #135)
+    # ------------------------------------------------------------------
+    #
+    # Every method below is workspace-scoped via the typed filter-builder
+    # helpers from ``qdrant_filters.py``.  Raw ``qm.Filter`` construction
+    # is forbidden here per the lint rule (ADR-0006 §ACL carry-forward).
+
+    async def count_retention_eligible(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        cutoff: datetime,
+    ) -> int:
+        """Count chunks with ``recorded_at < cutoff`` in this workspace.
+
+        Used by the dry-run reporter and the live worker to size the
+        Qdrant-side eviction batch per ADR-0009 §5.
+        """
+        flt = build_retention_eligible_filter(
+            workspace_id=workspace_id,
+            cutoff_iso=cutoff.isoformat(),
+        )
+        result = await self._qc.count(
+            collection_name=self._collection_name,
+            count_filter=flt,
+            exact=True,
+        )
+        return int(result.count)
+
+    async def mark_retention_warm(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        cutoff: datetime,
+    ) -> int:
+        """Tag eligible chunks with ``tier="warm"`` + ``snapshot_date``.
+
+        ADR-0009 §5: warm chunks carry a ``tier="warm"`` payload field
+        and a ``snapshot_date`` mirrored from the chunk's ``recorded_at``
+        UTC calendar day.  This is the Qdrant analogue of the Neo4j
+        :EntitySnapshot:Daily projection.
+
+        The set-payload call is workspace-scoped via the filter-builder.
+        Returns the count of points whose payload was updated; this is
+        an approximation (Qdrant returns an operation acknowledgement
+        rather than an exact mutation count) and we re-count via the
+        retention-eligible filter on the same scope, less the still-hot
+        cohort.
+        """
+        flt = build_retention_eligible_filter(
+            workspace_id=workspace_id,
+            cutoff_iso=cutoff.isoformat(),
+        )
+        # Stamp a per-point snapshot_date keyed off recorded_at.  Qdrant
+        # does not support computed payloads on set_payload, so we read
+        # the eligible records once, group by UTC day, and write each
+        # day's payload separately.
+        records = await self._scroll_payload_only(
+            flt=flt,
+            include_fields=[PAYLOAD_RECORDED_AT, PAYLOAD_TIER],
+        )
+        marked = 0
+        # Group eligible point ids by snapshot day.
+        by_day: dict[str, list[str]] = {}
+        for rec in records:
+            payload = rec.payload or {}
+            # Skip already-marked warm points (idempotent re-run).
+            if payload.get(PAYLOAD_TIER) == TIER_WARM:
+                continue
+            recorded_at = payload.get(PAYLOAD_RECORDED_AT)
+            if not isinstance(recorded_at, str):
+                continue
+            try:
+                day = datetime.fromisoformat(recorded_at).date().isoformat()
+            except ValueError:
+                continue
+            by_day.setdefault(day, []).append(str(rec.id))
+        for day, point_ids in by_day.items():
+            if not point_ids:
+                continue
+            await self._qc.set_payload(
+                collection_name=self._collection_name,
+                payload={
+                    PAYLOAD_TIER: TIER_WARM,
+                    PAYLOAD_SNAPSHOT_DATE: day,
+                },
+                points=qm.PointIdsList(points=cast("list[int | str | uuid.UUID]", point_ids)),
+                wait=True,
+            )
+            marked += len(point_ids)
+        return marked
+
+    async def delete_retention_archive(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        snapshot_date: date,
+    ) -> int:
+        """Hard-delete warm chunks for one (workspace_id, snapshot_date).
+
+        ADR-0009 §5: re-embedding from archive is not supported in v1,
+        so chunks past the warm-to-archive boundary are evicted from
+        Qdrant entirely.  Caller is the retention worker, AFTER the
+        Neo4j archive parquet write and warm row delete have succeeded.
+        """
+        flt = build_warm_archive_filter(
+            workspace_id=workspace_id,
+            snapshot_date_iso=snapshot_date.isoformat(),
+        )
+        before = int(
+            (
+                await self._qc.count(
+                    collection_name=self._collection_name,
+                    count_filter=flt,
+                    exact=True,
+                )
+            ).count
+        )
+        if before == 0:
+            return 0
+        await self._qc.delete(
+            collection_name=self._collection_name,
+            points_selector=qm.FilterSelector(filter=flt),
+            wait=True,
+        )
+        return before
+
+    async def count_chunks_by_tier(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[str, int]:
+        """Return {'hot': int, 'warm': int} chunk counts for the workspace.
+
+        Used to populate ``omniscience_graph_records_total`` per
+        ADR-0009 §8.  Hot is approximated as "tier field is absent" —
+        legacy chunks pre-#135 have no tier field and are hot by
+        construction; #131-era chunks may stamp ``tier=hot`` explicitly.
+        """
+        all_flt = QdrantFilterBuilder(workspace_id=workspace_id).exclude_tombstoned().build()
+        # Workspace-scoped warm-tier filter; the helper lives in the
+        # sanctioned filter-builder module so the lint guard
+        # (test_qdrant_filter_builder_lint.py) stays green.
+        tier_only_warm = build_warm_tier_filter(workspace_id=workspace_id)
+        total = await self._qc.count(
+            collection_name=self._collection_name, count_filter=all_flt, exact=True
+        )
+        warm = await self._qc.count(
+            collection_name=self._collection_name, count_filter=tier_only_warm, exact=True
+        )
+        warm_count = int(warm.count)
+        total_count = int(total.count)
+        return {"hot": max(total_count - warm_count, 0), "warm": warm_count}
+
+    async def _scroll_payload_only(
+        self,
+        *,
+        flt: qm.Filter,
+        include_fields: list[str],
+    ) -> list[qm.Record]:
+        """Page through ``flt``, returning only ``include_fields`` payload."""
+        out: list[qm.Record] = []
+        offset: qm.ExtendedPointId | None = None
+        page_size = 256
+        while True:
+            records, next_offset = await self._qc.scroll(
+                collection_name=self._collection_name,
+                scroll_filter=flt,
+                limit=page_size,
+                with_payload=qm.PayloadSelectorInclude(include=include_fields),
+                with_vectors=False,
+                offset=offset,
+            )
+            out.extend(records)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return out
 
     async def count_chunks_by_source(
         self,

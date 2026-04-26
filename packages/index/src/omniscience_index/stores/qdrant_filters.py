@@ -35,7 +35,10 @@ from qdrant_client import models as qm
 from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_DOCUMENT_ID,
     PAYLOAD_EXTERNAL_ID,
+    PAYLOAD_RECORDED_AT,
+    PAYLOAD_SNAPSHOT_DATE,
     PAYLOAD_SOURCE_ID,
+    PAYLOAD_TIER,
     PAYLOAD_TOMBSTONED_AT,
     PAYLOAD_WORKSPACE_ID,
 )
@@ -125,6 +128,111 @@ class QdrantFilterBuilder:
         return qm.Filter(must=must)
 
 
+def build_retention_eligible_filter(
+    *,
+    workspace_id: uuid.UUID,
+    cutoff_iso: str,
+) -> qm.Filter:
+    """Build the per-workspace filter for hot-to-warm chunk eviction.
+
+    ADR-0009 §5: chunks with ``recorded_at`` past the hot/warm boundary
+    are evicted from Qdrant in the same retention run that handles the
+    graph.  The filter is workspace-scoped — cross-tenant batches are
+    forbidden by the same ACL invariant ADR-0006 §ACL carry-forward
+    enforces on every other read path.
+
+    The retention worker pulls eligible point ids using this filter,
+    sets ``tier=warm`` + ``snapshot_date`` payloads on them, and then
+    moves to the warm-to-archive band where the points are deleted
+    entirely (re-embedding from archive is not supported in v1, see
+    ADR-0009 §5).
+    """
+    must: list[
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ] = [
+        qm.FieldCondition(
+            key=PAYLOAD_WORKSPACE_ID,
+            match=qm.MatchValue(value=str(workspace_id)),
+        ),
+        qm.FieldCondition(
+            key=PAYLOAD_RECORDED_AT,
+            range=qm.DatetimeRange(lt=cutoff_iso),  # type: ignore[arg-type]
+        ),
+    ]
+    return qm.Filter(must=must)
+
+
+def build_warm_tier_filter(*, workspace_id: uuid.UUID) -> qm.Filter:
+    """Build a workspace-scoped filter for ALL warm-tier chunks.
+
+    ADR-0009 §5: payload-indexed ``tier`` field marks warm chunks.
+    Used by the metrics/stats path to roll up warm-tier counts without
+    pinning a specific ``snapshot_date``.  Workspace-scoped — the
+    cross-tenant invariant from ADR-0006 §ACL carry-forward applies.
+    """
+    must: list[
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ] = [
+        qm.FieldCondition(
+            key=PAYLOAD_WORKSPACE_ID,
+            match=qm.MatchValue(value=str(workspace_id)),
+        ),
+        qm.FieldCondition(
+            key=PAYLOAD_TIER,
+            match=qm.MatchValue(value="warm"),
+        ),
+    ]
+    return qm.Filter(must=must)
+
+
+def build_warm_archive_filter(
+    *,
+    workspace_id: uuid.UUID,
+    snapshot_date_iso: str,
+) -> qm.Filter:
+    """Build the per-workspace filter for warm-to-archive chunk deletion.
+
+    ADR-0009 §5 archive shape: chunks past the warm-to-archive boundary
+    are evicted from Qdrant entirely; the filter selects warm-tier
+    chunks for the specific snapshot date being archived.
+    """
+    must: list[
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ] = [
+        qm.FieldCondition(
+            key=PAYLOAD_WORKSPACE_ID,
+            match=qm.MatchValue(value=str(workspace_id)),
+        ),
+        qm.FieldCondition(
+            key=PAYLOAD_TIER,
+            match=qm.MatchValue(value="warm"),
+        ),
+        qm.FieldCondition(
+            key=PAYLOAD_SNAPSHOT_DATE,
+            match=qm.MatchValue(value=snapshot_date_iso),
+        ),
+    ]
+    return qm.Filter(must=must)
+
+
 def build_tombstone_sweep_filter(*, cutoff_iso: str) -> qm.Filter:
     """Admin-only sweep filter for global tombstone purge.
 
@@ -146,4 +254,10 @@ def build_tombstone_sweep_filter(*, cutoff_iso: str) -> qm.Filter:
     )
 
 
-__all__ = ["QdrantFilterBuilder", "build_tombstone_sweep_filter"]
+__all__ = [
+    "QdrantFilterBuilder",
+    "build_retention_eligible_filter",
+    "build_tombstone_sweep_filter",
+    "build_warm_archive_filter",
+    "build_warm_tier_filter",
+]

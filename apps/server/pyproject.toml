@@ -12,6 +12,11 @@ dependencies = [
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
     "mcp>=1.0.0",
+    # Retention worker (issue #135) — archive tier writes Parquet to S3
+    # per ADR-0009 §1 archive / §7 storage layout.  pyarrow handles
+    # columnar serialisation; boto3 handles the S3 PUT path.
+    "pyarrow>=17.0.0",
+    "boto3>=1.42.91",
 ]
 
 [tool.uv.sources]
