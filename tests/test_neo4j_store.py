@@ -545,3 +545,89 @@ async def test_find_related_refuses_missing_workspace_id() -> None:
 
     with pytest.raises(TypeError):
         await store.find_related(entity_name="svc.auth")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# 10. Bitemporal backfill — workspace propagation + chunk-loop semantics (#130)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backfill_passes_workspace_id_into_every_phase() -> None:
+    """ADR-0008 §Consequences-security #1 — every backfill phase is workspace-scoped."""
+    store, driver_mock = _make_store_with_mock_driver()
+    # First call returns a non-zero count (chunk processed something);
+    # second call returns zero (loop exits).  Three phases x 2 chunks
+    # = 6 calls total.
+    driver_mock._session_mock.execute_write = AsyncMock(
+        side_effect=[
+            [{"modified": 3}],
+            [{"modified": 0}],
+            [{"modified": 1}],
+            [{"modified": 0}],
+            [{"modified": 2}],
+            [{"modified": 0}],
+        ]
+    )
+
+    total = await store.backfill_bitemporal(workspace_id=_WORKSPACE_A)
+
+    assert total == 6  # 3 + 1 + 2
+    # Every call must have carried the workspace_id parameter.
+    for call in driver_mock._session_mock.execute_write.await_args_list:
+        args, _ = call
+        params = args[2]
+        assert params["workspace_id"] == str(_WORKSPACE_A)
+        assert params["batch_size"] == neo4j_store.BACKFILL_DEFAULT_BATCH_SIZE
+
+
+@pytest.mark.asyncio
+async def test_backfill_returns_zero_on_already_migrated_workspace() -> None:
+    """Idempotence — a fully-migrated workspace yields zero modifications."""
+    store, driver_mock = _make_store_with_mock_driver()
+    driver_mock._session_mock.execute_write = AsyncMock(return_value=[{"modified": 0}])
+
+    total = await store.backfill_bitemporal(workspace_id=_WORKSPACE_A)
+
+    assert total == 0
+    # Three phases, each exits on the first zero-row chunk — three calls.
+    assert driver_mock._session_mock.execute_write.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_backfill_rejects_non_positive_batch_size() -> None:
+    """Bad input must be a clear ValueError, never an infinite loop."""
+    store, _driver_mock = _make_store_with_mock_driver()
+
+    with pytest.raises(ValueError, match="backfill_batch_size_must_be_positive"):
+        await store.backfill_bitemporal(workspace_id=_WORKSPACE_A, batch_size=0)
+    with pytest.raises(ValueError, match="backfill_batch_size_must_be_positive"):
+        await store.backfill_bitemporal(workspace_id=_WORKSPACE_A, batch_size=-5)
+
+
+@pytest.mark.asyncio
+async def test_backfill_uses_custom_batch_size_when_supplied() -> None:
+    """Caller-supplied batch_size must reach the Cypher params."""
+    store, driver_mock = _make_store_with_mock_driver()
+    driver_mock._session_mock.execute_write = AsyncMock(return_value=[{"modified": 0}])
+
+    await store.backfill_bitemporal(workspace_id=_WORKSPACE_A, batch_size=250)
+
+    for call in driver_mock._session_mock.execute_write.await_args_list:
+        args, _ = call
+        assert args[2]["batch_size"] == 250
+
+
+def test_backfill_templates_are_workspace_scoped() -> None:
+    """Mirror of the import-time guard, asserted at the test layer too."""
+    for name, cypher in (
+        ("_BACKFILL_ENTITY_PROPS_CYPHER", neo4j_store._BACKFILL_ENTITY_PROPS_CYPHER),
+        (
+            "_BACKFILL_ENTITY_STATE_NODES_CYPHER",
+            neo4j_store._BACKFILL_ENTITY_STATE_NODES_CYPHER,
+        ),
+        ("_BACKFILL_EDGE_PROPS_CYPHER", neo4j_store._BACKFILL_EDGE_PROPS_CYPHER),
+    ):
+        assert "$workspace_id" in cypher, (
+            f"Backfill template {name} dropped the workspace_id parameter — ACL leak."
+        )
