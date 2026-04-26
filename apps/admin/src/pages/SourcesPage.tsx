@@ -72,7 +72,7 @@ function AddSourceForm({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+        className="px-4 py-2 text-sm bg-accent text-accent-fg rounded-lg hover:bg-accent-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
       >
         Add source
       </button>
@@ -80,18 +80,18 @@ function AddSourceForm({
   }
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
-      <h2 className="text-base font-medium text-gray-900 mb-4">Add source</h2>
+    <div className="bg-elevation-1 rounded-xl border border-border shadow-sm p-6 mb-6">
+      <h2 className="text-base font-medium text-text mb-4">Add source</h2>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="grid grid-cols-2 gap-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-text-secondary mb-1">
               Type
             </label>
             <select
               value={type}
               onChange={(e) => setType(e.target.value as SourceType)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full border border-border bg-elevation-2 text-text rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent"
             >
               {SOURCE_TYPES.map((t) => (
                 <option key={t} value={t}>
@@ -101,7 +101,7 @@ function AddSourceForm({
             </select>
           </div>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">
+            <label className="block text-sm font-medium text-text-secondary mb-1">
               Name
             </label>
             <input
@@ -110,24 +110,24 @@ function AddSourceForm({
               value={name}
               onChange={(e) => setName(e.target.value)}
               placeholder="my-repo"
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="w-full border border-border bg-elevation-2 text-text placeholder:text-text-muted rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent"
             />
           </div>
         </div>
 
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label className="block text-sm font-medium text-text-secondary mb-1">
             Config (JSON)
           </label>
           <textarea
             value={configRaw}
             onChange={(e) => setConfigRaw(e.target.value)}
             rows={5}
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full border border-border bg-elevation-2 text-text placeholder:text-text-muted rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent"
             placeholder='{"repo_url": "https://github.com/..."}'
           />
           {configError && (
-            <p className="text-xs text-red-600 mt-1">{configError}</p>
+            <p className="text-xs text-danger-fg mt-1">{configError}</p>
           )}
         </div>
 
@@ -135,14 +135,14 @@ function AddSourceForm({
           <button
             type="submit"
             disabled={submitting}
-            className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            className="px-4 py-2 text-sm bg-accent text-accent-fg rounded-lg hover:bg-accent-hover disabled:opacity-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             {submitting ? "Creating..." : "Create"}
           </button>
           <button
             type="button"
             onClick={() => setOpen(false)}
-            className="px-4 py-2 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+            className="px-4 py-2 text-sm border border-border rounded-lg text-text-secondary hover:bg-elevation-2 hover:text-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             Cancel
           </button>
@@ -211,56 +211,56 @@ export function SourcesPage({ addToast }: Props) {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900">Sources</h1>
+        <h1 className="text-2xl font-semibold text-text">Sources</h1>
         <AddSourceForm onCreated={handleCreated} addToast={addToast} />
       </div>
 
       {loading ? (
-        <p className="text-sm text-gray-500 py-12 text-center">Loading...</p>
+        <p className="text-sm text-text-muted py-12 text-center">Loading...</p>
       ) : sources.length === 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-12 text-center text-sm text-gray-400">
+        <div className="bg-elevation-1 rounded-xl border border-border shadow-sm px-6 py-12 text-center text-sm text-text-muted">
           No sources configured yet.
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="bg-elevation-1 rounded-xl border border-border shadow-sm overflow-hidden">
           <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-elevation-2 border-b border-border">
               <tr>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Name
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Type
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Status
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Last sync
                 </th>
-                <th className="px-4 py-3 text-right font-medium text-gray-600">
+                <th className="px-4 py-3 text-right font-medium text-text-secondary">
                   Actions
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-border">
               {sources.map((src) => (
-                <tr key={src.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-900">
+                <tr key={src.id} className="hover:bg-elevation-2">
+                  <td className="px-4 py-3 font-medium text-text">
                     {src.name}
                     {src.last_error && (
-                      <p className="text-xs text-red-500 mt-0.5 truncate max-w-xs">
+                      <p className="text-xs text-danger-fg mt-0.5 truncate max-w-xs">
                         {src.last_error}
                       </p>
                     )}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  <td className="px-4 py-3 font-mono text-xs text-text-secondary">
                     {src.type}
                   </td>
                   <td className="px-4 py-3">
                     <StatusBadge value={src.status} />
                   </td>
-                  <td className="px-4 py-3 text-gray-500 tabular-nums text-xs">
+                  <td className="px-4 py-3 text-text-muted tabular-nums text-xs">
                     {src.last_sync_at
                       ? new Date(src.last_sync_at).toLocaleString()
                       : "Never"}
@@ -270,13 +270,13 @@ export function SourcesPage({ addToast }: Props) {
                       <button
                         onClick={() => handleSync(src)}
                         disabled={syncingIds.has(src.id)}
-                        className="px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-100 disabled:opacity-50 transition-colors"
+                        className="px-3 py-1.5 text-xs border border-border rounded-lg text-text-secondary hover:bg-elevation-2 hover:text-text disabled:opacity-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                       >
                         {syncingIds.has(src.id) ? "Syncing..." : "Sync"}
                       </button>
                       <button
                         onClick={() => setDeleteTarget(src)}
-                        className="px-3 py-1.5 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                        className="px-3 py-1.5 text-xs border border-danger-border text-danger-fg rounded-lg hover:bg-danger-bg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                       >
                         Delete
                       </button>

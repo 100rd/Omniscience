@@ -1,3 +1,140 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/*
+ * Theme tokens — see tailwind.config.js for documentation of each name.
+ *
+ * Two themes are defined here:
+ *   :root        — light theme (the default values, kept for the future
+ *                  toggle follow-up).
+ *   :root.dark   — dark theme overrides (active by default in Issue #110).
+ *
+ * The active theme is set on <html> in main.tsx before paint to avoid a
+ * light-flash on first render. There is no localStorage toggle in this PR.
+ *
+ * Hex values use the Tailwind v3 default palette (zinc / indigo / emerald /
+ * amber / rose / sky / violet) for predictable lineage. No raw hex values
+ * appear in component files — components reference these tokens via the
+ * Tailwind names declared in tailwind.config.js.
+ */
+@layer base {
+  :root {
+    /* Surfaces */
+    --surface: #fafafa;             /* zinc-50 */
+    --elevation-1: #ffffff;
+    --elevation-2: #f4f4f5;          /* zinc-100 */
+
+    /* Borders */
+    --border: #e4e4e7;               /* zinc-200 */
+    --border-strong: #a1a1aa;        /* zinc-400 */
+
+    /* Text */
+    --text: #18181b;                 /* zinc-900 — ~16.5:1 on surface  */
+    --text-secondary: #52525b;       /* zinc-600 — ~7.4:1 on surface   */
+    --text-muted: #71717a;           /* zinc-500 — ~4.6:1 on surface   */
+    --text-inverse: #ffffff;
+
+    /* Accent (indigo) */
+    --accent: #4f46e5;               /* indigo-600 */
+    --accent-hover: #4338ca;         /* indigo-700 */
+    --accent-bg: #eef2ff;            /* indigo-50  */
+    --accent-fg: #ffffff;
+
+    /* Status — success (emerald) */
+    --success-fg: #047857;           /* emerald-700 — 5.7:1 on success-bg */
+    --success-bg: #d1fae5;           /* emerald-100 */
+
+    /* Status — warning (amber) */
+    --warning-fg: #b45309;           /* amber-700 — 5.0:1 on warning-bg */
+    --warning-bg: #fef3c7;           /* amber-100 */
+    --warning-border: #fcd34d;       /* amber-300 — soft warning outline */
+
+    /* Status — danger (rose) */
+    --danger-fg: #b91c1c;            /* rose-700 */
+    --danger-bg: #fee2e2;            /* rose-100 */
+    --danger-border: #fecaca;        /* rose-200 — soft danger outline */
+    --danger-strong: #dc2626;        /* rose-600 — destructive button bg */
+    --danger-strong-hover: #b91c1c;  /* rose-700 */
+
+    /* Status — info (sky) */
+    --info-fg: #0369a1;              /* sky-700 */
+    --info-bg: #e0f2fe;              /* sky-100 */
+
+    /* Overlay (dialog backdrop) */
+    --overlay: rgb(0 0 0 / 0.40);
+
+    /* Chart palette */
+    --chart-1: #4f46e5;              /* indigo-600 */
+    --chart-2: #059669;              /* emerald-600 */
+    --chart-3: #d97706;              /* amber-600  */
+    --chart-4: #e11d48;              /* rose-600   */
+    --chart-5: #0284c7;              /* sky-600    */
+    --chart-6: #7c3aed;              /* violet-600 */
+  }
+
+  :root.dark {
+    /* Surfaces */
+    --surface: #09090b;              /* zinc-950 — deep neutral, OLED-friendly */
+    --elevation-1: #18181b;          /* zinc-900 — ~6.4:1 vs surface */
+    --elevation-2: #27272a;          /* zinc-800 */
+
+    /* Borders */
+    --border: #3f3f46;               /* zinc-700 */
+    --border-strong: #52525b;        /* zinc-600 */
+
+    /* Text */
+    --text: #fafafa;                 /* zinc-50  — ~17.0:1 on surface-dark */
+    --text-secondary: #d4d4d8;       /* zinc-300 — ~11.0:1 on surface-dark */
+    --text-muted: #a1a1aa;           /* zinc-400 — ~6.7:1 on surface-dark  */
+    --text-inverse: #ffffff;
+
+    /* Accent (indigo, lighter for dark surfaces) */
+    --accent: #818cf8;               /* indigo-400 — ~5.6:1 on surface-dark */
+    --accent-hover: #a5b4fc;         /* indigo-300 */
+    --accent-bg: #1e1b4b;            /* indigo-950 — subtle tint */
+    --accent-fg: #0b1020;            /* darkened to read on indigo-400 fill */
+
+    /* Status — success */
+    --success-fg: #34d399;           /* emerald-400 */
+    --success-bg: #064e3b;           /* emerald-900 — 5.8:1 vs success-fg */
+
+    /* Status — warning */
+    --warning-fg: #fbbf24;           /* amber-400 */
+    --warning-bg: #78350f;           /* amber-900 */
+    --warning-border: #92400e;       /* amber-800 — soft warning outline (dark) */
+
+    /* Status — danger */
+    --danger-fg: #f87171;            /* rose-400 */
+    --danger-bg: #7f1d1d;            /* rose-900 */
+    --danger-border: #991b1b;        /* rose-800 — soft danger outline (dark) */
+    --danger-strong: #dc2626;        /* rose-600 — destructive button stays saturated */
+    --danger-strong-hover: #ef4444;  /* rose-500 */
+
+    /* Status — info */
+    --info-fg: #7dd3fc;              /* sky-300 */
+    --info-bg: #0c4a6e;              /* sky-900 */
+
+    /* Overlay (dialog backdrop) — heavier in dark mode */
+    --overlay: rgb(0 0 0 / 0.65);
+
+    /* Chart palette — lifted for dark backgrounds */
+    --chart-1: #818cf8;              /* indigo-400 */
+    --chart-2: #34d399;              /* emerald-400 */
+    --chart-3: #fbbf24;              /* amber-400 */
+    --chart-4: #fb7185;              /* rose-400 */
+    --chart-5: #38bdf8;              /* sky-400 */
+    --chart-6: #a78bfa;              /* violet-400 */
+  }
+
+  /*
+   * Base body styling — ensures the page background and default text color
+   * follow the active theme even before any component mounts.
+   */
+  html,
+  body,
+  #root {
+    background-color: var(--surface);
+    color: var(--text);
+  }
+}

@@ -64,7 +64,7 @@ function CreateTokenForm({
     return (
       <button
         onClick={() => setOpen(true)}
-        className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+        className="px-4 py-2 text-sm bg-accent text-accent-fg rounded-lg hover:bg-accent-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface"
       >
         Create token
       </button>
@@ -72,11 +72,11 @@ function CreateTokenForm({
   }
 
   return (
-    <div className="bg-white rounded-xl border border-gray-200 shadow-sm p-6 mb-6">
-      <h2 className="text-base font-medium text-gray-900 mb-4">Create token</h2>
+    <div className="bg-elevation-1 rounded-xl border border-border shadow-sm p-6 mb-6">
+      <h2 className="text-base font-medium text-text mb-4">Create token</h2>
       <form onSubmit={handleSubmit} className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
+          <label className="block text-sm font-medium text-text-secondary mb-1">
             Name
           </label>
           <input
@@ -85,22 +85,25 @@ function CreateTokenForm({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="my-service-token"
-            className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            className="w-full border border-border bg-elevation-2 text-text placeholder:text-text-muted rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent"
           />
         </div>
 
         <div>
-          <p className="block text-sm font-medium text-gray-700 mb-2">
+          <p className="block text-sm font-medium text-text-secondary mb-2">
             Scopes
           </p>
           <div className="flex flex-wrap gap-3">
             {AVAILABLE_SCOPES.map((scope) => (
-              <label key={scope} className="flex items-center gap-2 text-sm">
+              <label
+                key={scope}
+                className="flex items-center gap-2 text-sm text-text"
+              >
                 <input
                   type="checkbox"
                   checked={scopes.includes(scope)}
                   onChange={() => toggleScope(scope)}
-                  className="rounded border-gray-300 text-indigo-600 focus:ring-indigo-500"
+                  className="rounded border-border text-accent focus:ring-accent"
                 />
                 <span className="font-mono text-xs">{scope}</span>
               </label>
@@ -112,14 +115,14 @@ function CreateTokenForm({
           <button
             type="submit"
             disabled={submitting}
-            className="px-4 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+            className="px-4 py-2 text-sm bg-accent text-accent-fg rounded-lg hover:bg-accent-hover disabled:opacity-50 transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             {submitting ? "Creating..." : "Create"}
           </button>
           <button
             type="button"
             onClick={() => setOpen(false)}
-            className="px-4 py-2 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50 transition-colors"
+            className="px-4 py-2 text-sm border border-border rounded-lg text-text-secondary hover:bg-elevation-2 hover:text-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
           >
             Cancel
           </button>
@@ -146,24 +149,24 @@ function SecretReveal({
   };
 
   return (
-    <div className="bg-yellow-50 border border-yellow-300 rounded-xl p-4 mb-6">
-      <p className="text-sm font-medium text-yellow-800 mb-2">
+    <div className="bg-warning-bg border border-warning-border rounded-xl p-4 mb-6">
+      <p className="text-sm font-medium text-warning-fg mb-2">
         Copy this token now — it will not be shown again.
       </p>
       <div className="flex items-center gap-2">
-        <code className="flex-1 bg-white border border-yellow-200 rounded px-3 py-2 text-xs font-mono break-all">
+        <code className="flex-1 bg-elevation-1 border border-border text-text rounded px-3 py-2 text-xs font-mono break-all">
           {secret}
         </code>
         <button
           onClick={copy}
-          className="px-3 py-2 text-xs bg-yellow-200 rounded hover:bg-yellow-300 transition-colors whitespace-nowrap"
+          className="px-3 py-2 text-xs bg-elevation-2 text-text border border-border rounded hover:bg-elevation-1 transition-colors whitespace-nowrap focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
         >
           {copied ? "Copied!" : "Copy"}
         </button>
       </div>
       <button
         onClick={onDismiss}
-        className="mt-3 text-xs text-yellow-700 hover:underline"
+        className="mt-3 text-xs text-warning-fg hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
       >
         I have saved it
       </button>
@@ -216,7 +219,7 @@ export function TokensPage({ addToast }: Props) {
   return (
     <div>
       <div className="flex items-center justify-between mb-6">
-        <h1 className="text-2xl font-semibold text-gray-900">API Tokens</h1>
+        <h1 className="text-2xl font-semibold text-text">API Tokens</h1>
         <CreateTokenForm onCreated={handleCreated} addToast={addToast} />
       </div>
 
@@ -228,43 +231,43 @@ export function TokensPage({ addToast }: Props) {
       )}
 
       {loading ? (
-        <p className="text-sm text-gray-500 py-12 text-center">Loading...</p>
+        <p className="text-sm text-text-muted py-12 text-center">Loading...</p>
       ) : tokens.length === 0 ? (
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-12 text-center text-sm text-gray-400">
+        <div className="bg-elevation-1 rounded-xl border border-border shadow-sm px-6 py-12 text-center text-sm text-text-muted">
           No active tokens.
         </div>
       ) : (
-        <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div className="bg-elevation-1 rounded-xl border border-border shadow-sm overflow-hidden">
           <table className="min-w-full text-sm">
-            <thead className="bg-gray-50 border-b border-gray-200">
+            <thead className="bg-elevation-2 border-b border-border">
               <tr>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Name
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Prefix
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Scopes
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Created
                 </th>
-                <th className="px-4 py-3 text-left font-medium text-gray-600">
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Last used
                 </th>
-                <th className="px-4 py-3 text-right font-medium text-gray-600">
+                <th className="px-4 py-3 text-right font-medium text-text-secondary">
                   Actions
                 </th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-gray-100">
+            <tbody className="divide-y divide-border">
               {tokens.map((tok) => (
-                <tr key={tok.id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-900">
+                <tr key={tok.id} className="hover:bg-elevation-2">
+                  <td className="px-4 py-3 font-medium text-text">
                     {tok.name}
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  <td className="px-4 py-3 font-mono text-xs text-text-secondary">
                     {tok.token_prefix}
                   </td>
                   <td className="px-4 py-3">
@@ -272,17 +275,17 @@ export function TokensPage({ addToast }: Props) {
                       {tok.scopes.map((s) => (
                         <span
                           key={s}
-                          className="inline-flex items-center rounded px-1.5 py-0.5 bg-indigo-50 text-indigo-700 text-xs font-mono"
+                          className="inline-flex items-center rounded px-1.5 py-0.5 bg-accent-bg text-accent text-xs font-mono"
                         >
                           {s}
                         </span>
                       ))}
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-gray-500 text-xs tabular-nums">
+                  <td className="px-4 py-3 text-text-muted text-xs tabular-nums">
                     {new Date(tok.created_at).toLocaleDateString()}
                   </td>
-                  <td className="px-4 py-3 text-gray-500 text-xs tabular-nums">
+                  <td className="px-4 py-3 text-text-muted text-xs tabular-nums">
                     {tok.last_used_at
                       ? new Date(tok.last_used_at).toLocaleString()
                       : "Never"}
@@ -290,7 +293,7 @@ export function TokensPage({ addToast }: Props) {
                   <td className="px-4 py-3 text-right">
                     <button
                       onClick={() => setRevokeTarget(tok)}
-                      className="px-3 py-1.5 text-xs border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                      className="px-3 py-1.5 text-xs border border-danger-border text-danger-fg rounded-lg hover:bg-danger-bg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
                     >
                       Revoke
                     </button>

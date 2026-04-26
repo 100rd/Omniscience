@@ -16,10 +16,10 @@ function StatCard({
   return (
     <Link
       to={to}
-      className="bg-white rounded-xl border border-gray-200 shadow-sm px-6 py-5 hover:shadow-md transition-shadow"
+      className="bg-elevation-1 rounded-xl border border-border shadow-sm px-6 py-5 hover:shadow-md hover:border-border-strong transition-all focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
     >
-      <p className="text-sm text-gray-500">{label}</p>
-      <p className="text-3xl font-semibold text-gray-900 mt-1">{value}</p>
+      <p className="text-sm text-text-muted">{label}</p>
+      <p className="text-3xl font-semibold text-text mt-1">{value}</p>
     </Link>
   );
 }
@@ -62,13 +62,15 @@ export function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="text-sm text-gray-500 py-12 text-center">Loading...</div>
+      <div className="text-sm text-text-muted py-12 text-center">
+        Loading...
+      </div>
     );
   }
 
   if (error) {
     return (
-      <div className="text-sm text-red-600 py-12 text-center">{error}</div>
+      <div className="text-sm text-danger-fg py-12 text-center">{error}</div>
     );
   }
 
@@ -79,16 +81,16 @@ export function DashboardPage() {
   return (
     <div>
       <div className="flex items-center justify-between mb-8">
-        <h1 className="text-2xl font-semibold text-gray-900">Dashboard</h1>
+        <h1 className="text-2xl font-semibold text-text">Dashboard</h1>
         {health && (
           <span
             className={`inline-flex items-center gap-1.5 text-sm font-medium ${
-              health === "ok" ? "text-green-600" : "text-red-600"
+              health === "ok" ? "text-success-fg" : "text-danger-fg"
             }`}
           >
             <span
               className={`h-2 w-2 rounded-full ${
-                health === "ok" ? "bg-green-500" : "bg-red-500"
+                health === "ok" ? "bg-success-fg" : "bg-danger-fg"
               }`}
             />
             API {health}
@@ -107,45 +109,43 @@ export function DashboardPage() {
       </div>
 
       <section>
-        <h2 className="text-base font-medium text-gray-700 mb-4">
+        <h2 className="text-base font-medium text-text-secondary mb-4">
           Recent ingestion runs
         </h2>
         {recentRuns.length === 0 ? (
-          <p className="text-sm text-gray-400">No ingestion runs yet.</p>
+          <p className="text-sm text-text-muted">No ingestion runs yet.</p>
         ) : (
-          <div className="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div className="bg-elevation-1 rounded-xl border border-border shadow-sm overflow-hidden">
             <table className="min-w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead className="bg-elevation-2 border-b border-border">
                 <tr>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">
+                  <th className="px-4 py-3 text-left font-medium text-text-secondary">
                     Source
                   </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">
+                  <th className="px-4 py-3 text-left font-medium text-text-secondary">
                     Status
                   </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">
+                  <th className="px-4 py-3 text-left font-medium text-text-secondary">
                     Docs new
                   </th>
-                  <th className="px-4 py-3 text-left font-medium text-gray-600">
+                  <th className="px-4 py-3 text-left font-medium text-text-secondary">
                     Started
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody className="divide-y divide-border">
                 {recentRuns.map((run) => {
                   const src = sources.find((s) => s.id === run.source_id);
                   return (
-                    <tr key={run.id} className="hover:bg-gray-50">
-                      <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                    <tr key={run.id} className="hover:bg-elevation-2">
+                      <td className="px-4 py-3 font-mono text-xs text-text-secondary">
                         {src?.name ?? run.source_id.slice(0, 8)}
                       </td>
                       <td className="px-4 py-3">
                         <StatusBadge value={run.status} />
                       </td>
-                      <td className="px-4 py-3 text-gray-700">
-                        {run.docs_new}
-                      </td>
-                      <td className="px-4 py-3 text-gray-500 tabular-nums">
+                      <td className="px-4 py-3 text-text">{run.docs_new}</td>
+                      <td className="px-4 py-3 text-text-muted tabular-nums">
                         {new Date(run.started_at).toLocaleString()}
                       </td>
                     </tr>
@@ -159,7 +159,7 @@ export function DashboardPage() {
           <div className="mt-3">
             <Link
               to="/ingestion"
-              className="text-sm text-indigo-600 hover:underline"
+              className="text-sm text-accent hover:text-accent-hover hover:underline"
             >
               View all runs
             </Link>
