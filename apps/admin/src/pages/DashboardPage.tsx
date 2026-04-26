@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { useTokenContext } from "../context/TokenContext";
 import { Source, IngestionRun } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
+import { FreshnessPanel } from "../components/FreshnessPanel";
 
 function StatCard({
   label,
@@ -107,6 +108,10 @@ export function DashboardPage() {
           to="/sources"
         />
       </div>
+
+      <section className="mb-10">
+        <FreshnessPanel />
+      </section>
 
       <section>
         <h2 className="text-base font-medium text-text-secondary mb-4">
