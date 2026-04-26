@@ -2,14 +2,14 @@
 #
 # Aligns roughly with kubebuilder defaults, with a few additions that match
 # the standards in CLAUDE.md (no magic constants, single responsibility).
-
-version: "2"
+#
+# v1 schema — compatible with golangci-lint >=1.50 (CI runs 1.61).
 
 run:
   timeout: 5m
 
 linters:
-  default: none
+  disable-all: true
   enable:
     - errcheck
     - govet
@@ -20,17 +20,18 @@ linters:
     - revive
     - gocritic
     - gosec
-  settings:
-    revive:
-      rules:
-        - name: exported
-          arguments:
-            - "checkPrivateReceivers"
-            - "disableStutteringCheck"
-    gosec:
-      excludes:
-        # G104: errors not checked — handled per-call by errcheck above.
-        - G104
+
+linters-settings:
+  revive:
+    rules:
+      - name: exported
+        arguments:
+          - "checkPrivateReceivers"
+          - "disableStutteringCheck"
+  gosec:
+    excludes:
+      # G104: errors not checked — handled per-call by errcheck above.
+      - G104
 
 issues:
   max-same-issues: 0
