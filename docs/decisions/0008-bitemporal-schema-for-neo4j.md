@@ -1,9 +1,9 @@
-# ADR 0009 — Bitemporal schema for Neo4j entities and edges
+# ADR 0008 — Bitemporal schema for Neo4j entities and edges
 
 - **Status**: Proposed
 - **Date**: 2026-04-24
 - **Amends**: [ADR-0005](0005-neo4j-as-graph-store.md) §Schema posture — the placeholder bullet that defers `valid_from`, `valid_to`, `recorded_at` enforcement "to a follow-up ADR tied to epic [#97](https://github.com/100rd/Omniscience/issues/97)". This is that ADR.
-- **Numbering note**: issue [#128](https://github.com/100rd/Omniscience/issues/128) anticipated file `0007-bitemporal-schema-for-neo4j.md`, but ADR-0007 was assigned to the K8s operator architecture (issue [#101](https://github.com/100rd/Omniscience/issues/101), PR [#142](https://github.com/100rd/Omniscience/pull/142)) which merged after #128 was filed. The retention sibling at issue [#129](https://github.com/100rd/Omniscience/issues/129) (PR [#144](https://github.com/100rd/Omniscience/pull/144)) then claimed ADR-0008 first; this ADR therefore lands at **0009**. The numbering shift is the only deviation from issue #128 scope; substance is unchanged.
+- **Numbering note**: issue [#128](https://github.com/100rd/Omniscience/issues/128) anticipated file `0007-bitemporal-schema-for-neo4j.md`. ADR-0007 was assigned to the K8s operator architecture (issue [#101](https://github.com/100rd/Omniscience/issues/101), PR [#142](https://github.com/100rd/Omniscience/pull/142)) which merged after #128 was filed. This ADR therefore lands at 0008. The retention sibling (issue [#129](https://github.com/100rd/Omniscience/issues/129), PR #144) lands at 0009.
 
 ## Implementation notes
 
@@ -13,13 +13,13 @@ Filled by the Wave 6 closer ([#139](https://github.com/100rd/Omniscience/issues/
 
 Two clocks govern incident reasoning. **Valid time** is when a fact was true in the world: pod `ratings-7d6c…` was running between `2026-04-12T08:00Z` and `2026-04-12T19:30Z` and would still have been running at `19:25Z` whether or not Omniscience had ingested that fact yet. **Recorded time** is when Omniscience learned the fact: the same pod's existence may have been ingested in three batches over a week as different connectors (kubectl-watch, AWS EKS, Datadog) caught up. Single-clock systems collapse the two and answer one or the other but never both.
 
-Vision §5.3 ([`docs/vision.md`](../vision.md) line 71-77) requires both. Every entity and every edge carries `valid_from`, `valid_to` (real-world validity window) plus `recorded_at` (ingestion time). [ADR-0005](0005-neo4j-as-graph-store.md) §Schema posture committed the *names* of those properties as placeholders on every node and every edge but explicitly punted enforcement — constraints, indexes, query rewriting, retention worker — to "a follow-up ADR tied to epic [#97](https://github.com/100rd/Omniscience/issues/97)". The Neo4j adapter at [`packages/index/src/omniscience_index/stores/neo4j_store.py`](../../packages/index/src/omniscience_index/stores/neo4j_store.py) ships today with `MERGE` paths that carry `created_at` and `updated_at` but do **not** carry the bitemporal triple, and its `_BOOTSTRAP_STATEMENTS` block indexes `(workspace_id, kind)` and `(workspace_id, name)` but no temporal columns. ADR-0009 fixes the design that turns those placeholders into a real enforcement path.
+Vision §5.3 ([`docs/vision.md`](../vision.md) line 71-77) requires both. Every entity and every edge carries `valid_from`, `valid_to` (real-world validity window) plus `recorded_at` (ingestion time). [ADR-0005](0005-neo4j-as-graph-store.md) §Schema posture committed the *names* of those properties as placeholders on every node and every edge but explicitly punted enforcement — constraints, indexes, query rewriting, retention worker — to "a follow-up ADR tied to epic [#97](https://github.com/100rd/Omniscience/issues/97)". The Neo4j adapter at [`packages/index/src/omniscience_index/stores/neo4j_store.py`](../../packages/index/src/omniscience_index/stores/neo4j_store.py) ships today with `MERGE` paths that carry `created_at` and `updated_at` but do **not** carry the bitemporal triple, and its `_BOOTSTRAP_STATEMENTS` block indexes `(workspace_id, kind)` and `(workspace_id, name)` but no temporal columns. ADR-0008 fixes the design that turns those placeholders into a real enforcement path.
 
-[ADR-0006](0006-qdrant-as-vector-store.md) §Schema posture already mirrors the placeholder properties on the Qdrant payload — `valid_from`, `valid_to`, `recorded_at` with `recorded_at` payload-indexed — and cites Vision §5.3 as the bitemporal-alignment target. ADR-0009 is the canonical contract that ADR-0006 was deferring to. Cross-store alignment is therefore a hard requirement of this ADR: units, interval convention, and the "still valid" sentinel must be identical on both stores so a vector search at `as_of=T` returns chunks consistent with the graph at T.
+[ADR-0006](0006-qdrant-as-vector-store.md) §Schema posture already mirrors the placeholder properties on the Qdrant payload — `valid_from`, `valid_to`, `recorded_at` with `recorded_at` payload-indexed — and cites Vision §5.3 as the bitemporal-alignment target. ADR-0008 is the canonical contract that ADR-0006 was deferring to. Cross-store alignment is therefore a hard requirement of this ADR: units, interval convention, and the "still valid" sentinel must be identical on both stores so a vector search at `as_of=T` returns chunks consistent with the graph at T.
 
 The architectural pressure is real but bounded. Vision §11 (line 177) flags that *"bitemporal semantics are powerful but expensive to query correctly. Initial implementation may restrict time-travel queries to a subset of entity types."* This ADR does not take that restriction — every entity kind is bitemporal — but it shapes the trade-offs around it: read-path performance for the dominant "current state" query must not regress, and the `as_of` predicate must be a single, mechanical Cypher rewrite that an engineer can apply by inspection rather than a per-kind hand-tuned query.
 
-ADR-0009 is the operational and indexing contract that the rest of epic [#97](https://github.com/100rd/Omniscience/issues/97) implements. The retention tiering policy is a **parallel, sibling ADR** at issue [#129](https://github.com/100rd/Omniscience/issues/129) (file `0008-retention-tiering-policy.md`) and is explicitly out of this ADR's scope.
+ADR-0008 is the operational and indexing contract that the rest of epic [#97](https://github.com/100rd/Omniscience/issues/97) implements. The retention tiering policy is a **parallel, sibling ADR** at issue [#129](https://github.com/100rd/Omniscience/issues/129) (file `0009-retention-tiering-policy.md`) and is explicitly out of this ADR's scope.
 
 ## Decision
 
@@ -56,7 +56,7 @@ Every relationship carries `valid_from`, `valid_to`, `recorded_at` directly as r
 
 **Tombstone semantics**: when an edge ends, `valid_to` is set to the end timestamp. The relationship is **not deleted**. The writer no longer issues `DELETE` against relationships once the bitemporal flag is on (§8). End-dating preserves the `as_of < end` queryability that hard deletion destroys.
 
-This changes the writer contract from PR [#104](https://github.com/100rd/Omniscience/issues/104). Before bitemporal: upserts that no longer observe an edge produce a `DELETE`. After bitemporal: those same upserts produce a `SET r.valid_to = $now` on the still-current relationship. The previous `_DELETE_BY_SOURCE_CYPHER` and `_DELETE_TOMBSTONED_CYPHER` templates in `neo4j_store.py` are replaced by end-dating equivalents in [#137](https://github.com/100rd/Omniscience/issues/137); retention (the actual reaping of tombstoned edges) is the job of the retention worker in [#135](https://github.com/100rd/Omniscience/issues/135) and is governed by ADR-0008. Hard deletion of an edge happens only as a retention action on edges whose `valid_to` is older than the archive boundary, never as a writer action.
+This changes the writer contract from PR [#104](https://github.com/100rd/Omniscience/issues/104). Before bitemporal: upserts that no longer observe an edge produce a `DELETE`. After bitemporal: those same upserts produce a `SET r.valid_to = $now` on the still-current relationship. The previous `_DELETE_BY_SOURCE_CYPHER` and `_DELETE_TOMBSTONED_CYPHER` templates in `neo4j_store.py` are replaced by end-dating equivalents in [#137](https://github.com/100rd/Omniscience/issues/137); retention (the actual reaping of tombstoned edges) is the job of the retention worker in [#135](https://github.com/100rd/Omniscience/issues/135) and is governed by ADR-0009. Hard deletion of an edge happens only as a retention action on edges whose `valid_to` is older than the archive boundary, never as a writer action.
 
 When a relationship's *target* identity is itself tombstoned (an end-dated entity, [#137](https://github.com/100rd/Omniscience/issues/137)), the edge's `valid_to` is closed to the same timestamp as the target's last `valid_to`. This is symmetric on the source side. The invariant is: `edge.valid_from >= max(source.valid_from, target.valid_from)` and `edge.valid_to <= min(source.valid_to, target.valid_to)` where `NULL` is treated as `+infinity` for the `min`. The corruption guard in §1 is extended to enforce this on edge writes.
 
@@ -77,7 +77,7 @@ FOR (n:Entity) ON (n.workspace_id, n.kind);
 CREATE INDEX entity_workspace_name IF NOT EXISTS
 FOR (n:Entity) ON (n.workspace_id, n.name);
 
--- New in ADR-0009.
+-- New in ADR-0008.
 -- EntityState versions: one row per (workspace_id, id, valid_from). Same valid_from
 -- twice for the same identity is corruption (a writer race); recorded_at is NOT in
 -- the uniqueness key because monotonicity (§1) makes it redundant for distinguishing
@@ -87,7 +87,7 @@ FOR (s:EntityState) REQUIRE (s.workspace_id, s.id, s.valid_from) IS UNIQUE;
 
 -- Hot-path lookup of current state by identity, narrowed by ingestion freshness.
 -- Used by the dominant "current state" read path and by the retention worker
--- to find candidates for hot -> warm eviction (ADR-0008 §2).
+-- to find candidates for hot -> warm eviction (ADR-0009 §2).
 CREATE INDEX entity_workspace_recorded_at IF NOT EXISTS
 FOR (n:Entity) ON (n.workspace_id, n.recorded_at);
 
@@ -98,7 +98,7 @@ CREATE INDEX entity_state_workspace_valid_window IF NOT EXISTS
 FOR (s:EntityState) ON (s.workspace_id, s.id, s.valid_from, s.valid_to);
 
 -- Retention-side lookup on EntityState by ingestion freshness — used by
--- the retention worker (ADR-0008).
+-- the retention worker (ADR-0009).
 CREATE INDEX entity_state_workspace_recorded_at IF NOT EXISTS
 FOR (s:EntityState) ON (s.workspace_id, s.recorded_at);
 
@@ -141,14 +141,14 @@ Open-closed is justified for three independent reasons. **First**, contiguous ha
 
 ### 6. Cross-store alignment with Qdrant (ADR-0006)
 
-ADR-0009 is the canonical source of bitemporal semantics; ADR-0006 is the consumer. The contract:
+ADR-0008 is the canonical source of bitemporal semantics; ADR-0006 is the consumer. The contract:
 
 - **Unit**: ISO-8601 datetime strings on the Qdrant payload (Qdrant payload datetime fields are ISO-8601; the round-trip from the writer is `value.isoformat()`). Cypher `datetime` ↔ ISO-8601 ↔ Python `datetime` is lossless at microsecond resolution, which is the storage precision both stores carry.
 - **Interval convention**: open-closed `[valid_from, valid_to)`, identical to the graph.
 - **"Still valid" sentinel**: `valid_to` field absent or `null` on the payload, identical to the graph's `valid_to IS NULL`.
 - **Indexed fields**: `recorded_at` payload-indexed (already specified by ADR-0006 §Schema posture). [#134](https://github.com/100rd/Omniscience/issues/134) extends payload indexing to `valid_from` and `valid_to` and adds `as_of` to the filter on every read method.
 
-ADR-0006 §Schema posture and §ACL carry-forward are not amended in this PR. The amendment lives in a follow-up sub-issue (the Wave 6 [#139](https://github.com/100rd/Omniscience/issues/139) closer is the right home; alternately a one-line cross-reference is added by [#134](https://github.com/100rd/Omniscience/issues/134) as part of payload-bitemporal landing). This is consistent with how ADR-0005 was amended after-the-fact by ADR-0009 itself (this ADR), and how ADR-0004 was amended by ADR-0005 and ADR-0006 in their own PRs.
+ADR-0006 §Schema posture and §ACL carry-forward are not amended in this PR. The amendment lives in a follow-up sub-issue (the Wave 6 [#139](https://github.com/100rd/Omniscience/issues/139) closer is the right home; alternately a one-line cross-reference is added by [#134](https://github.com/100rd/Omniscience/issues/134) as part of payload-bitemporal landing). This is consistent with how ADR-0005 was amended after-the-fact by ADR-0008 itself (this ADR), and how ADR-0004 was amended by ADR-0005 and ADR-0006 in their own PRs.
 
 ### 7. Postgres operational metadata posture
 
@@ -196,7 +196,7 @@ The specific reasons it does not fit Omniscience:
 - **It widens the uniqueness constraint across the entire codebase.** ADR-0005 §Schema posture committed `(workspace_id, id) IS UNIQUE` on `:Entity` and the regression guards in `neo4j_store.py` (`_ensure_workspace_predicate`, the import-time checks) and the workspace-isolation tests at `tests/test_graph_workspace_isolation.py` are written against that constraint shape. Multi-node versioning forces the constraint to widen to `(workspace_id, id, valid_from) IS UNIQUE` or to relax to non-unique with a composite index. Both change the surface that #117/#119 ACL carry-forward depends on. The cross-cutting churn cost is unbounded relative to the value.
 - **Edges multiply.** A `(:Entity)-[:DEPENDS_ON]->(:Entity)` relationship in the multi-node model has to point at a specific version of each endpoint or at an identity-key indirection. The first re-introduces relationship rewrites on every version bump (write amp on every relationship that points to "current"); the second re-introduces the same `[:HAD_STATE]`-style indirection that we picked, but on the relationship side instead of the node side, and breaks the planner's ability to use direct relationship indexes.
 - **The current-state plan regresses.** The dominant read is "current state of entity by id" with no `as_of`. In the multi-node model, there is no privileged "current" node — the read has to filter `WHERE valid_to IS NULL` and seek the index `(workspace_id, entity_key, valid_from, valid_to)` on every read, paying the interval-predicate cost even for the most common operational shape. The chosen design pays the predicate cost only when `as_of` is actually supplied.
-- **Write amp is comparable but qualitatively worse.** Both designs produce ~3 ops per state change, but multi-node versioning adds nodes proportional to update rate (over months and years, this is the dominant graph-size driver), whereas property-versioning adds `:EntityState` nodes — same growth rate, but the topology of the graph (number of `:Entity` nodes and the relationships between them) is bounded by identity count, not by update rate. Retention (ADR-0008) is therefore simpler under property-versioning: aging out the `:EntityState` chain does not break edge integrity, because edges point at identity nodes.
+- **Write amp is comparable but qualitatively worse.** Both designs produce ~3 ops per state change, but multi-node versioning adds nodes proportional to update rate (over months and years, this is the dominant graph-size driver), whereas property-versioning adds `:EntityState` nodes — same growth rate, but the topology of the graph (number of `:Entity` nodes and the relationships between them) is bounded by identity count, not by update rate. Retention (ADR-0009) is therefore simpler under property-versioning: aging out the `:EntityState` chain does not break edge integrity, because edges point at identity nodes.
 
 ### Identity model — edge-versioned-only (always-latest nodes)
 
@@ -218,7 +218,7 @@ Closed-open `(valid_from, valid_to]` was considered briefly. It has the same com
 
 Rejected. The shape of ADR-0005 / ADR-0006's migration ([#108](https://github.com/100rd/Omniscience/issues/108), [#105](https://github.com/100rd/Omniscience/issues/105)) was a true dual-write across distinct backends: pgvector and Neo4j held the same data, the read path could shadow-compare, and the cutover flipped the read backend. It was a backend-substitution migration.
 
-ADR-0009 is a schema-evolution migration on the same backend. A dual-write across two Neo4j databases (or two label sets in the same database) was considered: writers publish to both the pre-bitemporal and bitemporal shape, the read path can shadow-compare, and the cutover flips. The reasons against:
+ADR-0008 is a schema-evolution migration on the same backend. A dual-write across two Neo4j databases (or two label sets in the same database) was considered: writers publish to both the pre-bitemporal and bitemporal shape, the read path can shadow-compare, and the cutover flips. The reasons against:
 
 - **Storage doubling for a transitional window**, with a full-graph backfill on the new shape that has no operational benefit beyond what an in-place SET-with-`IF NULL` guard already gives.
 - **Two write paths for an extended window** is a regression in operational complexity for a property — the graph's property shape — that has a single source of truth (the writer).
@@ -238,7 +238,7 @@ The chosen migration — bootstrap DDL + idempotent backfill + feature-flagged w
 
 ### Negative — operational
 
-- **Storage growth.** Every state change adds an `:EntityState` node plus a `[:HAD_STATE]` relationship. At the v0.5 envelope (single-node Neo4j with 100 GiB SSD) this is bounded; at GA scale and one-year warm retention (Vision §5.3, ADR-0005 §Negative-operational) it is the dominant storage cost. ADR-0008 (retention tiering, [#129](https://github.com/100rd/Omniscience/issues/129) parallel sibling) is the operational counter-pressure on this growth and ADR-0009 is silent on the eviction policy by design.
+- **Storage growth.** Every state change adds an `:EntityState` node plus a `[:HAD_STATE]` relationship. At the v0.5 envelope (single-node Neo4j with 100 GiB SSD) this is bounded; at GA scale and one-year warm retention (Vision §5.3, ADR-0005 §Negative-operational) it is the dominant storage cost. ADR-0009 (retention tiering, [#129](https://github.com/100rd/Omniscience/issues/129) parallel sibling) is the operational counter-pressure on this growth and ADR-0008 is silent on the eviction policy by design.
 - **Two write Cypher templates** during the rollout window — the pre-bitemporal MERGE and the bitemporal MERGE-plus-`:HAD_STATE`-plus-`SET-valid_to`. Resolved at cutover when the legacy template is removed, but the maintenance load during the window is real.
 - **The corruption guards live in the writer, not in Neo4j.** `valid_from < valid_to`, the edge-endpoint validity-window invariant from §3, and `recorded_at` monotonicity per `(workspace_id, id)` cannot be expressed as Neo4j 5.x constraints. The writer enforces them; the property tests in [#138](https://github.com/100rd/Omniscience/issues/138) verify them; reviewers must hold the line that no future PR drops the guards in pursuit of a faster path. The same pattern as the `_ensure_workspace_predicate` import-time guards in `neo4j_store.py`.
 - **Backfill is a one-shot operation that cannot be undone in place.** Once `valid_from`, `valid_to`, `recorded_at` are populated on existing nodes and the corresponding `:EntityState` chains are created, rolling back requires the pre-bitemporal Neo4j backup. The operational checklist in [#130](https://github.com/100rd/Omniscience/issues/130) covers backup capture before backfill; reviewers must ensure that step is not deferred.
@@ -262,7 +262,7 @@ The same discipline ADR-0005 mandated for the Neo4j adapter and ADR-0006 mandate
 
 ### Negative — cost
 
-- **Storage cost grows roughly linearly with update rate.** Each state change adds one `:EntityState` node, one `[:HAD_STATE]` relationship, and rewrites one `valid_to`. For an entity that updates daily, one year of warm retention adds ~365 `:EntityState` nodes per identity. Bounded by retention (ADR-0008); meaningful at GA.
+- **Storage cost grows roughly linearly with update rate.** Each state change adds one `:EntityState` node, one `[:HAD_STATE]` relationship, and rewrites one `valid_to`. For an entity that updates daily, one year of warm retention adds ~365 `:EntityState` nodes per identity. Bounded by retention (ADR-0009); meaningful at GA.
 - **Edge end-dating delays storage reclamation.** A relationship that would have been deleted in the pre-bitemporal model now persists with `valid_to` set. Storage cost equivalent to keeping the edge with one extra timestamp until the retention worker reaps it. Bounded by retention.
 - **Index cost.** Three new node-side indexes (one constraint, two indexes) plus two new relationship-side indexes. Memory cost on the Neo4j page cache is meaningful at GA scale; v0.5 envelope absorbs it.
 
@@ -283,17 +283,17 @@ The same discipline ADR-0005 mandated for the Neo4j adapter and ADR-0006 mandate
 
 ## Cross-doc consequences
 
-- **[ADR-0005](0005-neo4j-as-graph-store.md)** §Schema posture — the placeholder bullet that defers bitemporal enforcement to "a follow-up ADR tied to epic #97" is now satisfied by ADR-0009. ADR-0005 is amended in a follow-up sub-issue (Wave 6 [#139](https://github.com/100rd/Omniscience/issues/139), or a dedicated cross-reference PR — out of scope for this ADR's PR per issue [#128](https://github.com/100rd/Omniscience/issues/128) scope guardrails) to add a one-line "see ADR-0009 for the bitemporal contract" cross-link. The §Consequences-security carry-forward in ADR-0005 is unchanged by ADR-0009 and is reaffirmed here in §Consequences-security.
-- **[ADR-0006](0006-qdrant-as-vector-store.md)** §Schema posture — the placeholder properties on the Qdrant payload (`valid_from`, `valid_to`, `recorded_at` with `recorded_at` indexed) are confirmed by ADR-0009 §6 with the open-closed interval, `null`/missing sentinel for `valid_to`, and ISO-8601 datetime unit fixed. ADR-0006 is amended in a follow-up sub-issue ([#134](https://github.com/100rd/Omniscience/issues/134) or [#139](https://github.com/100rd/Omniscience/issues/139)) to add a one-line "see ADR-0009 for the canonical bitemporal contract" cross-link and to add `valid_from` and `valid_to` to the payload-indexed list. ADR-0006 is unchanged in this PR.
-- **[`docs/schema.md`](../schema.md)** — the entity / edge schema reference adds a one-line "see ADR-0009 for bitemporal property semantics on Neo4j entities and edges; Postgres operational tables remain non-bitemporal per ADR-0009 §7" cross-link. The cross-link is the only edit `schema.md` takes in epic #97; the table definitions are unchanged because no Postgres column changes.
-- **[`docs/vision.md`](../vision.md)** §5.3 (line 71-77) and §11 (line 177) — both already name the bitemporal model. ADR-0009 makes the implementation contract explicit; the vision sections are not edited in this PR. A future cross-reference under `## 12. Reference documents` should list ADR-0009 alongside ADR-0005 and ADR-0006 once the ADRs index is introduced.
-- **[`docs/decisions/`](.) index** — when the `docs/decisions/README.md` index is introduced (recommended in ADR-0005 §Consequences-for-related-docs and ADR-0007 §Consequences-for-related-docs), ADR-0009 should be listed alongside ADR-0005, ADR-0006, ADR-0007 with a one-line summary: "Bitemporal schema for Neo4j entities and edges — property-versioned identity nodes with `:HAD_STATE` chains, open-closed intervals, `valid_to IS NULL` for still-valid".
+- **[ADR-0005](0005-neo4j-as-graph-store.md)** §Schema posture — the placeholder bullet that defers bitemporal enforcement to "a follow-up ADR tied to epic #97" is now satisfied by ADR-0008. ADR-0005 is amended in a follow-up sub-issue (Wave 6 [#139](https://github.com/100rd/Omniscience/issues/139), or a dedicated cross-reference PR — out of scope for this ADR's PR per issue [#128](https://github.com/100rd/Omniscience/issues/128) scope guardrails) to add a one-line "see ADR-0008 for the bitemporal contract" cross-link. The §Consequences-security carry-forward in ADR-0005 is unchanged by ADR-0008 and is reaffirmed here in §Consequences-security.
+- **[ADR-0006](0006-qdrant-as-vector-store.md)** §Schema posture — the placeholder properties on the Qdrant payload (`valid_from`, `valid_to`, `recorded_at` with `recorded_at` indexed) are confirmed by ADR-0008 §6 with the open-closed interval, `null`/missing sentinel for `valid_to`, and ISO-8601 datetime unit fixed. ADR-0006 is amended in a follow-up sub-issue ([#134](https://github.com/100rd/Omniscience/issues/134) or [#139](https://github.com/100rd/Omniscience/issues/139)) to add a one-line "see ADR-0008 for the canonical bitemporal contract" cross-link and to add `valid_from` and `valid_to` to the payload-indexed list. ADR-0006 is unchanged in this PR.
+- **[`docs/schema.md`](../schema.md)** — the entity / edge schema reference adds a one-line "see ADR-0008 for bitemporal property semantics on Neo4j entities and edges; Postgres operational tables remain non-bitemporal per ADR-0008 §7" cross-link. The cross-link is the only edit `schema.md` takes in epic #97; the table definitions are unchanged because no Postgres column changes.
+- **[`docs/vision.md`](../vision.md)** §5.3 (line 71-77) and §11 (line 177) — both already name the bitemporal model. ADR-0008 makes the implementation contract explicit; the vision sections are not edited in this PR. A future cross-reference under `## 12. Reference documents` should list ADR-0008 alongside ADR-0005 and ADR-0006 once the ADRs index is introduced.
+- **[`docs/decisions/`](.) index** — when the `docs/decisions/README.md` index is introduced (recommended in ADR-0005 §Consequences-for-related-docs and ADR-0007 §Consequences-for-related-docs), ADR-0008 should be listed alongside ADR-0005, ADR-0006, ADR-0007 with a one-line summary: "Bitemporal schema for Neo4j entities and edges — property-versioned identity nodes with `:HAD_STATE` chains, open-closed intervals, `valid_to IS NULL` for still-valid".
 
 ## Links
 
 - Parent epic: [#97](https://github.com/100rd/Omniscience/issues/97)
 - This issue: [#128](https://github.com/100rd/Omniscience/issues/128)
-- Parallel sibling ADR: [#129](https://github.com/100rd/Omniscience/issues/129) — retention tiering policy and storage layout (ADR-0008)
+- Parallel sibling ADR: [#129](https://github.com/100rd/Omniscience/issues/129) — retention tiering policy and storage layout (ADR-0009)
 - Blocks: [#130](https://github.com/100rd/Omniscience/issues/130), [#131](https://github.com/100rd/Omniscience/issues/131), [#132](https://github.com/100rd/Omniscience/issues/132), [#133](https://github.com/100rd/Omniscience/issues/133), [#134](https://github.com/100rd/Omniscience/issues/134), [#137](https://github.com/100rd/Omniscience/issues/137), [#138](https://github.com/100rd/Omniscience/issues/138), [#139](https://github.com/100rd/Omniscience/issues/139)
 - Amends: [ADR-0005](0005-neo4j-as-graph-store.md) §Schema posture
 - Cross-store contract: [ADR-0006](0006-qdrant-as-vector-store.md) §Schema posture
