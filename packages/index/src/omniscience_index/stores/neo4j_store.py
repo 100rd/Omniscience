@@ -77,6 +77,11 @@ class Neo4jStoreConfig:
     connection_acquisition_timeout_seconds: float
     max_transaction_retry_time_seconds: float
     default_max_depth: int
+    # ADR-0008 §8 phase 2 — bitemporal write-path rollout flag.  Read once
+    # at adapter `__init__` and pinned onto the instance per ADR-0008's
+    # "consistency over flexibility" rollout rule (issue #131).  ``False``
+    # is the default that preserves PR #104's writer behaviour byte-for-byte.
+    bitemporal_enabled: bool = False
 
     @classmethod
     def from_settings(cls, settings: Any) -> Neo4jStoreConfig:
@@ -98,6 +103,9 @@ class Neo4jStoreConfig:
             ),
             max_transaction_retry_time_seconds=float(settings.neo4j_max_retry_time_seconds),
             default_max_depth=int(settings.neo4j_default_max_depth),
+            # ADR-0008 §8 — gates the writer changes from issue #131 only.
+            # Default 'disabled' means: writer behaves exactly as PR #104.
+            bitemporal_enabled=(str(settings.graph_bitemporal) == "enabled"),
         )
 
 
@@ -226,6 +234,169 @@ ON MATCH SET
     r.source_id = $source_id,
     r.metadata = $metadata,
     r.updated_at = $now
+"""
+
+
+# --- Bitemporal write Cypher (ADR-0008 §2 + §3, issue #131) ---------------
+#
+# These templates are activated when ``Neo4jStoreConfig.bitemporal_enabled``
+# is True (which mirrors ``Settings.graph_bitemporal == "enabled"``).  When
+# the flag is False, the legacy ``_UPSERT_ENTITY_CYPHER`` and
+# ``_UPSERT_EDGE_CYPHER_TEMPLATE`` above are used unchanged from PR #104 —
+# this is the "no regressions" contract from ADR-0008 §8 phase 2.
+#
+# Identity model: property-versioned identity-node + ``[:HAD_STATE]`` to
+# per-version ``(:EntityState)`` nodes (ADR-0008 §2).  The ``:Entity`` node
+# carries the **current** state mirror; each version is a ``:EntityState``
+# with its own validity window.
+#
+# State-change detection uses a Python-computed ``$state_fingerprint``
+# string — see ``_entity_state_fingerprint`` and ``_edge_state_fingerprint``.
+# Computing the fingerprint client-side (rather than concatenating in
+# Cypher) keeps the comparison deterministic for NULLs, list ordering, and
+# nested dicts, and gives us a single ``coalesce(n.state_fingerprint, "")
+# <> $state_fingerprint`` predicate to drive the conditional version bump.
+# That predicate is the no-op short-circuit per ADR-0008 §2 last paragraph
+# ("an upsert that does not change state is a no-op on the version chain").
+#
+# Atomicity (ADR-0008 §Negative-team #2): the previous-state end-date and
+# the new-state insert MUST land in the same transaction.  Cypher's
+# ``FOREACH(_ IN CASE WHEN cond THEN [1] ELSE [] END | ...)`` pattern is
+# the canonical idiom for conditional sub-writes inside a single MERGE
+# transaction — every write below sits inside the same ``tx.run`` call so
+# either all writes commit or none do.
+
+# Writer fingerprint property name on `:Entity`.  Not bitemporal itself —
+# it is operational metadata used solely for change detection.  Stored on
+# the identity node (mirror) so the comparison is one property read.
+_ENTITY_STATE_FINGERPRINT_PROP: Final[str] = "state_fingerprint"
+_EDGE_STATE_FINGERPRINT_PROP: Final[str] = "state_fingerprint"
+
+
+_UPSERT_ENTITY_BITEMPORAL_CYPHER: Final[str] = f"""
+// ADR-0008 §2 — property-versioned identity-node with [:HAD_STATE] chain.
+// One MERGE transaction; either all sub-writes commit or none do.
+MERGE (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $id}})
+ON CREATE SET
+    n.source_id = $source_id,
+    n.kind = $entity_type,
+    n.name = $name,
+    n.display_name = $display_name,
+    n.chunk_id = $chunk_id,
+    n.metadata = $metadata,
+    n.{_ENTITY_STATE_FINGERPRINT_PROP} = $state_fingerprint,
+    n.created_at = $now,
+    n.updated_at = $now,
+    n.valid_from = datetime($now),
+    n.valid_to = NULL,
+    n.recorded_at = datetime($now)
+WITH n,
+     // True iff this MERGE matched an existing node whose fingerprint
+     // disagrees with the incoming one.  On CREATE, fingerprint was just
+     // set so the predicate is False and no extra version is produced.
+     (
+         coalesce(n.{_ENTITY_STATE_FINGERPRINT_PROP}, '') <> $state_fingerprint
+         AND n.created_at <> $now
+     ) AS state_changed
+// End-date the previous still-open :EntityState (if any) when the state
+// changed.  ADR-0008 §2: previous valid_to becomes the new valid_from.
+FOREACH (_ IN CASE WHEN state_changed THEN [1] ELSE [] END |
+    SET n.kind = $entity_type,
+        n.source_id = $source_id,
+        n.name = $name,
+        n.display_name = $display_name,
+        n.chunk_id = $chunk_id,
+        n.metadata = $metadata,
+        n.{_ENTITY_STATE_FINGERPRINT_PROP} = $state_fingerprint,
+        n.updated_at = $now,
+        n.valid_from = datetime($now),
+        n.valid_to = NULL,
+        n.recorded_at = datetime($now)
+)
+WITH n, state_changed
+// End-date the previous open `[:HAD_STATE]` and `(:EntityState)` together.
+// `valid_to IS NULL` selects the still-current version; we close it to $now.
+CALL {{
+    WITH n, state_changed
+    MATCH (n)-[h:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
+    WHERE state_changed AND h.valid_to IS NULL AND s.valid_to IS NULL
+    SET h.valid_to = datetime($now),
+        s.valid_to = datetime($now)
+    RETURN count(s) AS closed
+}}
+WITH n, state_changed, closed
+// Insert the new :EntityState + [:HAD_STATE] iff (a) state changed OR
+// (b) this is a brand-new identity (first write).  Brand-new identities
+// have no incoming [:HAD_STATE] yet; we materialise the first version.
+CALL {{
+    WITH n, state_changed
+    OPTIONAL MATCH (n)-[:HAD_STATE]->(existing:{_ENTITY_STATE_LABEL})
+    WITH n, state_changed, count(existing) AS existing_count
+    WITH n, (state_changed OR existing_count = 0) AS need_new_state
+    FOREACH (_ IN CASE WHEN need_new_state THEN [1] ELSE [] END |
+        CREATE (s2:{_ENTITY_STATE_LABEL} {{
+            workspace_id: $workspace_id,
+            id: $id,
+            valid_from: datetime($now),
+            valid_to: NULL,
+            recorded_at: datetime($now),
+            kind: $entity_type,
+            source_id: $source_id,
+            name: $name,
+            display_name: $display_name,
+            chunk_id: $chunk_id,
+            metadata: $metadata
+        }})
+        CREATE (n)-[:HAD_STATE {{
+            workspace_id: $workspace_id,
+            valid_from: datetime($now),
+            valid_to: NULL,
+            recorded_at: datetime($now)
+        }}]->(s2)
+    )
+    RETURN count(*) AS _added
+}}
+RETURN n.id AS id, state_changed AS state_changed, closed AS closed_versions
+"""
+
+
+_UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE: Final[str] = f"""
+// ADR-0008 §3 — edges remain identity-to-identity; bitemporal triple lives
+// on the relationship.  Idempotent on no-change; end-dates the existing
+// open relationship + creates a new one when the fingerprint differs.
+MATCH (a:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $source_id_ent}})
+MATCH (b:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $target_id_ent}})
+// Find the still-current edge (valid_to IS NULL) of this type, if any.
+OPTIONAL MATCH (a)-[r_open:`{{edge_type}}`]->(b)
+WHERE r_open.workspace_id = $workspace_id AND r_open.valid_to IS NULL
+WITH a, b, r_open,
+     coalesce(r_open.{_EDGE_STATE_FINGERPRINT_PROP}, '') AS old_fp,
+     (r_open IS NOT NULL) AS has_open
+WITH a, b, r_open, has_open,
+     // brand-new edge OR fingerprint differs => state changed
+     (NOT has_open OR old_fp <> $state_fingerprint) AS state_changed
+// End-date the previous open edge when state changed.
+FOREACH (_ IN CASE WHEN state_changed AND has_open THEN [1] ELSE [] END |
+    SET r_open.valid_to = datetime($now),
+        r_open.updated_at = $now
+)
+WITH a, b, state_changed
+// Create a new versioned edge iff state_changed.
+FOREACH (_ IN CASE WHEN state_changed THEN [1] ELSE [] END |
+    CREATE (a)-[:`{{edge_type}}` {{
+        workspace_id: $workspace_id,
+        source_id: $source_id,
+        edge_type: $edge_type,
+        metadata: $metadata,
+        {_EDGE_STATE_FINGERPRINT_PROP}: $state_fingerprint,
+        created_at: $now,
+        updated_at: $now,
+        valid_from: datetime($now),
+        valid_to: NULL,
+        recorded_at: datetime($now)
+    }}]->(b)
+)
+RETURN state_changed AS state_changed
 """
 
 # Batch-replace entities+edges for a single source.  Mirrors the
@@ -468,6 +639,16 @@ _ensure_workspace_predicate(
     _BACKFILL_ENTITY_STATE_NODES_CYPHER, "_BACKFILL_ENTITY_STATE_NODES_CYPHER"
 )
 _ensure_workspace_predicate(_BACKFILL_EDGE_PROPS_CYPHER, "_BACKFILL_EDGE_PROPS_CYPHER")
+# ADR-0008 §Consequences-security #1 (issue #131) — every bitemporal write
+# template is workspace-scoped on every node, every state node, and every
+# relationship.  Drop the predicate, the module fails to import.  These
+# templates introduce `:EntityState` as a new node label and `[:HAD_STATE]`
+# as a new relationship — both are new attack surfaces, so workspace_id
+# must be on every read AND every write of those shapes.
+_ensure_workspace_predicate(_UPSERT_ENTITY_BITEMPORAL_CYPHER, "_UPSERT_ENTITY_BITEMPORAL_CYPHER")
+_ensure_workspace_predicate(
+    _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE, "_UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -554,6 +735,94 @@ def _coerce_metadata(value: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# State-change fingerprinting (ADR-0008 §2 — issue #131)
+# ---------------------------------------------------------------------------
+#
+# The bitemporal writer compares the incoming state to the still-current
+# state on the `:Entity` mirror to decide whether to emit a new version.
+# Doing this in Python (rather than concatenating in Cypher) is more
+# robust to NULL handling, list ordering, and nested-dict serialisation
+# differences across the driver.  The fingerprint is stored as a string
+# property on the `:Entity` mirror and on each open relationship; a single
+# string-equality predicate inside the Cypher template drives the
+# conditional version bump.
+#
+# The fingerprint covers exactly the fields that ADR-0008 §2 names as
+# "state-at-this-version" — state changes that callers can observe via
+# `as_of` reads.  Operational metadata that is not bitemporal (e.g. the
+# pre-bitemporal `created_at`/`updated_at` columns kept for backward
+# compatibility) is intentionally excluded.
+
+# SHA-256 hex digest length — used for the fingerprint property.  Picked
+# because it is collision-resistant for the field-set sizes we see and
+# the digest length is bounded so the index footprint is predictable.
+_FINGERPRINT_DIGEST_BYTES: Final[int] = 32  # SHA-256 output
+
+
+def _stable_repr(value: Any) -> str:
+    """Stable string repr for a primitive / dict / list — sorted keys.
+
+    Python's ``repr`` is not stable across dict insertion order on values
+    that round-trip through JSON (e.g. metadata coming from a connector
+    YAML file).  We sort keys at every level so the fingerprint is purely
+    a function of *content*, not iteration order.
+    """
+    if value is None:
+        return "None"
+    if isinstance(value, dict):
+        items = sorted(((str(k), _stable_repr(v)) for k, v in value.items()))
+        return "{" + ",".join(f"{k}:{v}" for k, v in items) + "}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_stable_repr(v) for v in value) + "]"
+    return repr(value)
+
+
+def _entity_state_fingerprint(params: dict[str, Any]) -> str:
+    """Compute the entity-state fingerprint for ``params``.
+
+    Covers the fields that ADR-0008 §2 names as the versioned snapshot:
+    ``kind``, ``name``, ``display_name``, ``source_id``, ``chunk_id``,
+    ``metadata``.  ``id`` and ``workspace_id`` are identity, not state —
+    excluded.  ``created_at`` / ``updated_at`` are operational, not
+    bitemporal — excluded.
+    """
+    import hashlib
+
+    payload = "|".join(
+        (
+            _stable_repr(params.get("entity_type")),
+            _stable_repr(params.get("name")),
+            _stable_repr(params.get("display_name")),
+            _stable_repr(params.get("source_id")),
+            _stable_repr(params.get("chunk_id")),
+            _stable_repr(params.get("metadata")),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _edge_state_fingerprint(params: dict[str, Any]) -> str:
+    """Compute the edge-state fingerprint.
+
+    Covers ``edge_type``, ``source_id`` (origin document/source), and
+    ``metadata``.  Endpoints (``source_id_ent`` / ``target_id_ent``) and
+    ``workspace_id`` are part of the relationship identity (the MERGE key)
+    so they are excluded — a change there is not a "state change", it is
+    a different relationship.
+    """
+    import hashlib
+
+    payload = "|".join(
+        (
+            _stable_repr(params.get("edge_type")),
+            _stable_repr(params.get("source_id")),
+            _stable_repr(params.get("metadata")),
+        )
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+# ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
 
@@ -582,6 +851,13 @@ class Neo4jGraphStore:
             max_transaction_retry_time=(config.max_transaction_retry_time_seconds),
         )
         self._bootstrapped: bool = False
+        # ADR-0008 §8 phase 2 + issue #131 — read once at __init__ and pin
+        # onto the instance.  "Consistency over flexibility": runtime flips
+        # require restart, which is by design.  Mirrors ADR-0009 §1's
+        # "eviction operates on `recorded_at`" stance — a writer that flips
+        # mid-process would publish two versioning regimes into the same
+        # graph, which the retention worker cannot reconcile.
+        self._bitemporal_enabled: bool = bool(config.bitemporal_enabled)
 
     async def connect(self) -> None:
         """Verify connectivity and run the idempotent schema bootstrap."""
@@ -631,6 +907,7 @@ class Neo4jGraphStore:
                 source_id,
                 entities,
                 edges,
+                self._bitemporal_enabled,
             )
         log.info(
             "neo4j_upsert_graph",
@@ -673,32 +950,55 @@ class Neo4jGraphStore:
         source_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        bitemporal_enabled: bool,
     ) -> None:
-        """Transaction body for :meth:`upsert_graph` (idempotent replace)."""
+        """Transaction body for :meth:`upsert_graph` (idempotent replace).
+
+        ``bitemporal_enabled`` is the per-instance flag forwarded from
+        :meth:`upsert_graph`.  Static method by design (Neo4j managed-tx
+        retry passes positional args to the callable), so the flag has to
+        come in through the parameter list rather than ``self``.
+        """
         now = datetime.now(UTC).isoformat()
         # Replace-by-source: drop old entities (and their edges) for this
         # source, then re-insert.  Mirrors IndexWriter.upsert_graph.
+        # NOTE: ADR-0008 §3 says the writer no longer DELETEs once the
+        # bitemporal flag is on — but per issue #131's "Non-goals", the
+        # `_DELETE_BY_SOURCE_CYPHER` template is owned by Wave 5 (#137)
+        # and is intentionally left alone in this PR.  The writer keeps
+        # delete-by-source semantics until that wave lands.
         await tx.run(
             _DELETE_BY_SOURCE_CYPHER,
             {_WRITE_WORKSPACE_PARAM: str(workspace_id), "source_id": str(source_id)},
         )
 
+        entity_cypher = (
+            _UPSERT_ENTITY_BITEMPORAL_CYPHER if bitemporal_enabled else _UPSERT_ENTITY_CYPHER
+        )
+
         name_to_id: dict[str, uuid.UUID] = {}
         for ext_ent in entities:
             params = _entity_to_params(ext_ent, source_id, workspace_id, now)
-            await tx.run(_UPSERT_ENTITY_CYPHER, params)
+            if bitemporal_enabled:
+                params["state_fingerprint"] = _entity_state_fingerprint(params)
+            await tx.run(entity_cypher, params)
             name_to_id[str(params["name"])] = uuid.UUID(str(params["id"]))
             display = str(params.get("display_name") or "")
             if display:
                 name_to_id.setdefault(display, uuid.UUID(str(params["id"])))
 
+        edge_template = (
+            _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE
+            if bitemporal_enabled
+            else _UPSERT_EDGE_CYPHER_TEMPLATE
+        )
         for ext_edge in edges:
             edge_params = _edge_to_params(ext_edge, source_id, workspace_id, name_to_id, now)
             if edge_params is None:
                 continue
-            rendered = _UPSERT_EDGE_CYPHER_TEMPLATE.replace(
-                "{edge_type}", str(edge_params["edge_type"])
-            )
+            if bitemporal_enabled:
+                edge_params["state_fingerprint"] = _edge_state_fingerprint(edge_params)
+            rendered = edge_template.replace("{edge_type}", str(edge_params["edge_type"]))
             await tx.run(rendered, edge_params)
 
     async def upsert_entity(
@@ -707,7 +1007,18 @@ class Neo4jGraphStore:
         entity: EntityUpsert,
         workspace_id: uuid.UUID,
     ) -> None:
-        """Upsert a single entity within ``workspace_id`` (idempotent)."""
+        """Upsert a single entity within ``workspace_id`` (idempotent).
+
+        Behaviour depends on the bitemporal flag pinned at ``__init__``:
+
+        - ``bitemporal_enabled=False`` (default during rollout): emits the
+          PR #104 MERGE shape verbatim — no version chain accumulates.
+        - ``bitemporal_enabled=True`` (post-cutover): emits the ADR-0008
+          §2 versioning shape — the previous ``(:EntityState)`` is
+          end-dated and a new one is created iff the state fingerprint
+          differs from the still-current version on the identity mirror.
+          A no-op upsert (same content) does not produce a new version.
+        """
         now = datetime.now(UTC).isoformat()
         params: dict[str, Any] = {
             _WRITE_WORKSPACE_PARAM: str(workspace_id),
@@ -720,8 +1031,9 @@ class Neo4jGraphStore:
             "metadata": _coerce_metadata(entity.metadata),
             "now": now,
         }
+        cypher = self._select_entity_upsert_cypher(params)
         async with self._driver.session(database=self._config.database) as session:
-            await session.execute_write(_run_write_stmt, _UPSERT_ENTITY_CYPHER, params)
+            await session.execute_write(_run_write_stmt, cypher, params)
 
     async def upsert_edge(
         self,
@@ -729,7 +1041,10 @@ class Neo4jGraphStore:
         edge: EdgeUpsert,
         workspace_id: uuid.UUID,
     ) -> None:
-        """Upsert a single edge within ``workspace_id`` (idempotent)."""
+        """Upsert a single edge within ``workspace_id`` (idempotent).
+
+        See :meth:`upsert_entity` for the flag-gated behaviour split.
+        """
         edge_type = edge.edge_type
         if not _EDGE_TYPE_REGEX.match(edge_type):
             raise ValueError(f"invalid_edge_type:{edge_type}")
@@ -743,9 +1058,28 @@ class Neo4jGraphStore:
             "metadata": _coerce_metadata(edge.metadata),
             "now": now,
         }
-        rendered = _UPSERT_EDGE_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
+        rendered = self._select_edge_upsert_cypher(params, edge_type)
         async with self._driver.session(database=self._config.database) as session:
             await session.execute_write(_run_write_stmt, rendered, params)
+
+    def _select_entity_upsert_cypher(self, params: dict[str, Any]) -> str:
+        """Pick legacy or bitemporal entity upsert Cypher; mutate params if needed.
+
+        Mutates ``params`` in place to add the ``state_fingerprint`` key
+        when the bitemporal path is active.  Keeps the call sites short
+        (``upsert_entity`` and ``_run_upsert_graph`` share this).
+        """
+        if not self._bitemporal_enabled:
+            return _UPSERT_ENTITY_CYPHER
+        params["state_fingerprint"] = _entity_state_fingerprint(params)
+        return _UPSERT_ENTITY_BITEMPORAL_CYPHER
+
+    def _select_edge_upsert_cypher(self, params: dict[str, Any], edge_type: str) -> str:
+        """Pick legacy or bitemporal edge upsert Cypher; render edge-type slot."""
+        if not self._bitemporal_enabled:
+            return _UPSERT_EDGE_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
+        params["state_fingerprint"] = _edge_state_fingerprint(params)
+        return _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
 
     async def delete_tombstoned(self) -> int:
         """Hard-delete tombstoned entities; return the count removed."""
