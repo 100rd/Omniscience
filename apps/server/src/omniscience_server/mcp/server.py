@@ -28,6 +28,10 @@ from omniscience_core.auth.middleware import _lookup_token
 from omniscience_core.auth.scopes import Scope, check_scopes
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
+from omniscience_core.telemetry.clients import (
+    ANONYMOUS_TOKEN_ID,
+    get_client_registry,
+)
 
 from omniscience_server.mcp.tools import (
     mcp_get_document,
@@ -105,6 +109,23 @@ def _require_scope(token: ApiToken | None, scope: Scope) -> None:
         raise ValueError(f"forbidden:Token lacks required scope '{scope}'")
 
 
+def _record_tool_invocation(*, tool_name: str, token: ApiToken | None) -> None:
+    """Record a single MCP tools/call invocation in the telemetry registry.
+
+    Called from each tool handler *after* the scope check passes, so
+    only authorised invocations count.  Failures inside the registry
+    are swallowed — telemetry must never take down a real MCP request.
+    """
+    token_id = str(token.id) if token is not None else ANONYMOUS_TOKEN_ID
+    try:
+        get_client_registry().record_tool_invocation(
+            tool_name=tool_name,
+            token_id=token_id,
+        )
+    except Exception as exc:  # pragma: no cover - defensive only
+        log.warning("mcp_tool_invocation_record_failed", error=str(exc))
+
+
 # ---------------------------------------------------------------------------
 # Tool: search
 # ---------------------------------------------------------------------------
@@ -138,6 +159,7 @@ async def search(
     """
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="search", token=token)
     workspace_id = get_workspace_id(token) if token is not None else None
 
     return await mcp_search(
@@ -170,6 +192,7 @@ async def get_document(
     """get_document tool — requires scope 'search'."""
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="get_document", token=token)
 
     try:
         return await mcp_get_document(app=_get_app(), document_id=document_id)
@@ -208,6 +231,7 @@ async def get_related_entities(
     """
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="get_related_entities", token=token)
     # _require_scope raised if token is None, so it is non-None here.
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -249,6 +273,7 @@ async def list_sources(
     """list_sources tool — requires scope 'sources:read'."""
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.sources_read)
+    _record_tool_invocation(tool_name="list_sources", token=token)
 
     return await mcp_list_sources(app=_get_app())
 
@@ -269,6 +294,7 @@ async def source_stats(
     """source_stats tool — requires scope 'sources:read'."""
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.sources_read)
+    _record_tool_invocation(tool_name="source_stats", token=token)
 
     try:
         return await mcp_source_stats(app=_get_app(), source_id=source_id)

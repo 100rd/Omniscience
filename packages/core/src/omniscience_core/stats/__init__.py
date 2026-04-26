@@ -32,7 +32,12 @@ Design rules
 from __future__ import annotations
 
 from omniscience_core.stats.cache import STATS_CACHE_TTL_SECONDS, TTLCache
+from omniscience_core.stats.clients import (
+    CLIENTS_STATS_CACHE_TTL_SECONDS,
+    ClientsStatsService,
+)
 from omniscience_core.stats.models import (
+    ClientsStatsResponse,
     EdgesByTypeResponse,
     EdgeTypeHistogramEntry,
     EntitiesByKindResponse,
@@ -40,11 +45,16 @@ from omniscience_core.stats.models import (
     SourcesStatsResponse,
     SourceStatsRow,
     StatsOverview,
+    TokenClientStats,
+    ToolUsageEntry,
 )
 from omniscience_core.stats.service import StatsService
 
 __all__ = [
+    "CLIENTS_STATS_CACHE_TTL_SECONDS",
     "STATS_CACHE_TTL_SECONDS",
+    "ClientsStatsResponse",
+    "ClientsStatsService",
     "EdgeTypeHistogramEntry",
     "EdgesByTypeResponse",
     "EntitiesByKindResponse",
@@ -54,4 +64,6 @@ __all__ = [
     "StatsOverview",
     "StatsService",
     "TTLCache",
+    "TokenClientStats",
+    "ToolUsageEntry",
 ]
