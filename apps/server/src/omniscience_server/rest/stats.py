@@ -42,6 +42,8 @@ from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
 from omniscience_core.stats import (
+    ClientsStatsResponse,
+    ClientsStatsService,
     EdgesByTypeResponse,
     EntitiesByKindResponse,
     SourcesStatsResponse,
@@ -208,6 +210,67 @@ async def stats_entities_by_kind(
         "stats_entities_by_kind",
         workspace_id=str(workspace_id),
         kinds=len(response.entries),
+    )
+    return response
+
+
+def _resolve_clients_service(request: Request) -> ClientsStatsService:
+    """Resolve a :class:`ClientsStatsService` from app state.
+
+    Cached on ``request.app.state.clients_stats_service`` so the 5-second
+    TTL cache survives across requests.  When not pre-wired (test path)
+    we lazily build one from the session factory; the global telemetry
+    registry is shared by every instance.
+    """
+    existing = getattr(request.app.state, "clients_stats_service", None)
+    if isinstance(existing, ClientsStatsService):
+        return existing
+
+    factory = getattr(request.app.state, "db_session_factory", None)
+    if factory is None:
+        log.warning("clients_stats_service_unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "service_unavailable",
+                "message": "Clients-stats backend not available",
+            },
+        )
+
+    service = ClientsStatsService(db_session_factory=factory)
+    request.app.state.clients_stats_service = service
+    return service
+
+
+@router.get(
+    "/stats/clients",
+    response_model=ClientsStatsResponse,
+    summary="Connected clients + token usage telemetry",
+    dependencies=[_stats_scope_dep],
+)
+async def stats_clients(
+    request: Request,
+    token: ApiToken = _current_token_dep,
+) -> ClientsStatsResponse:
+    """Connected-clients telemetry rollup (issue #113).
+
+    Returns: active MCP sessions, sessions in the last hour, per-token
+    request volume (15m + 24h windows), and the top-N most-invoked
+    tools in the last hour — all workspace-scoped: only tokens that
+    belong to the caller's workspace are listed.
+
+    Requires scope: ``stats:read``
+    Requires: token scoped to a workspace (fails closed with 403 otherwise).
+    """
+    workspace_id = _require_workspace(token)
+    service = _resolve_clients_service(request)
+    response = await service.clients(workspace_id=workspace_id)
+    log.info(
+        "stats_clients",
+        workspace_id=str(workspace_id),
+        tokens=len(response.tokens),
+        mcp_sessions_active=response.mcp_sessions_active,
+        top_tools=len(response.top_tools_last_hour),
     )
     return response
 

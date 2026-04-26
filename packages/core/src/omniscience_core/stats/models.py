@@ -1,8 +1,9 @@
-"""Pydantic response models for the stats sub-package (issue #111).
+"""Pydantic response models for the stats sub-package (issue #111, #113).
 
 These types are shared between :class:`omniscience_core.stats.StatsService`
-and the REST layer so request / response payloads stay strictly typed end
-to end (no ``dict[str, Any]`` leaks).
+/ :class:`omniscience_core.stats.ClientsStatsService` and the REST layer so
+request / response payloads stay strictly typed end to end (no
+``dict[str, Any]`` leaks).
 
 The field naming mirrors the dashboard column labels in the admin UI (epic
 #109) and is part of the public REST contract.  Adding a field is safe;
@@ -12,6 +13,7 @@ removing or renaming one is a breaking change.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from pydantic import BaseModel, Field
 
@@ -110,7 +112,52 @@ class EdgesByTypeResponse(BaseModel):
     total: int = Field(..., ge=0)
 
 
+class TokenClientStats(BaseModel):
+    """One row of the connected-clients table — per token (issue #113).
+
+    Used by ``GET /api/v1/stats/clients``.  The ``token_id`` field is the
+    canonical UUID of the :class:`ApiToken`.  ``last_seen_at`` is the
+    timestamp of the most recent request the in-process telemetry has
+    observed; ``None`` means the token has been issued but has not made a
+    request since process start.
+
+    The 24h figure is approximated from the in-process rolling-bucket
+    state — see :mod:`omniscience_core.telemetry.clients` for the
+    rationale (no external Prometheus / TSDB available).
+    """
+
+    token_id: uuid.UUID
+    name: str
+    last_seen_at: datetime | None
+    requests_last_15m: int = Field(..., ge=0)
+    requests_last_24h: int = Field(..., ge=0)
+
+
+class ToolUsageEntry(BaseModel):
+    """One bar of the top-tools-last-hour histogram (issue #113)."""
+
+    tool_name: str
+    invocations_last_hour: int = Field(..., ge=0)
+
+
+class ClientsStatsResponse(BaseModel):
+    """Wire format for ``GET /api/v1/stats/clients`` (issue #113).
+
+    Workspace-scoped: ``tokens`` only contains tokens that belong to the
+    caller's workspace.  ``mcp_sessions_active`` and ``last_hour`` are
+    *process-global* (we cannot attribute a session to a workspace until
+    its first authenticated tool call); the per-tool histogram is also
+    process-global because tool names are not workspace-secret.
+    """
+
+    mcp_sessions_active: int = Field(..., ge=0)
+    mcp_sessions_last_hour: int = Field(..., ge=0)
+    tokens: list[TokenClientStats]
+    top_tools_last_hour: list[ToolUsageEntry]
+
+
 __all__ = [
+    "ClientsStatsResponse",
     "EdgeTypeHistogramEntry",
     "EdgesByTypeResponse",
     "EntitiesByKindResponse",
@@ -118,4 +165,6 @@ __all__ = [
     "SourceStatsRow",
     "SourcesStatsResponse",
     "StatsOverview",
+    "TokenClientStats",
+    "ToolUsageEntry",
 ]

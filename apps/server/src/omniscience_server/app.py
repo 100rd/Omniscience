@@ -49,7 +49,7 @@ from omniscience_server.freshness_worker import FreshnessWorker
 from omniscience_server.ingestion.events import DocumentChangeEvent
 from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
-from omniscience_server.middleware import TracingMiddleware
+from omniscience_server.middleware import TelemetryMiddleware, TracingMiddleware
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.routes import health_router, tokens_router
 from omniscience_server.scheduler import SchedulerWorker
@@ -382,7 +382,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # MCP streamable-http endpoint
     app.mount("/mcp", create_mcp_asgi_app(app))
 
-    # Middleware (applied in reverse registration order by Starlette)
+    # Middleware (applied in reverse registration order by Starlette).
+    # Order matters: TelemetryMiddleware is registered FIRST so it sits
+    # innermost (closest to the route), giving it access to the populated
+    # ``request.state.api_token`` set by the auth dependency. The outer
+    # TracingMiddleware records latency and binds log context.
+    app.add_middleware(TelemetryMiddleware)
     app.add_middleware(TracingMiddleware)
 
     # Exception handlers for spec-compliant error responses

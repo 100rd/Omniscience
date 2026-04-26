@@ -96,6 +96,10 @@ async def get_current_token(
         await _update_last_used(db, token)
         await db.commit()
 
+        # Stash the resolved token on request.state so downstream middleware
+        # (e.g. TelemetryMiddleware in apps/server, issue #113) can attribute
+        # the response to a token without re-running the lookup.
+        request.state.api_token = token
         return token
 
 
