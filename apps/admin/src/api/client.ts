@@ -158,6 +158,84 @@ export interface SourcesStatsResponse {
   total: number;
 }
 
+/*
+ * Wire format for `GET /api/v1/stats/overview` (Issue #111).
+ *
+ * Mirrors the Pydantic `StatsOverview` defined in
+ * `packages/core/src/omniscience_core/stats/models.py`. All counts are
+ * scoped to the caller's workspace.
+ */
+export interface StatsOverview {
+  sources: number;
+  active_sources: number;
+  documents: number;
+  active_documents: number;
+  tombstoned_documents: number;
+  chunks: number;
+  entities: number;
+  edges_by_type: Record<string, number>;
+  total_indexed_bytes: number;
+  documents_added_24h: number;
+  documents_updated_24h: number;
+  documents_tombstoned_24h: number;
+}
+
+/*
+ * Wire format for `GET /api/v1/stats/entities-by-kind` (Issue #111).
+ * Mirrors `KindHistogramEntry` / `EntitiesByKindResponse`.
+ */
+export interface KindHistogramEntry {
+  kind: string;
+  count: number;
+}
+
+export interface EntitiesByKindResponse {
+  entries: KindHistogramEntry[];
+  total: number;
+}
+
+/*
+ * Wire format for `GET /api/v1/stats/edges-by-type` (Issue #111).
+ * Mirrors `EdgeTypeHistogramEntry` / `EdgesByTypeResponse`.
+ */
+export interface EdgeTypeHistogramEntry {
+  edge_type: string;
+  count: number;
+}
+
+export interface EdgesByTypeResponse {
+  entries: EdgeTypeHistogramEntry[];
+  total: number;
+}
+
+/*
+ * Wire format for `GET /api/v1/stats/clients` (Issue #113).
+ *
+ * Mirrors the Pydantic `ClientsStatsResponse`. `mcp_sessions_active` and
+ * `mcp_sessions_last_hour` are process-global; `tokens` is workspace-scoped.
+ * `last_seen_at` is null when the token has been issued but has not made a
+ * request since process start.
+ */
+export interface TokenClientStats {
+  token_id: string;
+  name: string;
+  last_seen_at: string | null;
+  requests_last_15m: number;
+  requests_last_24h: number;
+}
+
+export interface ToolUsageEntry {
+  tool_name: string;
+  invocations_last_hour: number;
+}
+
+export interface ClientsStatsResponse {
+  mcp_sessions_active: number;
+  mcp_sessions_last_hour: number;
+  tokens: TokenClientStats[];
+  top_tools_last_hour: ToolUsageEntry[];
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -298,6 +376,45 @@ export class ApiClient {
     return this.request<SourcesStatsResponse>(
       "GET",
       "/api/v1/stats/sources",
+      undefined,
+      signal
+    );
+  }
+
+  async statsOverview(signal?: AbortSignal): Promise<StatsOverview> {
+    return this.request<StatsOverview>(
+      "GET",
+      "/api/v1/stats/overview",
+      undefined,
+      signal
+    );
+  }
+
+  async statsEntitiesByKind(
+    signal?: AbortSignal
+  ): Promise<EntitiesByKindResponse> {
+    return this.request<EntitiesByKindResponse>(
+      "GET",
+      "/api/v1/stats/entities-by-kind",
+      undefined,
+      signal
+    );
+  }
+
+  async statsEdgesByType(signal?: AbortSignal): Promise<EdgesByTypeResponse> {
+    return this.request<EdgesByTypeResponse>(
+      "GET",
+      "/api/v1/stats/edges-by-type",
+      undefined,
+      signal
+    );
+  }
+
+  // Stats (Issue #113)
+  async statsClients(signal?: AbortSignal): Promise<ClientsStatsResponse> {
+    return this.request<ClientsStatsResponse>(
+      "GET",
+      "/api/v1/stats/clients",
       undefined,
       signal
     );

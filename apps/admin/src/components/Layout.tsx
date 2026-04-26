@@ -58,9 +58,22 @@ export function Layout({ children }: LayoutProps) {
         </div>
       </aside>
 
-      {/* Main content */}
+      {/* Main content
+       *
+       * The container caps at `max-w-screen-2xl` (= 1536px). On a 1440px
+       * monitor minus the 224px sidebar that leaves 1216px of usable
+       * content area; on 1920 it's 1696px (still room to spare under
+       * the cap); on 2560 it's 2336px and the cap kicks in to keep
+       * line-lengths readable on ultra-wide. The dashboard's 12-col
+       * grid (Issue #114) splits at the `xl` (>= 1280) breakpoint, so
+       * the panels reach their 7/5 layout on every supported width.
+       *
+       * Other pages were sized for `max-w-6xl` (1152px) and look fine
+       * inside the wider container — none of them hard-rely on the
+       * narrower max — verified by reading through each /pages file.
+       */}
       <main className="flex-1 overflow-auto bg-surface">
-        <div className="max-w-6xl mx-auto px-6 py-8">{children}</div>
+        <div className="max-w-screen-2xl mx-auto px-6 py-8">{children}</div>
       </main>
     </div>
   );
