@@ -75,3 +75,76 @@ SCHEDULER_CHECK_DURATION_SECONDS: Histogram = Histogram(
     documentation="Wall-clock time in seconds for a single scheduler check-and-trigger cycle.",
     buckets=(0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0),
 )
+
+# ---------------------------------------------------------------------------
+# Retention worker metrics (ADR-0009 §8, issue #135)
+# ---------------------------------------------------------------------------
+#
+# Four metric families specified verbatim in ADR-0009 §8:
+#   * `omniscience_graph_records_total{tier, store}` — gauge, per-tier
+#     per-store record count, scraped after each retention run.
+#   * `omniscience_retention_eviction_total{transition, store}` — counter,
+#     increments per record evicted.
+#   * `omniscience_retention_worker_duration_seconds{phase, store}` —
+#     histogram, per-phase per-store wall time.
+#   * `omniscience_retention_worker_lag_seconds` — gauge, wall time
+#     since the oldest `recorded_at`-overdue record was evicted.
+#
+# SLO: lag stays below 24 hours steady-state; >7d is P1 (existing
+# freshness-style alert path).
+
+# Per-tier per-store record count (gauge).  Tier label values:
+#   "hot"     — live store, full bitemporal fidelity
+#   "warm"    — :EntitySnapshot:Daily rows in same Neo4j db
+#   "archive" — Parquet on object storage (always 0 for store=qdrant)
+# Store label values: "neo4j" | "qdrant".
+RETENTION_GRAPH_RECORDS_TOTAL: Gauge = Gauge(
+    name="omniscience_graph_records_total",
+    documentation=(
+        "Per-tier per-store record count, scraped after each retention run "
+        "(ADR-0009 §8). Set by the retention worker on every successful tick."
+    ),
+    labelnames=["tier", "store"],
+)
+
+# Total records evicted, partitioned by transition and store (counter).
+# Transition label values:
+#   "hot_to_warm"     — :EntityState/edge to :EntitySnapshot:Daily
+#   "warm_to_archive" — :EntitySnapshot:Daily to S3 parquet
+# Store label values: "neo4j" | "qdrant".
+RETENTION_EVICTION_TOTAL: Counter = Counter(
+    name="omniscience_retention_eviction_total",
+    documentation=(
+        "Total records evicted by tier transition (ADR-0009 §8). "
+        "Increments per record on the move phase of every successful run."
+    ),
+    labelnames=["transition", "store"],
+)
+
+# Per-phase per-store retention worker duration (histogram).
+# Phase label values: "read" | "mark" | "move"  (ADR-0009 §3 read-then-
+# mark-then-move).
+# Store label values: "neo4j" | "qdrant".
+RETENTION_WORKER_DURATION_SECONDS: Histogram = Histogram(
+    name="omniscience_retention_worker_duration_seconds",
+    documentation=(
+        "Wall-clock time in seconds for one phase (read/mark/move) of the "
+        "retention worker against one store, per workspace iteration "
+        "(ADR-0009 §8). Buckets cover 10ms to 5min — the worker should "
+        "complete a full per-workspace per-phase cycle inside this band."
+    ),
+    labelnames=["phase", "store"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0),
+)
+
+# Retention worker lag in seconds (gauge).  Wall time since the oldest
+# `recorded_at`-overdue record was evicted, aggregated as `max` for the
+# deployment-wide alert.  ADR-0009 §8 SLO: <24h steady; >7d is P1.
+RETENTION_WORKER_LAG_SECONDS: Gauge = Gauge(
+    name="omniscience_retention_worker_lag_seconds",
+    documentation=(
+        "Wall-clock seconds since the oldest record overdue for eviction "
+        "was last evicted, deployment-wide max (ADR-0009 §8). SLO: <24h "
+        "steady; >7d trips a P1 alert via the freshness alert path."
+    ),
+)

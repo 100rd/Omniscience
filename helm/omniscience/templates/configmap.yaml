@@ -21,3 +21,23 @@ data:
   {{- end }}
   DATABASE_URL: {{ include "omniscience.databaseUrl" . | quote }}
   NATS_URL: {{ include "omniscience.natsUrl" . | quote }}
+  # Retention worker (ADR-0009, issue #135).  Global-only boundaries
+  # per ADR-0009 §10; per-tenant overrides are out of scope for v1.
+  RETENTION_ENABLED: {{ .Values.retention.enabled | toString | quote }}
+  RETENTION_HOT_DAYS: {{ .Values.retention.hotDays | toString | quote }}
+  RETENTION_WARM_DAYS: {{ .Values.retention.warmDays | toString | quote }}
+  RETENTION_ARCHIVE_YEARS: {{ .Values.retention.archiveYears | toString | quote }}
+  RETENTION_TICK_SECONDS: {{ .Values.retention.tickSeconds | toString | quote }}
+  RETENTION_DRY_RUN: {{ .Values.retention.dryRun | toString | quote }}
+  RETENTION_BATCH_SIZE: {{ .Values.retention.batchSize | toString | quote }}
+  RETENTION_SAMPLE_SIZE: {{ .Values.retention.sampleSize | toString | quote }}
+  {{- if .Values.retention.archiveBucket }}
+  RETENTION_ARCHIVE_BUCKET: {{ .Values.retention.archiveBucket | quote }}
+  {{- end }}
+  {{- if .Values.retention.archiveKmsKeyArn }}
+  RETENTION_ARCHIVE_KMS_KEY_ARN: {{ .Values.retention.archiveKmsKeyArn | quote }}
+  {{- end }}
+  {{- if .Values.retention.archiveS3EndpointUrl }}
+  RETENTION_ARCHIVE_S3_ENDPOINT_URL: {{ .Values.retention.archiveS3EndpointUrl | quote }}
+  {{- end }}
+  RETENTION_ARCHIVE_S3_REGION: {{ .Values.retention.archiveS3Region | quote }}

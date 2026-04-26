@@ -270,6 +270,121 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Retention worker (ADR-0009 §3 / §10, issue #135) ---
+    #
+    # Tier boundaries are global-only in v1 per ADR-0009 §10.  Per-tenant
+    # overrides are explicitly out of scope for this PR; the migration path
+    # (push the override into the workspaces table) is documented for the
+    # first customer ask.  Helm values render these as env vars; see
+    # ``helm/omniscience/values.yaml`` ``retention:`` block.
+    retention_hot_days: int = Field(
+        default=90,
+        ge=1,
+        description=(
+            "Hot tier retention boundary in days (ADR-0009 §1 / §10). "
+            "EntityState rows + edges + chunks with `recorded_at < now - hot_days` "
+            "are evicted from hot to warm. Default 90 days per Vision §5.3."
+        ),
+    )
+    retention_warm_days: int = Field(
+        default=365,
+        ge=1,
+        description=(
+            "Warm tier retention boundary in days (ADR-0009 §1 / §10). "
+            "EntitySnapshot:Daily rows with `snapshot_date < now - warm_days` "
+            "are evicted from warm to archive (Parquet on object storage). "
+            "Default 365 days (cumulative — not warm window length) per Vision §5.3."
+        ),
+    )
+    retention_archive_years: int = Field(
+        default=7,
+        ge=0,
+        description=(
+            "Archive retention horizon in years (ADR-0009 §1). Beyond this, "
+            "snapshots are deleted by lifecycle rule on the bucket — the "
+            "worker does NOT enforce archive expiry; that is the bucket's "
+            "concern. Default 7 years per ADR-0009 §1."
+        ),
+    )
+    retention_tick_seconds: int = Field(
+        default=21600,  # 6 * 3600 — see RETENTION_TICK_SECONDS_DEFAULT
+        ge=60,
+        description=(
+            "Retention worker tick interval in wall-clock seconds (ADR-0009 §3). "
+            "Default 21600 (6 hours). Lower values increase Neo4j write pressure "
+            "without improving SLO compliance materially under the 24h lag SLO."
+        ),
+    )
+    retention_batch_size: int = Field(
+        default=500,
+        ge=1,
+        le=10000,
+        description=(
+            "Maximum rows touched per Neo4j transaction during eviction "
+            "(ADR-0009 §3 read-then-mark-then-move). Keeps individual "
+            "transactions well under Neo4j's default 30s tx timeout."
+        ),
+    )
+    retention_dry_run: bool = Field(
+        default=False,
+        description=(
+            "Dry-run mode for the retention worker (ADR-0009 §3). When True, "
+            "the worker reports eligible counts and a sampled record set "
+            "via the admin REST endpoint and structured logs but mutates "
+            "neither Neo4j nor Qdrant. Required for ops review before the "
+            "first live activation per deployment."
+        ),
+    )
+    retention_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for the retention worker. Defaults to True so a "
+            "stock deployment runs with the ADR-0009 tiering posture; set "
+            "False only for environments where retention is intentionally "
+            "deferred (e.g. CI fixtures, single-shot integration tests)."
+        ),
+    )
+    retention_archive_bucket: str | None = Field(
+        default=None,
+        description=(
+            "S3-compatible bucket name for archive parquet writes "
+            "(ADR-0009 §7 storage layout). REQUIRED in non-dev: when None, "
+            "warm-to-archive transitions are skipped (warm rows remain "
+            "queryable indefinitely until configured). Per-workspace "
+            "prefix is enforced by the worker."
+        ),
+    )
+    retention_archive_kms_key_arn: str | None = Field(
+        default=None,
+        description=(
+            "ARN of the KMS key used to encrypt archive parquet objects "
+            "(ADR-0009 §1 — KMS-managed keys mandatory in non-dev). "
+            "When None, the worker uses SSE-S3 (AES256), which is "
+            "acceptable in dev only."
+        ),
+    )
+    retention_archive_s3_endpoint_url: str | None = Field(
+        default=None,
+        description=(
+            "Custom endpoint URL for S3-compatible object storage "
+            "(MinIO, Ceph, etc). When None, AWS S3 is assumed. "
+            "Read by boto3's S3 client."
+        ),
+    )
+    retention_archive_s3_region: str = Field(
+        default="us-east-1",
+        description="AWS region used for the archive bucket S3 client.",
+    )
+    retention_sample_size: int = Field(
+        default=20,
+        ge=0,
+        le=1000,
+        description=(
+            "Number of eligible rows to include in the dry-run report sample. "
+            "Bounded to keep the report payload small."
+        ),
+    )
+
     # --- Scheduler ---
     scheduler_enabled: bool = Field(
         default=True,

@@ -66,6 +66,19 @@ PAYLOAD_CONTENT_HASH: Final[str] = "content_hash"
 PAYLOAD_DOC_VERSION: Final[str] = "doc_version"
 PAYLOAD_TOMBSTONED_AT: Final[str] = "tombstoned_at"
 PAYLOAD_RECORDED_AT: Final[str] = "recorded_at"
+#: Tier marker on the chunk payload — ADR-0009 §5 / §1.  Values:
+#:   "hot"     — live chunk (no `snapshot_date`).
+#:   "warm"    — snapshotted chunk (carries `snapshot_date`).
+#: Archive chunks are evicted from Qdrant entirely (re-embedding from
+#: archive is not supported in v1 per ADR-0009 §5).
+PAYLOAD_TIER: Final[str] = "tier"
+#: Snapshot date on warm-tier chunks — ISO-8601 calendar day, mirrors
+#: the Neo4j `:EntitySnapshot:Daily.snapshot_date` field.  Only present
+#: when ``tier == "warm"``.
+PAYLOAD_SNAPSHOT_DATE: Final[str] = "snapshot_date"
+#: Tier values, kept in named constants so reviewers can grep them.
+TIER_HOT: Final[str] = "hot"
+TIER_WARM: Final[str] = "warm"
 
 #: Fields that get a Qdrant payload index.  ADR-0006, Decision §Schema
 #: posture lists them explicitly — workspace_id is the mandatory one
@@ -83,6 +96,12 @@ INDEXED_PAYLOAD_FIELDS: Final[tuple[str, ...]] = (
     PAYLOAD_TAGS,
     PAYLOAD_TOMBSTONED_AT,
     PAYLOAD_RECORDED_AT,
+    # ADR-0009 §5: payload-indexed `tier` so hot reads add a cheap
+    # `tier = "hot"` filter without an HNSW scan over warm payload-only
+    # points.  Snapshot-date is indexed too so warm reads at a given
+    # day are point-lookups.
+    PAYLOAD_TIER,
+    PAYLOAD_SNAPSHOT_DATE,
 )
 
 # ---------------------------------------------------------------------------
@@ -123,12 +142,16 @@ __all__ = [
     "PAYLOAD_ORD",
     "PAYLOAD_PARSER_VERSION",
     "PAYLOAD_RECORDED_AT",
+    "PAYLOAD_SNAPSHOT_DATE",
     "PAYLOAD_SOURCE_ID",
     "PAYLOAD_SYMBOL",
     "PAYLOAD_TAGS",
     "PAYLOAD_TEXT",
+    "PAYLOAD_TIER",
     "PAYLOAD_TITLE",
     "PAYLOAD_TOMBSTONED_AT",
     "PAYLOAD_URI",
     "PAYLOAD_WORKSPACE_ID",
+    "TIER_HOT",
+    "TIER_WARM",
 ]
