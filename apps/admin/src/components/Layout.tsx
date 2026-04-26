@@ -18,14 +18,14 @@ export function Layout({ children }: LayoutProps) {
   const { logout } = useTokenContext();
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-surface text-text">
       {/* Sidebar */}
-      <aside className="w-56 flex-shrink-0 bg-gray-900 text-gray-200 flex flex-col">
-        <div className="px-5 py-5 border-b border-gray-700">
-          <span className="text-white font-semibold text-lg tracking-tight">
+      <aside className="w-56 flex-shrink-0 bg-elevation-1 text-text-secondary border-r border-border flex flex-col">
+        <div className="px-5 py-5 border-b border-border">
+          <span className="text-text font-semibold text-lg tracking-tight">
             Omniscience
           </span>
-          <span className="ml-2 text-xs text-gray-400 font-mono">admin</span>
+          <span className="ml-2 text-xs text-text-muted font-mono">admin</span>
         </div>
 
         <nav className="flex-1 py-4 px-2 flex flex-col gap-1">
@@ -35,10 +35,10 @@ export function Layout({ children }: LayoutProps) {
               to={item.to}
               end={item.end}
               className={({ isActive }) =>
-                `rounded px-3 py-2 text-sm transition-colors ${
+                `rounded px-3 py-2 text-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent ${
                   isActive
-                    ? "bg-indigo-600 text-white"
-                    : "text-gray-300 hover:bg-gray-700 hover:text-white"
+                    ? "bg-accent text-accent-fg"
+                    : "text-text-secondary hover:bg-elevation-2 hover:text-text"
                 }`
               }
             >
@@ -47,10 +47,10 @@ export function Layout({ children }: LayoutProps) {
           ))}
         </nav>
 
-        <div className="px-4 py-4 border-t border-gray-700">
+        <div className="px-4 py-4 border-t border-border">
           <button
             onClick={logout}
-            className="w-full text-left text-xs text-gray-400 hover:text-gray-200 transition-colors"
+            className="w-full text-left text-xs text-text-muted hover:text-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
           >
             Sign out
           </button>
@@ -58,7 +58,7 @@ export function Layout({ children }: LayoutProps) {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 overflow-auto">
+      <main className="flex-1 overflow-auto bg-surface">
         <div className="max-w-6xl mx-auto px-6 py-8">{children}</div>
       </main>
     </div>

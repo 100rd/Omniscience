@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "lint:colors": "node scripts/check-no-raw-colors.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
