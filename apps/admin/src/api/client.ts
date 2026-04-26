@@ -128,6 +128,36 @@ export interface HealthResponse {
   version?: string;
 }
 
+/*
+ * Wire format for `GET /api/v1/stats/sources` (Issue #111).
+ *
+ * Mirrors the Pydantic `SourceStatsRow` / `SourcesStatsResponse` defined in
+ * `packages/core/src/omniscience_core/stats/models.py`. Notes on fields:
+ *   - `last_sync_at` is ISO-8601 or null when the source has never synced.
+ *   - `age_seconds` uses a `1e15` sentinel to mean "never synced". Renderers
+ *     should special-case that value rather than displaying "11574 days".
+ *   - `freshness_sla_seconds` is null when the source has no SLA configured.
+ *   - `is_stale` is computed server-side: true when age >= SLA.
+ */
+export interface SourceStatsRow {
+  id: string;
+  name: string;
+  type: string;
+  status: string;
+  documents: number;
+  chunks: number;
+  entities: number;
+  last_sync_at: string | null;
+  freshness_sla_seconds: number | null;
+  age_seconds: number;
+  is_stale: boolean;
+}
+
+export interface SourcesStatsResponse {
+  sources: SourceStatsRow[];
+  total: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -162,12 +192,14 @@ export class ApiClient {
   private async request<T>(
     method: string,
     path: string,
-    body?: unknown
+    body?: unknown,
+    signal?: AbortSignal
   ): Promise<T> {
     const res = await fetch(path, {
       method,
       headers: this.headers(),
       body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
     });
 
     if (res.status === 204) {
@@ -259,5 +291,15 @@ export class ApiClient {
   // Search
   async search(payload: SearchRequest): Promise<SearchResult> {
     return this.request<SearchResult>("POST", "/api/v1/search", payload);
+  }
+
+  // Stats (Issue #111)
+  async statsSources(signal?: AbortSignal): Promise<SourcesStatsResponse> {
+    return this.request<SourcesStatsResponse>(
+      "GET",
+      "/api/v1/stats/sources",
+      undefined,
+      signal
+    );
   }
 }

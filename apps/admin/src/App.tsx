@@ -9,6 +9,7 @@ import { SourcesPage } from "./pages/SourcesPage";
 import { TokensPage } from "./pages/TokensPage";
 import { IngestionPage } from "./pages/IngestionPage";
 import { SearchPage } from "./pages/SearchPage";
+import { FreshnessPage } from "./pages/FreshnessPage";
 
 function AppInner() {
   const { token } = useTokenContext();
@@ -40,6 +41,7 @@ function AppInner() {
               path="/search"
               element={<SearchPage addToast={addToast} />}
             />
+            <Route path="/freshness" element={<FreshnessPage />} />
           </Routes>
         </Layout>
       </BrowserRouter>
