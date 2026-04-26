@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "omniscience-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "omniscience-operator.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "omniscience-operator.serviceAccountName" . }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: OMNISCIENCE_RESYNC_PERIOD_SECONDS
+              value: {{ .Values.resyncPeriodSeconds | quote }}
+            - name: OMNISCIENCE_LEADER_ELECT
+              value: {{ .Values.leaderElection.enabled | quote }}
+            - name: OMNISCIENCE_METRICS_ADDR
+              value: ":{{ .Values.service.metricsPort }}"
+            - name: OMNISCIENCE_PROBE_ADDR
+              value: ":{{ .Values.probes.livenessPort }}"
+            {{- if .Values.nats.credentials }}
+            - name: OMNISCIENCE_NATS_CREDS_FILE
+              value: /etc/nats/creds/nats.creds
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "omniscience-operator.fullname" . }}-config
+          {{- if .Values.nats.credentials }}
+          volumeMounts:
+            - name: nats-creds
+              mountPath: /etc/nats/creds
+              readOnly: true
+          {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.service.metricsPort }}
+              protocol: TCP
+            - name: probes
+              containerPort: {{ .Values.probes.livenessPort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.livenessPath }}
+              port: probes
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.readinessPath }}
+              port: probes
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.nats.credentials }}
+      volumes:
+        - name: nats-creds
+          secret:
+            secretName: {{ include "omniscience-operator.fullname" . }}-nats-creds
+            defaultMode: 0400
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

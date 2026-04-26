@@ -1,0 +1,117 @@
+# Default values for omniscience-operator.
+#
+# Required values that have NO default and MUST be set:
+#   - workspaceId
+#   - clusterName
+#   - nats.url
+#
+# Override per environment:
+#   helm install omniscience-operator ./helm/omniscience-operator \
+#     --set workspaceId=<UUID> \
+#     --set clusterName=<name> \
+#     --set nats.url=nats://omniscience-nats:4222
+
+# ── Tenant identity (REQUIRED) ────────────────────────────────────────────────
+# UUID stamped on every emitted event. Read from this value into a Secret
+# mounted into the pod. NEVER derived from cluster-side resource state — see
+# ADR-0007 §ACL.
+workspaceId: ""
+
+# Human-readable cluster identifier — appears in entity metadata. Not
+# security-bearing.
+clusterName: ""
+
+# ── Image ─────────────────────────────────────────────────────────────────────
+image:
+  repository: ghcr.io/100rd/omniscience-operator
+  pullPolicy: IfNotPresent
+  # Overridden by CI: --set image.tag=$GIT_SHA
+  tag: "0.2.0"
+
+imagePullSecrets: []
+
+# ── Replicas ──────────────────────────────────────────────────────────────────
+# v0.2 ships single-replica. Multi-replica requires leaderElection.enabled=true.
+replicaCount: 1
+
+# ── NATS endpoint ─────────────────────────────────────────────────────────────
+nats:
+  # NATS JetStream URL (required). Example: nats://omniscience-nats:4222
+  url: ""
+  # Subject prefix; the workspace_id is appended at publish time.
+  subjectPrefix: "ingest.changes.k8s"
+  # User-credentials file content. When set, a Secret is created and mounted
+  # at /etc/nats/creds/nats.creds. Required in non-dev environments.
+  credentials: ""
+
+# ── Resync ────────────────────────────────────────────────────────────────────
+# Informer resync window in seconds. 600 (10 min) balances drift recovery
+# against reconcile cost on large clusters.
+resyncPeriodSeconds: 600
+
+# ── Leader election ───────────────────────────────────────────────────────────
+leaderElection:
+  enabled: false
+
+# ── Resources ─────────────────────────────────────────────────────────────────
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 250m
+    memory: 256Mi
+
+# ── ServiceAccount ────────────────────────────────────────────────────────────
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# ── RBAC ──────────────────────────────────────────────────────────────────────
+# v0.2 needs cluster-scoped read on Pods. The ClusterRole is intentionally
+# narrow — adding kinds is a follow-up issue per epic #98.
+rbac:
+  create: true
+
+# ── Probes ────────────────────────────────────────────────────────────────────
+probes:
+  livenessPath: /healthz
+  livenessPort: 8081
+  readinessPath: /readyz
+  readinessPort: 8081
+
+# ── Pod security ──────────────────────────────────────────────────────────────
+# Defaults follow the "restricted" Pod Security Standard.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+# ── Service (for metrics scraping) ────────────────────────────────────────────
+service:
+  enabled: true
+  type: ClusterIP
+  metricsPort: 8080
+
+# ── Pod placement ─────────────────────────────────────────────────────────────
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Annotations / labels ──────────────────────────────────────────────────────
+podAnnotations: {}
+podLabels: {}
