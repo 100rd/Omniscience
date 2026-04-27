@@ -40,6 +40,7 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_SOURCE_ID,
     PAYLOAD_TIER,
     PAYLOAD_TOMBSTONED_AT,
+    PAYLOAD_VALID_TO,
     PAYLOAD_WORKSPACE_ID,
 )
 
@@ -233,6 +234,68 @@ def build_warm_archive_filter(
     return qm.Filter(must=must)
 
 
+def build_end_date_chunks_filter(
+    *,
+    workspace_id: uuid.UUID,
+    source_id: uuid.UUID,
+    exclude_external_ids: tuple[str, ...] = (),
+) -> qm.Filter:
+    """Build the per-(workspace, source) filter for chunk end-dating.
+
+    ADR-0008 §6 + issue #137: re-ingestion of a smaller snapshot end-
+    dates chunks absent from the new batch by setting ``valid_to`` on
+    their payload.  No DELETE — the retention worker (#135) is the only
+    hard-delete path on Qdrant.
+
+    Workspace-scoped (must clause).  ``exclude_external_ids`` is the
+    set of chunk ``external_id``s present in the new batch — the
+    end-dating skips those because the writer is about to upsert them.
+    Mapped to a ``must_not`` clause so the resulting filter selects
+    "still-open chunks of (workspace, source) NOT in the new batch".
+
+    "Still-open" means ``valid_to`` is absent or null on the payload.
+    Implemented as a ``must`` clause on ``IsNullCondition`` over
+    ``valid_to`` — symmetric with the existing ``exclude_tombstoned``
+    pattern in :class:`QdrantFilterBuilder`.
+    """
+    must: list[
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ] = [
+        qm.FieldCondition(
+            key=PAYLOAD_WORKSPACE_ID,
+            match=qm.MatchValue(value=str(workspace_id)),
+        ),
+        qm.FieldCondition(
+            key=PAYLOAD_SOURCE_ID,
+            match=qm.MatchValue(value=str(source_id)),
+        ),
+        qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)),
+    ]
+    must_not: list[
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ] = []
+    if exclude_external_ids:
+        must_not.append(
+            qm.FieldCondition(
+                key=PAYLOAD_EXTERNAL_ID,
+                match=qm.MatchAny(any=list(exclude_external_ids)),
+            )
+        )
+    return qm.Filter(must=must, must_not=must_not) if must_not else qm.Filter(must=must)
+
+
 def build_tombstone_sweep_filter(*, cutoff_iso: str) -> qm.Filter:
     """Admin-only sweep filter for global tombstone purge.
 
@@ -256,6 +319,7 @@ def build_tombstone_sweep_filter(*, cutoff_iso: str) -> qm.Filter:
 
 __all__ = [
     "QdrantFilterBuilder",
+    "build_end_date_chunks_filter",
     "build_retention_eligible_filter",
     "build_tombstone_sweep_filter",
     "build_warm_archive_filter",

@@ -66,11 +66,13 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_TITLE,
     PAYLOAD_TOMBSTONED_AT,
     PAYLOAD_URI,
+    PAYLOAD_VALID_TO,
     PAYLOAD_WORKSPACE_ID,
     TIER_WARM,
 )
 from omniscience_index.stores.qdrant_filters import (
     QdrantFilterBuilder,
+    build_end_date_chunks_filter,
     build_retention_eligible_filter,
     build_tombstone_sweep_filter,
     build_warm_archive_filter,
@@ -499,6 +501,64 @@ class QdrantVectorStore:
             wait=True,
         )
         return True
+
+    async def end_date_chunks(
+        self,
+        *,
+        source_id: uuid.UUID,
+        workspace_id: uuid.UUID,
+        snapshot_at: datetime | None = None,
+        exclude_external_ids: set[str] | None = None,
+    ) -> int:
+        """End-date chunks for ``(workspace_id, source_id)`` instead of deleting.
+
+        ADR-0008 §6 + issue #137: under bitemporal-enabled deployment,
+        chunks absent from a new snapshot ingestion get their payload
+        ``valid_to`` set to ``snapshot_at`` (or ``now()`` when None).
+        Hard deletion is gone for the writer path; the retention worker
+        (#135 / ADR-0009) is the only remaining DELETE path on Qdrant.
+
+        ``exclude_external_ids`` is the set of chunk ``external_id``s
+        present in the new batch — these chunks are NOT end-dated
+        because the writer is upserting them with fresh payload.  An
+        empty set / ``None`` means "end-date everything still-open in
+        ``(workspace, source)``", which is the per-document tombstone
+        contract.
+
+        Workspace-scoped via the typed filter-builder
+        (:func:`build_end_date_chunks_filter`) per ADR-0006 §ACL — raw
+        ``qm.Filter`` construction is forbidden outside
+        ``qdrant_filters.py``.
+
+        Returns the count of points whose ``valid_to`` payload was set.
+        """
+        excl = tuple(sorted(exclude_external_ids)) if exclude_external_ids else ()
+        flt = build_end_date_chunks_filter(
+            workspace_id=workspace_id,
+            source_id=source_id,
+            exclude_external_ids=excl,
+        )
+        # Count first so we have a deterministic return value (the
+        # ``set_payload`` op acks rather than returns a count).
+        before = int(
+            (
+                await self._qc.count(
+                    collection_name=self._collection_name,
+                    count_filter=flt,
+                    exact=True,
+                )
+            ).count
+        )
+        if before == 0:
+            return 0
+        valid_to_iso = (snapshot_at or datetime.now(UTC)).isoformat()
+        await self._qc.set_payload(
+            collection_name=self._collection_name,
+            payload={PAYLOAD_VALID_TO: valid_to_iso},
+            points=qm.FilterSelector(filter=flt),
+            wait=True,
+        )
+        return before
 
     async def delete_tombstoned(self, older_than: timedelta) -> int:
         """Hard-delete tombstoned documents older than ``older_than``.

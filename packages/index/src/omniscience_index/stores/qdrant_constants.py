@@ -66,6 +66,14 @@ PAYLOAD_CONTENT_HASH: Final[str] = "content_hash"
 PAYLOAD_DOC_VERSION: Final[str] = "doc_version"
 PAYLOAD_TOMBSTONED_AT: Final[str] = "tombstoned_at"
 PAYLOAD_RECORDED_AT: Final[str] = "recorded_at"
+#: Bitemporal validity-window end on a chunk payload — ADR-0008 §6 +
+#: issue #137.  Set by ``QdrantVectorStore.end_date_chunks`` instead of
+#: hard-deleting points when ``GRAPH_BITEMPORAL=enabled``.  Absent /
+#: ``null`` means "still valid" — the same sentinel ADR-0008 §1 fixes
+#: for the graph side, mirrored on the vector store per ADR-0006 §6
+#: cross-store alignment.  Only the retention worker (#135 / ADR-0009)
+#: hard-deletes points; this field never triggers eviction by itself.
+PAYLOAD_VALID_TO: Final[str] = "valid_to"
 #: Tier marker on the chunk payload — ADR-0009 §5 / §1.  Values:
 #:   "hot"     — live chunk (no `snapshot_date`).
 #:   "warm"    — snapshotted chunk (carries `snapshot_date`).
@@ -151,6 +159,7 @@ __all__ = [
     "PAYLOAD_TITLE",
     "PAYLOAD_TOMBSTONED_AT",
     "PAYLOAD_URI",
+    "PAYLOAD_VALID_TO",
     "PAYLOAD_WORKSPACE_ID",
     "TIER_HOT",
     "TIER_WARM",

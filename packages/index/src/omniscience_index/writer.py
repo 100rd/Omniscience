@@ -144,6 +144,7 @@ class IndexWriter:
         document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        snapshot_at: datetime | None = None,
     ) -> None:
         """Persist symbol graph entities and edges for a document.
 
@@ -158,7 +159,19 @@ class IndexWriter:
         Cross-file edges (where the target entity does not yet exist) are
         stored with a NULL target — they are resolved lazily in a later
         graph-linking pass (not yet implemented; placeholder for v0.2).
+
+        ``snapshot_at`` is accepted for signature parity with
+        :meth:`Neo4jGraphStore.upsert_graph` (issue #137).  The Postgres
+        operational tables (``entities`` / ``edges``) are NOT bitemporal
+        per ADR-0007 §7 — operational metadata has its own lifecycle
+        (``tombstoned_at`` on ``documents``, FK cascade for chunks).
+        The argument is therefore accepted but not consumed by this
+        writer; the bitemporal end-dating contract lives on the Neo4j
+        adapter.  Snapshot-mode connectors that already pass
+        ``snapshot_at`` to the Neo4j writer can keep a single
+        ``snapshot_at`` symbol at the call site without branching.
         """
+        del snapshot_at  # ADR-0007 §7 — Postgres operational, not bitemporal.
         async with self._session_factory() as session, session.begin():
             # Delete existing entities for this source (edges cascade via FK)
             await session.execute(delete(Entity).where(Entity.source_id == source_id))
