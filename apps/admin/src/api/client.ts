@@ -236,6 +236,71 @@ export interface ClientsStatsResponse {
   top_tools_last_hour: ToolUsageEntry[];
 }
 
+/*
+ * Wire format for `GET /api/v1/admin/retention/status` (Issue #136, ADR-0009 §8).
+ *
+ * Mirrors the Pydantic `RetentionStatus`. All counts are scoped to the
+ * caller's workspace; the response carries IDs and counts only — no
+ * entity bodies, no chunk text (ACL invariant from ADR-0009 §Consequences-
+ * security).
+ *
+ * `last_run_at` is null when the worker has not completed its first
+ * tick since process start — the admin UI renders that as "never run"
+ * rather than displaying a stale value.
+ */
+export interface RetentionStatusResponse {
+  workspace_id: string;
+  neo4j_hot: number;
+  neo4j_warm: number;
+  qdrant_hot: number;
+  qdrant_warm: number;
+  last_run_at: string | null;
+  lag_seconds: number;
+  dry_run: boolean;
+}
+
+/*
+ * Wire format for the dry-run `GET /api/v1/admin/retention/report`
+ * (Issue #135, ADR-0009 §3). Returned when an operator wants to
+ * preview what the next worker tick would evict without mutating any
+ * store. Sample size is bounded by `Settings.retention_sample_size`
+ * (default 20).
+ */
+export interface RetentionSampleEntry {
+  id: string | null;
+  valid_from: string | null;
+  recorded_at: string | null;
+}
+
+export interface RetentionReportResponse {
+  workspace_id: string;
+  dry_run: boolean;
+  eligible_hot_to_warm_entity_states: number;
+  eligible_hot_to_warm_edges: number;
+  eligible_hot_to_warm_chunks: number;
+  eligible_warm_to_archive_entity_snapshots: number;
+  eligible_warm_to_archive_dates: string[];
+  sampled_eligible: RetentionSampleEntry[];
+  oldest_eligible_recorded_at: string | null;
+  lag_seconds: number;
+}
+
+/*
+ * Wire format for `POST /api/v1/admin/retention/run-now` (Issue #136).
+ * 202 Accepted with a server-generated `run_id`; the run executes
+ * synchronously inside the request handler and is scoped to the
+ * caller's workspace by the structural ACL invariant on the worker.
+ */
+export interface RetentionRunNowResponse {
+  run_id: string;
+  workspace_id: string;
+  started_at: string;
+  finished_at: string;
+  duration_seconds: number;
+  dry_run: boolean;
+  lag_seconds: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -417,6 +482,36 @@ export class ApiClient {
       "/api/v1/stats/clients",
       undefined,
       signal
+    );
+  }
+
+  // Retention admin (Issue #136, ADR-0009)
+  async retentionStatus(
+    signal?: AbortSignal
+  ): Promise<RetentionStatusResponse> {
+    return this.request<RetentionStatusResponse>(
+      "GET",
+      "/api/v1/admin/retention/status",
+      undefined,
+      signal
+    );
+  }
+
+  async retentionReport(
+    signal?: AbortSignal
+  ): Promise<RetentionReportResponse> {
+    return this.request<RetentionReportResponse>(
+      "GET",
+      "/api/v1/admin/retention/report",
+      undefined,
+      signal
+    );
+  }
+
+  async retentionRunNow(): Promise<RetentionRunNowResponse> {
+    return this.request<RetentionRunNowResponse>(
+      "POST",
+      "/api/v1/admin/retention/run-now"
     );
   }
 }

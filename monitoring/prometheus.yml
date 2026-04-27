@@ -4,6 +4,12 @@ global:
   external_labels:
     service: omniscience
 
+# Alert rule files. Each YAML file under `prometheus/alerts/` defines
+# one or more rule groups; Prometheus auto-loads all matches on
+# startup / SIGHUP.
+rule_files:
+  - "prometheus/alerts/*.yaml"
+
 scrape_configs:
   - job_name: omniscience-app
     static_configs:
