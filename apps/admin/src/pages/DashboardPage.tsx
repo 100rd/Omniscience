@@ -39,6 +39,7 @@ import { ClientsPanel } from "../components/dashboard/ClientsPanel";
 import { DeltaStrip } from "../components/dashboard/DeltaStrip";
 import { OverviewHeader } from "../components/dashboard/OverviewHeader";
 import { PanelErrorBoundary } from "../components/dashboard/PanelErrorBoundary";
+import { RetentionPanel } from "../components/dashboard/RetentionPanel";
 import { SchemaVolumePanel } from "../components/dashboard/SchemaVolumePanel";
 import { SourcesPanel } from "../components/dashboard/SourcesPanel";
 import { FreshnessPanel } from "../components/FreshnessPanel";
@@ -82,6 +83,16 @@ export function DashboardPage() {
           <PanelErrorBoundary panelTitle="Freshness">
             <FreshnessPanel />
           </PanelErrorBoundary>
+        </div>
+        {/*
+         * RetentionPanel (Issue #136) — compact retention card on the
+         * dashboard with a link to the deep-dive /retention page. Sits
+         * full-width below the 7/5 splits to keep the lag SLO visible
+         * without competing with Sources / Freshness for vertical
+         * attention.
+         */}
+        <div className="xl:col-span-12">
+          <RetentionPanel />
         </div>
       </div>
     </div>

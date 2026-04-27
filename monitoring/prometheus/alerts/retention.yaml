@@ -1,0 +1,111 @@
+# Prometheus alert rules for the retention worker (issue #136, ADR-0009 §8 / §9).
+#
+# These rules are loaded by the Prometheus instance via the standard
+# `rule_files:` directive in `prometheus.yml`. The four rules cover the
+# failure modes documented in ADR-0009 §9:
+#   * lag > 24h  ........ warning  (steady-state SLO breach)
+#   * lag > 7d   ........ critical (P1 — same path as freshness P1 alert)
+#   * worker stalled .... critical (no run completed in 2x configured tick)
+#   * cross-store inconsistency  warning (eviction rate divergence between
+#                                 Neo4j and Qdrant — ADR-0009 §9 mitigation
+#                                 path: re-run worker, then per-workspace
+#                                 re-sync from Postgres `chunks`)
+#
+# The runbook URL points at the in-repo runbook; substitute the deployed
+# documentation host at deploy time if hosting docs externally.
+groups:
+  - name: omniscience-retention
+    interval: 1m
+    rules:
+      - alert: RetentionWorkerLagWarning
+        expr: omniscience_retention_worker_lag_seconds > 86400
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: retention-worker
+        annotations:
+          summary: "Retention worker lag exceeds 24h SLO (ADR-0009 §8)"
+          description: |
+            The retention worker has been more than 24 hours behind on
+            evicting overdue records for at least 5 minutes
+            (omniscience_retention_worker_lag_seconds = {{ $value | humanizeDuration }}).
+            Steady-state SLO is < 24h. ADR-0009 §8.
+          runbook_url: "docs/runbooks/retention.md#retentionworkerlagwarning"
+
+      - alert: RetentionWorkerLagCritical
+        expr: omniscience_retention_worker_lag_seconds > 604800
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          component: retention-worker
+        annotations:
+          summary: "Retention worker lag exceeds 7d (P1 — ADR-0009 §8)"
+          description: |
+            The retention worker has been more than 7 days behind on
+            evicting overdue records for at least 5 minutes
+            (omniscience_retention_worker_lag_seconds = {{ $value | humanizeDuration }}).
+            P1 escalation path — see freshness alert path. ADR-0009 §8.
+          runbook_url: "docs/runbooks/retention.md#retentionworkerlagcritical"
+
+      - alert: RetentionWorkerStalled
+        # `omniscience_retention_worker_duration_seconds_count` increments
+        # once per (phase, store) per workspace per tick. When the worker
+        # is healthy this counter increases on every tick (default 6h);
+        # when it has not increased in 12h (2x configured interval) the
+        # worker is stalled. `increase(...)` over a 12h window returns 0
+        # when no new samples landed, irrespective of which (phase, store)
+        # cell is selected — `max()` collapses the label set so we alert
+        # once per deployment, not once per cell.
+        expr: |
+          max(increase(omniscience_retention_worker_duration_seconds_count[12h])) == 0
+        for: 5m
+        labels:
+          severity: critical
+          team: platform
+          component: retention-worker
+        annotations:
+          summary: "Retention worker has not run in 12h (ADR-0009 §9)"
+          description: |
+            No retention worker tick has completed in the last 12 hours
+            (2x the configured 6h interval). The worker is stalled or has
+            crashed. ADR-0009 §9 crash runbook: check FastAPI lifespan
+            errors, then restart the server replicas — the next scheduled
+            run resumes from idempotency.
+          runbook_url: "docs/runbooks/retention.md#retentionworkerstalled"
+
+      - alert: RetentionEvictionInconsistent
+        # Cross-store divergence — the retention worker handles both
+        # Neo4j and Qdrant in one run, but an inconsistency window exists
+        # between the Neo4j move and the Qdrant move (ADR-0009 §9). A
+        # sustained rate divergence > 0.1 ev/s for an hour indicates one
+        # store is falling behind structurally rather than transiently.
+        # The `absent_over_time` guard avoids firing during cold-boot
+        # before either store has produced a sample.
+        expr: |
+          (
+            absent_over_time(omniscience_retention_eviction_total{store="neo4j"}[1h]) != 1
+            and
+            absent_over_time(omniscience_retention_eviction_total{store="qdrant"}[1h]) != 1
+          )
+          and on()
+          abs(
+            sum(rate(omniscience_retention_eviction_total{store="neo4j"}[1h]))
+            -
+            sum(rate(omniscience_retention_eviction_total{store="qdrant"}[1h]))
+          ) > 0.1
+        for: 1h
+        labels:
+          severity: warning
+          team: platform
+          component: retention-worker
+        annotations:
+          summary: "Retention eviction divergence between Neo4j and Qdrant (ADR-0009 §9)"
+          description: |
+            The eviction rate on Neo4j and Qdrant has diverged by more
+            than 0.1 records/sec for at least 1 hour. ADR-0009 §9
+            cross-store consistency runbook: re-run the retention
+            worker; if the divergence persists, escalate to a per-
+            workspace re-sync from the Postgres `chunks` table.
+          runbook_url: "docs/runbooks/retention.md#retentionevictioninconsistent"
