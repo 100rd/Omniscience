@@ -791,21 +791,62 @@ RETURN count(snap) AS total
 
 
 # --- Read queries ----------------------------------------------------------
+#
+# ADR-0008 §5 mandates "two distinct Cypher templates, not a single
+# template parameterized by an optional `as_of`".  The latest-version
+# templates read the `:Entity` mirror via the existing `(workspace_id, id)`
+# / `(workspace_id, name)` indexes — same plan, same latency, zero
+# regression vs PR #104.  The as-of templates add one `[:HAD_STATE]` hop
+# and the canonical bitemporal predicate from §5 on every node and every
+# relationship.
 
+# Latest-version (as_of=None) entity lookup — unchanged from PR #104.
+# `:Entity` carries the still-current state mirror (ADR-0008 §2), so we
+# read it directly with no [:HAD_STATE] traversal.  `valid_from`,
+# `valid_to`, `recorded_at` are surfaced when present (post-#130 backfill
+# or post-#131 writer); pre-bitemporal legacy rows return NULL on those.
 _GET_ENTITY_BY_NAME_CYPHER: Final[str] = f"""
 MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: $entity_name}})
 RETURN n.name AS name,
        n.kind AS kind,
        n.source_id AS source_id,
-       n.chunk_text AS chunk_text
+       n.chunk_text AS chunk_text,
+       n.valid_from AS valid_from,
+       n.valid_to AS valid_to,
+       n.recorded_at AS recorded_at
 LIMIT 1
 """
 
-# Traversal with optional edge-type filter.  Parametrising the max_depth
-# requires string interpolation because Cypher's variable-length pattern
-# syntax does not accept parameters for the depth.  We clamp the value
-# before interpolation via ``_clamp_depth`` and reject anything
-# non-integer upstream.
+# As-of entity lookup — ADR-0008 §5 canonical predicate on the
+# `:EntityState` row reachable from the identity via `[:HAD_STATE]`.
+# Workspace predicate sits FIRST (ACL invariant from ADR-0008
+# §Consequences-security #2 / ADR-0005 + #117/#119); the bitemporal
+# predicate composes on top.  Index-backed by
+# `entity_state_workspace_valid_window` (ADR-0008 §4): the planner
+# narrows by `(workspace_id, id)` first, then ranges over
+# `(valid_from, valid_to)`.  Returns NULL on `valid_to` for the still-
+# current version and on every legacy (pre-backfill) row.
+_GET_ENTITY_BY_NAME_AS_OF_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: $entity_name}})
+MATCH (n)-[:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
+WHERE s.workspace_id = $workspace_id
+  AND s.valid_from <= datetime($as_of)
+  AND (datetime($as_of) < s.valid_to OR s.valid_to IS NULL)
+RETURN n.name AS name,
+       s.kind AS kind,
+       s.source_id AS source_id,
+       n.chunk_text AS chunk_text,
+       s.valid_from AS valid_from,
+       s.valid_to AS valid_to,
+       s.recorded_at AS recorded_at
+LIMIT 1
+"""
+
+# Latest-version traversal — unchanged shape from PR #104.  Surfaces
+# the bitemporal triple on each node/edge when present (post-#131 /
+# post-#130).  Variable-length pattern depth requires string
+# interpolation (Cypher does not accept parameters for the depth);
+# `_clamp_depth` validates the value before substitution.
 _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "MATCH (seed:" + _ENTITY_LABEL + " {workspace_id: $workspace_id, name: $entity_name})\n"
     "OPTIONAL MATCH path = (seed)-[rels*1..__MAX_DEPTH__]-(neighbour:" + _ENTITY_LABEL + ")\n"
@@ -818,17 +859,99 @@ _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "    seed.kind AS seed_kind,\n"
     "    seed.source_id AS seed_source_id,\n"
     "    seed.chunk_text AS seed_chunk_text,\n"
+    "    seed.valid_from AS seed_valid_from,\n"
+    "    seed.valid_to AS seed_valid_to,\n"
+    "    seed.recorded_at AS seed_recorded_at,\n"
     "    collect(CASE WHEN neighbour IS NULL THEN NULL ELSE {\n"
     "        name: neighbour.name,\n"
     "        kind: neighbour.kind,\n"
     "        source_id: neighbour.source_id,\n"
     "        chunk_text: neighbour.chunk_text,\n"
     "        depth: depth,\n"
-    "        edge_type: rels[-1].edge_type\n"
+    "        edge_type: rels[-1].edge_type,\n"
+    "        valid_from: neighbour.valid_from,\n"
+    "        valid_to: neighbour.valid_to,\n"
+    "        recorded_at: neighbour.recorded_at\n"
     "    } END) AS neighbours,\n"
     "    collect(CASE WHEN rels IS NULL THEN NULL ELSE\n"
     "        [startNode(last(rels)).name, endNode(last(rels)).name,"
-    " last(rels).edge_type]\n"
+    " last(rels).edge_type, last(rels).valid_from, last(rels).valid_to,"
+    " last(rels).recorded_at]\n"
+    "    END) AS edges\n"
+)
+
+# As-of traversal — ADR-0008 §5 canonical predicate on every node AND
+# every relationship.  The seed and every neighbour read their state
+# from `:EntityState` via `[:HAD_STATE]`; the variable-length traversal
+# walks identity-to-identity edges (ADR-0008 §3 — edges remain
+# identity-to-identity), and EVERY edge in `rels` must satisfy the
+# bitemporal predicate.
+#
+# The "exists at as_of" gate on the seed's identity uses the
+# `:EntityState` row that is current at `as_of` — ADR-0008 §2: the
+# `:Entity` mirror is the latest-version cache; for a point-in-time
+# read we MUST resolve via `[:HAD_STATE]`.  The neighbour gate works
+# the same way.
+#
+# Edges: a relationship is in the result iff
+#   r.workspace_id = $workspace_id
+#   AND r.valid_from <= $as_of AND ($as_of < r.valid_to OR r.valid_to IS NULL)
+# AND both endpoints' :EntityState rows satisfy the same predicate.
+# That second clause is enforced by the seed/neighbour gates above —
+# if either endpoint had no valid state at $as_of, the variable-length
+# pattern would not match an edge that touches it (because both seed
+# and neighbour are constrained to identities whose `:EntityState` was
+# valid at $as_of).
+#
+# Workspace predicate sits BEFORE the bitemporal predicate on every
+# match (ADR-0008 §Consequences-security #2).
+_TRAVERSE_AS_OF_CYPHER_TEMPLATE: Final[str] = (
+    "MATCH (seed:" + _ENTITY_LABEL + " {workspace_id: $workspace_id, name: $entity_name})\n"
+    "MATCH (seed)-[:HAD_STATE]->(seed_state:" + _ENTITY_STATE_LABEL + ")\n"
+    "WHERE seed_state.workspace_id = $workspace_id\n"
+    "  AND seed_state.valid_from <= datetime($as_of)\n"
+    "  AND (datetime($as_of) < seed_state.valid_to OR seed_state.valid_to IS NULL)\n"
+    "OPTIONAL MATCH path = (seed)-[rels*1..__MAX_DEPTH__]-(neighbour:" + _ENTITY_LABEL + ")\n"
+    "WHERE ALL(r IN rels WHERE r.workspace_id = $workspace_id\n"
+    "      AND r.valid_from <= datetime($as_of)\n"
+    "      AND (datetime($as_of) < r.valid_to OR r.valid_to IS NULL)"
+    "__EDGE_TYPE_FILTER__)\n"
+    "  AND neighbour.workspace_id = $workspace_id\n"
+    "  AND neighbour <> seed\n"
+    "  AND EXISTS {\n"
+    "      MATCH (neighbour)-[:HAD_STATE]->(ns:" + _ENTITY_STATE_LABEL + ")\n"
+    "      WHERE ns.workspace_id = $workspace_id\n"
+    "        AND ns.valid_from <= datetime($as_of)\n"
+    "        AND (datetime($as_of) < ns.valid_to OR ns.valid_to IS NULL)\n"
+    "  }\n"
+    "OPTIONAL MATCH (neighbour)-[:HAD_STATE]->(n_state:" + _ENTITY_STATE_LABEL + ")\n"
+    "  WHERE n_state.workspace_id = $workspace_id\n"
+    "    AND n_state.valid_from <= datetime($as_of)\n"
+    "    AND (datetime($as_of) < n_state.valid_to OR n_state.valid_to IS NULL)\n"
+    "WITH seed, seed_state, neighbour, n_state, rels, length(path) AS depth\n"
+    "RETURN\n"
+    "    seed.name AS seed_name,\n"
+    "    seed_state.kind AS seed_kind,\n"
+    "    seed_state.source_id AS seed_source_id,\n"
+    "    seed.chunk_text AS seed_chunk_text,\n"
+    "    seed_state.valid_from AS seed_valid_from,\n"
+    "    seed_state.valid_to AS seed_valid_to,\n"
+    "    seed_state.recorded_at AS seed_recorded_at,\n"
+    "    collect(CASE WHEN neighbour IS NULL THEN NULL ELSE {\n"
+    "        name: neighbour.name,\n"
+    "        kind: coalesce(n_state.kind, neighbour.kind),\n"
+    "        source_id: coalesce(n_state.source_id, neighbour.source_id),\n"
+    "        chunk_text: neighbour.chunk_text,\n"
+    "        depth: depth,\n"
+    "        edge_type: rels[-1].edge_type,\n"
+    "        valid_from: n_state.valid_from,\n"
+    "        valid_to: n_state.valid_to,\n"
+    "        recorded_at: n_state.recorded_at\n"
+    "    } END) AS neighbours,\n"
+    "    collect(CASE WHEN rels IS NULL THEN NULL ELSE\n"
+    "        [startNode(last(rels)).name, endNode(last(rels)).name,"
+    " last(rels).edge_type, last(rels).valid_from, last(rels).valid_to,"
+    " last(rels).recorded_at]\n"
     "    END) AS edges\n"
 )
 
@@ -903,6 +1026,13 @@ _ensure_workspace_predicate(_UPSERT_EDGE_CYPHER_TEMPLATE, "_UPSERT_EDGE_CYPHER_T
 _ensure_workspace_predicate(_DELETE_BY_SOURCE_CYPHER, "_DELETE_BY_SOURCE_CYPHER")
 _ensure_workspace_predicate(_GET_ENTITY_BY_NAME_CYPHER, "_GET_ENTITY_BY_NAME_CYPHER")
 _ensure_workspace_predicate(_TRAVERSE_CYPHER_TEMPLATE, "_TRAVERSE_CYPHER_TEMPLATE")
+# ADR-0008 §Consequences-security #2 (issue #132) — every as_of read template
+# carries the workspace predicate FIRST and the bitemporal predicate on top.
+# A refactor that elides the workspace clause "because as_of narrows enough"
+# recreates the #117/#119 ACL leak in a new dimension.  Drop the predicate,
+# the module fails to import.
+_ensure_workspace_predicate(_GET_ENTITY_BY_NAME_AS_OF_CYPHER, "_GET_ENTITY_BY_NAME_AS_OF_CYPHER")
+_ensure_workspace_predicate(_TRAVERSE_AS_OF_CYPHER_TEMPLATE, "_TRAVERSE_AS_OF_CYPHER_TEMPLATE")
 _ensure_workspace_predicate(_COUNT_ENTITIES_CYPHER, "_COUNT_ENTITIES_CYPHER")
 _ensure_workspace_predicate(_COUNT_ENTITIES_BY_KIND_CYPHER, "_COUNT_ENTITIES_BY_KIND_CYPHER")
 _ensure_workspace_predicate(_COUNT_ENTITIES_BY_SOURCE_CYPHER, "_COUNT_ENTITIES_BY_SOURCE_CYPHER")
@@ -979,24 +1109,68 @@ def _validate_edge_types(edge_types: list[str] | None) -> list[str] | None:
     return edge_types
 
 
-def _build_traverse_cypher(max_depth: int, edge_types: list[str] | None) -> str:
+def _build_traverse_cypher(
+    max_depth: int,
+    edge_types: list[str] | None,
+    *,
+    as_of: bool = False,
+) -> str:
     """Render the traversal Cypher with a static (validated) depth bound.
 
     ``max_depth`` is an integer that has already been clamped by
     :func:`_clamp_depth`.  ``edge_types`` has been validated by
     :func:`_validate_edge_types` — both are safe to interpolate.
+
+    ``as_of`` selects the template per ADR-0008 §5: ``False`` (default)
+    renders the latest-version template (current-state read, hot path);
+    ``True`` renders the as-of template that walks ``[:HAD_STATE]`` and
+    applies the canonical bitemporal predicate on every node and edge.
+    Issue #132.
     """
     if edge_types:
         quoted = ",".join(f"'{et}'" for et in edge_types)
         filter_clause = f" AND r.edge_type IN [{quoted}]"
     else:
         filter_clause = ""
-    rendered = _TRAVERSE_CYPHER_TEMPLATE.replace("__MAX_DEPTH__", str(max_depth))
+    template = _TRAVERSE_AS_OF_CYPHER_TEMPLATE if as_of else _TRAVERSE_CYPHER_TEMPLATE
+    rendered = template.replace("__MAX_DEPTH__", str(max_depth))
     return rendered.replace("__EDGE_TYPE_FILTER__", filter_clause)
 
 
+def _optional_datetime(value: Any) -> datetime | None:
+    """Coerce a Neo4j temporal-or-null payload to ``datetime | None``.
+
+    Returns ``None`` for missing / null values so legacy (pre-#130
+    backfill) rows still round-trip cleanly.  See ADR-0008 §1 for the
+    "still valid" sentinel rationale (``valid_to IS NULL`` is meaningful,
+    not "missing").
+    """
+    if value is None:
+        return None
+    return _coerce_to_datetime(value)
+
+
+def _as_of_to_param(as_of: datetime) -> str:
+    """Serialise a Python ``datetime`` to the Cypher ``$as_of`` parameter.
+
+    ADR-0008 §1 fixes the on-write canonical form as UTC microsecond
+    Cypher ``datetime``.  We send an ISO-8601 string and let the Cypher
+    template wrap it with ``datetime($as_of)``.  Naive datetimes are
+    stamped UTC (matches ``_coerce_to_datetime`` symmetry) — we never
+    silently shift wall-clock to UTC, but a missing tzinfo is treated
+    as UTC per the writer's contract from issue #131.
+    """
+    aware = as_of if as_of.tzinfo else as_of.replace(tzinfo=UTC)
+    return aware.isoformat()
+
+
 def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
-    """Build an :class:`EntityNodeView` from a single-row Cypher result."""
+    """Build an :class:`EntityNodeView` from a single-row Cypher result.
+
+    Populates the ADR-0008 bitemporal triple (``valid_from``,
+    ``valid_to``, ``recorded_at``) when present in the row; legacy rows
+    that pre-date the #130 backfill leave them ``None``.
+    """
     return EntityNodeView(
         name=str(record["name"]),
         kind=str(record["kind"]),
@@ -1004,6 +1178,9 @@ def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
         chunk_text=record.get("chunk_text"),
         depth=0,
         edge_type=None,
+        valid_from=_optional_datetime(record.get("valid_from")),
+        valid_to=_optional_datetime(record.get("valid_to")),
+        recorded_at=_optional_datetime(record.get("recorded_at")),
     )
 
 
@@ -1016,15 +1193,29 @@ def _neighbour_to_view(payload: dict[str, Any]) -> EntityNodeView:
         chunk_text=payload.get("chunk_text"),
         depth=int(payload.get("depth", 1)),
         edge_type=(str(payload["edge_type"]) if payload.get("edge_type") else None),
+        valid_from=_optional_datetime(payload.get("valid_from")),
+        valid_to=_optional_datetime(payload.get("valid_to")),
+        recorded_at=_optional_datetime(payload.get("recorded_at")),
     )
 
 
 def _edge_tuple_to_view(triplet: list[Any]) -> GraphEdgeView:
-    """Build a :class:`GraphEdgeView` from a ``[from, to, edge_type]`` row."""
+    """Build a :class:`GraphEdgeView` from a traversal collect() row.
+
+    The triplet shape is now
+    ``[from, to, edge_type, valid_from?, valid_to?, recorded_at?]`` —
+    the bitemporal slots may be absent on legacy edges.
+    """
+    valid_from = triplet[3] if len(triplet) > 3 else None
+    valid_to = triplet[4] if len(triplet) > 4 else None
+    recorded_at = triplet[5] if len(triplet) > 5 else None
     return GraphEdgeView(
         from_entity=str(triplet[0]),
         to_entity=str(triplet[1]),
         edge_type=str(triplet[2]),
+        valid_from=_optional_datetime(valid_from),
+        valid_to=_optional_datetime(valid_to),
+        recorded_at=_optional_datetime(recorded_at),
     )
 
 
@@ -1789,14 +1980,29 @@ class Neo4jGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> EntityNodeView | None:
-        """Resolve an entity by fully-qualified name, within workspace."""
+        """Resolve an entity by fully-qualified name, within workspace.
+
+        ``as_of`` is the optional point-in-time anchor from issue #132.
+        ``None`` (default) reads the ``:Entity`` mirror — hot path,
+        index-backed by ``(workspace_id, name)``, byte-for-byte
+        identical to the pre-bitemporal contract (ADR-0008 §5).  When
+        set, walks ``[:HAD_STATE]`` and applies the canonical bitemporal
+        predicate against ``:EntityState``; index-backed by
+        ``entity_state_workspace_valid_window``.
+        """
         params: dict[str, Any] = {
             _WORKSPACE_PARAM: str(workspace_id),
             "entity_name": entity_name,
         }
+        if as_of is None:
+            cypher = _GET_ENTITY_BY_NAME_CYPHER
+        else:
+            cypher = _GET_ENTITY_BY_NAME_AS_OF_CYPHER
+            params["as_of"] = _as_of_to_param(as_of)
         async with self._driver.session(database=self._config.database) as session:
-            rows = await session.execute_read(_run_read_stmt, _GET_ENTITY_BY_NAME_CYPHER, params)
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
         if not rows:
             return None
         return _entity_record_to_view(rows[0])
@@ -1806,27 +2012,38 @@ class Neo4jGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
         """BFS traversal from a seed, scoped to ``workspace_id``.
 
         Raises ``ValueError("entity_not_found:<name>")`` when the seed
-        does not exist in the caller's workspace — matches the pgvector
-        contract exactly so callers do not branch on backend.
+        does not exist in the caller's workspace at ``as_of`` — matches
+        the post-#131 contract exactly so callers do not branch on
+        backend.
+
+        ``as_of`` is the optional point-in-time anchor from issue #132.
+        ``None`` (default) reads the still-current graph (zero behaviour
+        change vs PR #104).  When set, every node in the traversal AND
+        every relationship satisfies the ADR-0008 §5 canonical predicate.
+        Two distinct Cypher templates per ADR-0008 §5 — the latest path
+        does NOT carry the bitemporal predicate.
         """
         clamped = _clamp_depth(max_depth, _MAX_DEPTH_CEILING)
         validated_types = _validate_edge_types(edge_types)
-        cypher = _build_traverse_cypher(clamped, validated_types)
+        cypher = _build_traverse_cypher(clamped, validated_types, as_of=as_of is not None)
         params: dict[str, Any] = {
             _WORKSPACE_PARAM: str(workspace_id),
             "entity_name": entity_name,
         }
+        if as_of is not None:
+            params["as_of"] = _as_of_to_param(as_of)
         async with self._driver.session(database=self._config.database) as session:
             rows = await session.execute_read(_run_read_stmt, cypher, params)
 
         if not rows:
-            # Seed absent — indistinguishable from cross-workspace.
+            # Seed absent at as_of — indistinguishable from cross-workspace.
             raise ValueError(f"entity_not_found:{entity_name}")
         return _rows_to_graph_result(rows[0])
 
@@ -1835,6 +2052,7 @@ class Neo4jGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
@@ -1842,6 +2060,7 @@ class Neo4jGraphStore:
         return await self.find_related(
             entity_name=entity_name,
             workspace_id=workspace_id,
+            as_of=as_of,
             max_depth=max_depth,
             edge_types=edge_types,
         )
@@ -2008,7 +2227,12 @@ def _edge_to_params(
 
 
 def _rows_to_graph_result(row: dict[str, Any]) -> GraphResultView:
-    """Assemble a :class:`GraphResultView` from a single traversal row."""
+    """Assemble a :class:`GraphResultView` from a single traversal row.
+
+    Surfaces the ADR-0008 bitemporal triple on the seed when the
+    traversal Cypher emitted it (post-#132 templates).  Legacy rows
+    return ``None`` for all three fields per ADR-0008 §1.
+    """
     seed = EntityNodeView(
         name=str(row["seed_name"]),
         kind=str(row["seed_kind"]),
@@ -2016,11 +2240,15 @@ def _rows_to_graph_result(row: dict[str, Any]) -> GraphResultView:
         chunk_text=row.get("seed_chunk_text"),
         depth=0,
         edge_type=None,
+        valid_from=_optional_datetime(row.get("seed_valid_from")),
+        valid_to=_optional_datetime(row.get("seed_valid_to")),
+        recorded_at=_optional_datetime(row.get("seed_recorded_at")),
     )
     related_raw = row.get("neighbours") or []
     related = [_neighbour_to_view(n) for n in related_raw if n and n.get("name")]
     edges_raw = row.get("edges") or []
-    edges = [_edge_tuple_to_view(e) for e in edges_raw if e and len(e) == 3 and e[0] and e[1]]
+    # Edges may be 3-tuple (legacy) or 6-tuple (post-#132 with bitemporal).
+    edges = [_edge_tuple_to_view(e) for e in edges_raw if e and len(e) >= 3 and e[0] and e[1]]
     return GraphResultView(seed=seed, related=related, edges=edges)
 
 
