@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
 # ---------------------------------------------------------------------------
@@ -41,6 +42,14 @@ class EntityNodeView:
 
     Populated by every ``GraphStore`` implementation.  Mirrors the shape
     consumed by REST/MCP handlers in the current pgvector path.
+
+    Bitemporal fields (``valid_from``, ``valid_to``, ``recorded_at``) are
+    optional per ADR-0008 §1.  They are populated when the read path
+    surfaces a ``:Entity`` mirror or an ``:EntityState`` row that carries
+    the bitemporal triple.  Pre-bitemporal legacy rows that pre-date
+    issue #130's backfill leave them as ``None``.  Callers that do not
+    care about time-travel semantics can ignore the fields entirely
+    (the protocol's ``as_of`` parameter is opt-in).
     """
 
     name: str
@@ -49,15 +58,31 @@ class EntityNodeView:
     chunk_text: str | None
     depth: int = 0
     edge_type: str | None = None
+    # ADR-0008 §1 — bitemporal triple.  Optional: legacy callers / legacy
+    # rows leave them None.  See ADR-0008 §5 for the open-closed
+    # ``[valid_from, valid_to)`` interval convention and ``valid_to=None``
+    # as the "still valid" sentinel.
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    recorded_at: datetime | None = None
 
 
 @dataclass(slots=True)
 class GraphEdgeView:
-    """Backend-neutral view of a directed edge between two entities."""
+    """Backend-neutral view of a directed edge between two entities.
+
+    Bitemporal fields follow the same contract as :class:`EntityNodeView`
+    (ADR-0008 §3 — every relationship carries the triple as direct
+    relationship properties).  Optional for legacy callers.
+    """
 
     from_entity: str
     to_entity: str
     edge_type: str
+    # ADR-0008 §3 — bitemporal triple as relationship properties.
+    valid_from: datetime | None = None
+    valid_to: datetime | None = None
+    recorded_at: datetime | None = None
 
 
 @dataclass
@@ -195,6 +220,7 @@ class GraphStore(Protocol):
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> EntityNodeView | None:
         """Resolve an entity by fully-qualified name, within workspace.
 
@@ -209,6 +235,14 @@ class GraphStore(Protocol):
             Fully-qualified ``Entity.name`` string.
         workspace_id:
             REQUIRED.  The traversal is confined to this workspace.
+        as_of:
+            Optional point-in-time anchor.  When ``None`` (default),
+            returns the still-current state via the ``:Entity`` mirror —
+            byte-identical to the pre-bitemporal contract (ADR-0008
+            §5 hot-path guarantee).  When set, returns the
+            ``:EntityState`` version that satisfies the ADR-0008 §5
+            canonical predicate ``valid_from <= as_of AND (as_of <
+            valid_to OR valid_to IS NULL)``.  Issue #132.
         """
         ...
 
@@ -217,6 +251,7 @@ class GraphStore(Protocol):
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
@@ -230,6 +265,13 @@ class GraphStore(Protocol):
             REQUIRED.  Seed lookup AND every traversal hop are
             confined to this workspace.  There is no "skip filtering"
             sentinel.
+        as_of:
+            Optional point-in-time anchor.  ``None`` (default) returns
+            the still-current graph.  When set, every node in the
+            traversal (seed + neighbours) AND every relationship
+            satisfies the ADR-0008 §5 canonical predicate; a relationship
+            is included iff it was valid at ``as_of`` AND both endpoints
+            were valid at ``as_of``.  Issue #132.
         max_depth:
             Maximum number of hops from the seed (>=1).  Values <1
             are clamped to 1.
@@ -240,7 +282,7 @@ class GraphStore(Protocol):
         ------
         ValueError
             When no entity with the given name exists in the caller's
-            workspace (``"entity_not_found:<name>"``).
+            workspace at ``as_of`` (``"entity_not_found:<name>"``).
         """
         ...
 
@@ -249,16 +291,15 @@ class GraphStore(Protocol):
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
         """Alias of ``find_related`` using the graph-database vocabulary.
 
         Kept on the protocol because issue #103 enumerates ``traverse``
-        as a first-class method name.  The pgvector adapter delegates
-        to ``find_related``; a Neo4j adapter may choose to make this
-        the native entry point and have ``find_related`` delegate to
-        it.
+        as a first-class method name.  ``as_of`` semantics mirror
+        :meth:`find_related` — see issue #132 / ADR-0008 §5.
         """
         ...
 

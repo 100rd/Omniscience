@@ -23,6 +23,7 @@ production code never imports it.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from omniscience_core.storage.graph import (
     EdgeUpsert,
@@ -85,7 +86,18 @@ class GraphQueryProxy(GraphStore):
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> EntityNodeView | None:
+        # ADR-0008 §5 / issue #132 — the proxy has no notion of versions
+        # because GraphQueryService is the pre-bitemporal SQL backend.
+        # We accept the parameter to match the protocol but reject any
+        # non-None value rather than silently returning latest, which
+        # would lie to a caller that explicitly asked for a point in time.
+        if as_of is not None:
+            raise NotImplementedError(
+                "GraphQueryProxy does not support as_of reads (issue #132); "
+                "use the Neo4j adapter for bitemporal queries."
+            )
         try:
             result = await self._query_service.get_related(
                 entity_name=entity_name,
@@ -103,9 +115,15 @@ class GraphQueryProxy(GraphStore):
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
+        if as_of is not None:
+            raise NotImplementedError(
+                "GraphQueryProxy does not support as_of reads (issue #132); "
+                "use the Neo4j adapter for bitemporal queries."
+            )
         result = await self._query_service.get_related(
             entity_name=entity_name,
             workspace_id=workspace_id,
@@ -119,12 +137,14 @@ class GraphQueryProxy(GraphStore):
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
         return await self.find_related(
             entity_name=entity_name,
             workspace_id=workspace_id,
+            as_of=as_of,
             max_depth=max_depth,
             edge_types=edge_types,
         )
