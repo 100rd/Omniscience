@@ -148,3 +148,31 @@ RETENTION_WORKER_LAG_SECONDS: Gauge = Gauge(
         "steady; >7d trips a P1 alert via the freshness alert path."
     ),
 )
+
+# ---------------------------------------------------------------------------
+# Bitemporal end-dating metrics (ADR-0008 §3, issue #137)
+# ---------------------------------------------------------------------------
+#
+# Tombstones are no longer hard-deletes when ``GRAPH_BITEMPORAL=enabled``.
+# The writer end-dates entities and edges instead — sets ``valid_to`` to
+# ``snapshot_at`` (re-ingestion) or ``now()`` (per-document tombstone).
+# The retention worker (#135 / ADR-0009) is the only remaining hard-delete
+# path; eviction operates on ``recorded_at`` age and is orthogonal to the
+# tombstone signal.
+#
+# Counter labels:
+#   * ``kind``    — one of ``"entity"``, ``"edge"``.
+#   * ``reason``  — one of ``"snapshot"`` (snapshot re-ingestion absent
+#                   from new batch), ``"tombstone"`` (per-document
+#                   tombstone signal end-dates by source).
+GRAPH_END_DATED_TOTAL: Counter = Counter(
+    name="omniscience_graph_end_dated_total",
+    documentation=(
+        "Total entities and edges end-dated by the bitemporal writer "
+        "(ADR-0008 §3, issue #137). Increments per (workspace, source) "
+        "end-dating operation. Reason ``snapshot`` covers re-ingestion "
+        "of a smaller snapshot; ``tombstone`` covers the per-document "
+        "tombstone signal."
+    ),
+    labelnames=["kind", "reason"],
+)

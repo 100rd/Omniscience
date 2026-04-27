@@ -50,6 +50,7 @@ from omniscience_core.storage.graph import (
     GraphEdgeView,
     GraphResultView,
 )
+from omniscience_core.telemetry.metrics import GRAPH_END_DATED_TOTAL
 
 log = structlog.get_logger(__name__)
 
@@ -411,6 +412,13 @@ RETURN state_changed AS state_changed
 # pgvector ``IndexWriter.upsert_graph`` semantics: deleting by
 # source_id purges both entities and their incident edges via
 # DETACH DELETE.
+#
+# Used ONLY when ``Neo4jStoreConfig.bitemporal_enabled`` is ``False``.
+# Once the bitemporal flag flips on, the writer routes to
+# ``_END_DATE_BY_SOURCE_CYPHER`` below per ADR-0008 §3 and issue #137.
+# This template is preserved byte-for-byte from PR #104 so the legacy
+# regression suite at ``tests/test_neo4j_store.py`` keeps passing
+# unmodified — the "no regressions" contract from ADR-0008 §8 phase 2.
 _DELETE_BY_SOURCE_CYPHER: Final[str] = f"""
 MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, source_id: $source_id}})
 DETACH DELETE n
@@ -420,11 +428,131 @@ DETACH DELETE n
 # Mirrors the pgvector no-op contract but is a real operation here —
 # Neo4j has no cascade from a Postgres source row, so proactive cleanup
 # is required when a document is tombstoned.
+#
+# Used ONLY when ``Neo4jStoreConfig.bitemporal_enabled`` is ``False``.
+# When the bitemporal flag is on, the writer routes to
+# ``_END_DATE_TOMBSTONED_CYPHER`` per ADR-0008 §3 and issue #137; the
+# retention worker (#135 / ADR-0009) is then the only remaining hard-
+# delete path and operates on ``recorded_at`` age, not on tombstone
+# signals.
 _DELETE_TOMBSTONED_CYPHER: Final[str] = f"""
 MATCH (n:{_ENTITY_LABEL})
 WHERE n.tombstoned_at IS NOT NULL
 DETACH DELETE n
 RETURN count(n) AS deleted
+"""
+
+
+# --- Tombstone end-dating (ADR-0008 §3, issue #137) -----------------------
+#
+# Replaces hard-delete with end-dating when the bitemporal flag is on.
+# The writer no longer issues ``DETACH DELETE`` against entities or
+# incident relationships — instead it sets ``valid_to`` on the still-
+# open identity row, on the still-open ``[:HAD_STATE]``, on the still-
+# open ``:EntityState``, and on every still-open incident relationship.
+#
+# After this transformation a query at any ``as_of < $now`` returns the
+# entity/edge as it was; a query at ``as_of >= $now`` finds nothing,
+# which is the bitemporal-correct shape an ``as_of`` reader expects
+# (ADR-0008 §5).
+#
+# Hard deletion is gone for the bitemporal-enabled deployment.  The
+# retention worker (#135) is the only remaining hard-delete path and
+# operates on ``recorded_at`` age, NOT on tombstone signals — these
+# two policies are deliberately orthogonal (ADR-0009 §2).
+
+# End-date every still-open node + relationship attached to (workspace_id,
+# source_id).  Used by ``upsert_graph`` for replace-by-source semantics
+# under the bitemporal flag — re-ingestion of a smaller snapshot end-
+# dates entities and edges absent from the new batch.
+#
+# Returns counts so the writer can log + emit telemetry.
+#
+# Why two passes over the same set?  The relationship pass uses
+# ``OPTIONAL MATCH`` so an entity with no incident edges still gets its
+# version chain closed; counting them in one ``MATCH (a)-[r]-(b)`` join
+# would over-count when a node has multiple edges (one row per edge,
+# and each edge is end-dated only once regardless of which endpoint
+# anchors the match).  Splitting keeps the counts honest.
+_END_DATE_BY_SOURCE_CYPHER: Final[str] = f"""
+// ADR-0008 §3 + issue #137 — set valid_to on every still-open
+// :Entity (and its open [:HAD_STATE] + :EntityState mirror) and every
+// incident relationship for (workspace_id, source_id).  No DETACH DELETE.
+//
+// Phase A — end-date entity identity, open [:HAD_STATE], open :EntityState.
+CALL {{
+    MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, source_id: $source_id}})
+    WHERE n.valid_to IS NULL
+    OPTIONAL MATCH (n)-[h:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
+    WHERE h.valid_to IS NULL AND s.valid_to IS NULL
+    SET n.valid_to = datetime($now),
+        n.updated_at = $now
+    FOREACH (_ IN CASE WHEN h IS NOT NULL THEN [1] ELSE [] END |
+        SET h.valid_to = datetime($now),
+            s.valid_to = datetime($now)
+    )
+    RETURN count(DISTINCT n) AS entities_end_dated
+}}
+//
+// Phase B — end-date every still-open relationship incident to a
+// :Entity in (workspace_id, source_id).  Match anchored on the entity
+// to keep the workspace_id predicate on the node side; then enforce
+// workspace_id on the relationship for defence-in-depth (an edge with
+// a foreign workspace_id stamped on it must NOT be touched here).
+CALL {{
+    MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, source_id: $source_id}})
+    OPTIONAL MATCH (n)-[r]-()
+    WHERE r.workspace_id = $workspace_id AND r.valid_to IS NULL
+    FOREACH (_ IN CASE WHEN r IS NOT NULL THEN [1] ELSE [] END |
+        SET r.valid_to = datetime($now),
+            r.updated_at = $now
+    )
+    RETURN count(DISTINCT r) AS edges_end_dated
+}}
+RETURN entities_end_dated, edges_end_dated
+"""
+
+# End-date every :Entity flagged tombstoned (and its open [:HAD_STATE]
+# + open :EntityState) where ``valid_to`` is still NULL.  Replaces the
+# legacy hard-delete in ``delete_tombstoned``.  Returns the count so the
+# caller can emit telemetry.
+#
+# ``tombstoned_at`` is set on the identity mirror by the ingestion layer
+# (an external signal; ADR-0007 §7 keeps Postgres ``documents.tombstoned_at``
+# as the operational metadata source).  This Cypher reads that flag on
+# the :Entity mirror and end-dates the whole open chain.
+#
+# Edges to/from tombstoned entities are end-dated alongside.  Defence-in-
+# depth: filter the relationship by ``workspace_id`` even though it is
+# bounded by an entity already filtered.
+_END_DATE_TOMBSTONED_CYPHER: Final[str] = f"""
+// ADR-0008 §3 + issue #137 — end-date tombstoned entities (and their
+// open [:HAD_STATE] + :EntityState mirror) instead of DETACH DELETE.
+CALL {{
+    MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+    WHERE n.tombstoned_at IS NOT NULL AND n.valid_to IS NULL
+    OPTIONAL MATCH (n)-[h:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
+    WHERE h.valid_to IS NULL AND s.valid_to IS NULL
+    SET n.valid_to = datetime($now),
+        n.updated_at = $now
+    FOREACH (_ IN CASE WHEN h IS NOT NULL THEN [1] ELSE [] END |
+        SET h.valid_to = datetime($now),
+            s.valid_to = datetime($now)
+    )
+    RETURN count(DISTINCT n) AS entities_end_dated
+}}
+CALL {{
+    MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+    WHERE n.tombstoned_at IS NOT NULL
+    OPTIONAL MATCH (n)-[r]-()
+    WHERE r.workspace_id = $workspace_id AND r.valid_to IS NULL
+    FOREACH (_ IN CASE WHEN r IS NOT NULL THEN [1] ELSE [] END |
+        SET r.valid_to = datetime($now),
+            r.updated_at = $now
+    )
+    RETURN count(DISTINCT r) AS edges_end_dated
+}}
+RETURN entities_end_dated, edges_end_dated
 """
 
 
@@ -1055,6 +1183,13 @@ _ensure_workspace_predicate(_UPSERT_ENTITY_BITEMPORAL_CYPHER, "_UPSERT_ENTITY_BI
 _ensure_workspace_predicate(
     _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE, "_UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE"
 )
+# Issue #137 — bitemporal-enabled writer end-dates instead of hard-
+# deleting.  Both new templates are workspace-scoped on every MATCH
+# (entity identity AND relationship); drop the predicate, the module
+# fails to import.  Mirrors the ACL discipline applied to every other
+# bitemporal Cypher template (ADR-0008 §Consequences-security #1).
+_ensure_workspace_predicate(_END_DATE_BY_SOURCE_CYPHER, "_END_DATE_BY_SOURCE_CYPHER")
+_ensure_workspace_predicate(_END_DATE_TOMBSTONED_CYPHER, "_END_DATE_TOMBSTONED_CYPHER")
 # ADR-0009 §Consequences-security #1: every retention Cypher template
 # iterates ONE workspace at a time and filters every MATCH on
 # `workspace_id`.  Cross-tenant batches are forbidden — drop the
@@ -1425,6 +1560,7 @@ class Neo4jGraphStore:
         document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        snapshot_at: datetime | None = None,
     ) -> None:
         """Persist a batch of entities+edges for one document (idempotent).
 
@@ -1432,23 +1568,70 @@ class Neo4jGraphStore:
         pgvector path; Neo4j keys on ``source_id`` per ADR-0005.  It is
         kept in the signature to preserve call-site compatibility and
         is logged for audit.
+
+        Replace-by-source semantics depend on the bitemporal flag pinned
+        at ``__init__`` and on ``snapshot_at``:
+
+        - **Flag disabled** (default during rollout): the writer issues
+          ``DETACH DELETE`` on every prior :Entity for ``source_id`` and
+          re-inserts the new batch.  Identical to PR #104 — the legacy
+          hard-delete contract is preserved byte-for-byte.  The
+          ``snapshot_at`` argument is accepted but ignored.
+
+        - **Flag enabled, ``snapshot_at`` is None**: the writer emits
+          versioning upserts (ADR-0008 §2 / §3) but does NOT end-date
+          entities or edges absent from the new batch.  This is the
+          legacy behaviour for non-snapshot connectors that emit only
+          new/changed entities — the previous version chain is left
+          alone.
+
+        - **Flag enabled, ``snapshot_at`` is supplied** (issue #137):
+          the writer end-dates every still-open :Entity and every
+          incident still-open relationship for ``(workspace_id,
+          source_id)`` to ``snapshot_at`` BEFORE upserting the new
+          batch.  Re-upsert of an entity present in both batches re-
+          opens it (the bitemporal upsert path emits a new
+          ``:EntityState`` keyed on ``valid_from = $now`` and the
+          identity mirror's ``valid_to`` flips back to NULL via the
+          ``ON MATCH SET`` block).  An entity absent from the new batch
+          stays end-dated — ``as_of < snapshot_at`` queries find it,
+          ``as_of >= snapshot_at`` queries do not.
+
+        Snapshot-mode connectors (AWS, Kubernetes, etc.) MUST pass
+        ``snapshot_at=now()`` to get the end-dating semantics.  Per-
+        document connectors that emit only deltas pass ``None`` (the
+        default).  Per the issue #137 scope: connectors are not
+        modified in this PR — the writer's parameter is the contract
+        change; per-connector PRs ride separately.
         """
         workspace_id = self._workspace_from_entities(entities)
+        snap_iso = snapshot_at.isoformat() if snapshot_at is not None else None
         async with self._driver.session(database=self._config.database) as session:
-            await session.execute_write(
+            counts = await session.execute_write(
                 self._run_upsert_graph,
                 workspace_id,
                 source_id,
                 entities,
                 edges,
                 self._bitemporal_enabled,
+                snap_iso,
             )
+        # Tolerate mock-driver tests that don't propagate the return value.
+        entities_end_dated, edges_end_dated = counts if counts is not None else (0, 0)
+        if entities_end_dated:
+            GRAPH_END_DATED_TOTAL.labels(kind="entity", reason="snapshot").inc(entities_end_dated)
+        if edges_end_dated:
+            GRAPH_END_DATED_TOTAL.labels(kind="edge", reason="snapshot").inc(edges_end_dated)
         log.info(
             "neo4j_upsert_graph",
             source_id=str(source_id),
             document_id=str(document_id),
             entities=len(entities),
             edges=len(edges),
+            entities_end_dated=entities_end_dated,
+            edges_end_dated=edges_end_dated,
+            bitemporal_enabled=self._bitemporal_enabled,
+            snapshot_at=snap_iso,
         )
 
     @staticmethod
@@ -1485,26 +1668,52 @@ class Neo4jGraphStore:
         entities: list[Any],
         edges: list[Any],
         bitemporal_enabled: bool,
-    ) -> None:
+        snapshot_at_iso: str | None,
+    ) -> tuple[int, int]:
         """Transaction body for :meth:`upsert_graph` (idempotent replace).
 
-        ``bitemporal_enabled`` is the per-instance flag forwarded from
-        :meth:`upsert_graph`.  Static method by design (Neo4j managed-tx
-        retry passes positional args to the callable), so the flag has to
-        come in through the parameter list rather than ``self``.
+        ``bitemporal_enabled`` and ``snapshot_at_iso`` are the per-call
+        flags forwarded from :meth:`upsert_graph`.  Static method by
+        design (Neo4j managed-tx retry passes positional args to the
+        callable), so flags come in through the parameter list rather
+        than ``self``.
+
+        Returns ``(entities_end_dated, edges_end_dated)`` so the caller
+        can emit telemetry.  Hard-delete branches (flag disabled) return
+        ``(0, 0)`` — no end-dating happened.
         """
         now = datetime.now(UTC).isoformat()
-        # Replace-by-source: drop old entities (and their edges) for this
-        # source, then re-insert.  Mirrors IndexWriter.upsert_graph.
-        # NOTE: ADR-0008 §3 says the writer no longer DELETEs once the
-        # bitemporal flag is on — but per issue #131's "Non-goals", the
-        # `_DELETE_BY_SOURCE_CYPHER` template is owned by Wave 5 (#137)
-        # and is intentionally left alone in this PR.  The writer keeps
-        # delete-by-source semantics until that wave lands.
-        await tx.run(
-            _DELETE_BY_SOURCE_CYPHER,
-            {_WRITE_WORKSPACE_PARAM: str(workspace_id), "source_id": str(source_id)},
-        )
+        # Replace-by-source dispatch (ADR-0008 §3 + issue #137):
+        #
+        #   bitemporal_enabled=False                  -> hard-delete (legacy)
+        #   bitemporal_enabled=True, snapshot_at=None -> NO replace (delta mode)
+        #   bitemporal_enabled=True, snapshot_at=set  -> end-date (snapshot mode)
+        entities_end_dated = 0
+        edges_end_dated = 0
+        if not bitemporal_enabled:
+            await tx.run(
+                _DELETE_BY_SOURCE_CYPHER,
+                {_WRITE_WORKSPACE_PARAM: str(workspace_id), "source_id": str(source_id)},
+            )
+        elif snapshot_at_iso is not None:
+            # Snapshot mode (issue #137).  The writer end-dates every
+            # still-open entity + incident edge for this source BEFORE
+            # upserting the new batch — entities re-observed in the new
+            # batch get re-opened by the upsert path (bitemporal upsert
+            # creates a new :EntityState with valid_from=$now and the
+            # identity mirror's valid_to flips to NULL).
+            ed_result = await tx.run(
+                _END_DATE_BY_SOURCE_CYPHER,
+                {
+                    _WRITE_WORKSPACE_PARAM: str(workspace_id),
+                    "source_id": str(source_id),
+                    "now": snapshot_at_iso,
+                },
+            )
+            ed_record = await ed_result.single()
+            if ed_record is not None:
+                entities_end_dated = int(ed_record.get("entities_end_dated", 0) or 0)
+                edges_end_dated = int(ed_record.get("edges_end_dated", 0) or 0)
 
         entity_cypher = (
             _UPSERT_ENTITY_BITEMPORAL_CYPHER if bitemporal_enabled else _UPSERT_ENTITY_CYPHER
@@ -1534,6 +1743,8 @@ class Neo4jGraphStore:
                 edge_params["state_fingerprint"] = _edge_state_fingerprint(edge_params)
             rendered = edge_template.replace("{edge_type}", str(edge_params["edge_type"]))
             await tx.run(rendered, edge_params)
+
+        return entities_end_dated, edges_end_dated
 
     async def upsert_entity(
         self,
@@ -1615,13 +1826,67 @@ class Neo4jGraphStore:
         params["state_fingerprint"] = _edge_state_fingerprint(params)
         return _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
 
-    async def delete_tombstoned(self) -> int:
-        """Hard-delete tombstoned entities; return the count removed."""
+    async def delete_tombstoned(self, *, workspace_id: uuid.UUID | None = None) -> int:
+        """Process tombstoned entities; behaviour depends on the bitemporal flag.
+
+        - ``bitemporal_enabled=False`` (default during rollout): hard-
+          delete every :Entity with ``tombstoned_at IS NOT NULL`` via
+          ``DETACH DELETE`` — preserves the PR #104 contract verbatim.
+          ``workspace_id`` is ignored on this path (the legacy template
+          is unscoped, matching the legacy behaviour).  Returns the
+          count of entities deleted.
+
+        - ``bitemporal_enabled=True`` (post-cutover, issue #137):
+          end-date every still-open tombstoned :Entity (and its open
+          ``[:HAD_STATE]`` + ``:EntityState`` mirror + incident open
+          relationships) by setting ``valid_to = now()``.  No
+          ``DETACH DELETE``.  ``workspace_id`` is REQUIRED on this path
+          — the bitemporal template is workspace-scoped per ADR-0008
+          §Consequences-security.  Returns the count of entities end-
+          dated.
+
+        Hard deletion of tombstoned rows under the bitemporal flag is
+        the retention worker's job (#135 / ADR-0009) and operates on
+        ``recorded_at`` age, NOT on tombstone signals — these two
+        policies are orthogonal.
+        """
+        if not self._bitemporal_enabled:
+            async with self._driver.session(database=self._config.database) as session:
+                rows = await session.execute_write(
+                    _run_write_returning, _DELETE_TOMBSTONED_CYPHER, {}
+                )
+            if not rows:
+                return 0
+            return int(rows[0].get("deleted", 0))
+        # Bitemporal path — end-date instead of delete.
+        if workspace_id is None:
+            raise ValueError(
+                "Neo4jGraphStore.delete_tombstoned requires workspace_id when "
+                "bitemporal_enabled=True; cross-workspace tombstone end-dating "
+                "is forbidden (ADR-0008 §Consequences-security #1)."
+            )
+        now_iso = datetime.now(UTC).isoformat()
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "now": now_iso,
+        }
         async with self._driver.session(database=self._config.database) as session:
-            rows = await session.execute_write(_run_write_returning, _DELETE_TOMBSTONED_CYPHER, {})
-        if not rows:
-            return 0
-        return int(rows[0].get("deleted", 0))
+            rows = await session.execute_write(
+                _run_write_returning, _END_DATE_TOMBSTONED_CYPHER, params
+            )
+        entities_end_dated = int(rows[0].get("entities_end_dated", 0)) if rows else 0
+        edges_end_dated = int(rows[0].get("edges_end_dated", 0)) if rows else 0
+        if entities_end_dated:
+            GRAPH_END_DATED_TOTAL.labels(kind="entity", reason="tombstone").inc(entities_end_dated)
+        if edges_end_dated:
+            GRAPH_END_DATED_TOTAL.labels(kind="edge", reason="tombstone").inc(edges_end_dated)
+        log.info(
+            "neo4j_end_date_tombstoned",
+            workspace_id=str(workspace_id),
+            entities_end_dated=entities_end_dated,
+            edges_end_dated=edges_end_dated,
+        )
+        return entities_end_dated
 
     # ------------------------------------------------------------------
     # Bitemporal backfill (ADR-0008 §8 phase 1, issue #130)
