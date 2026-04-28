@@ -173,11 +173,12 @@ _COMPOSED_QUERIES_TOTAL: Counter = Counter(
 
 
 class _VectorSearchCallable(Protocol):
-    """Narrow protocol: any object with ``async search(request, workspace_id)``.
+    """Narrow protocol: any object with ``async search(request, workspace_id, as_of)``.
 
     Accepts :class:`QdrantVectorStore` and any forward-compatible
     vector store without importing it — keeps the module free of a
-    static dependency on ``omniscience_index``.
+    static dependency on ``omniscience_index``.  ``as_of`` is keyword-
+    only with a ``None`` default so legacy fakes remain compatible.
     """
 
     async def search(
@@ -185,6 +186,7 @@ class _VectorSearchCallable(Protocol):
         *,
         request: SearchRequest,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> SearchResult: ...
 
 
@@ -325,13 +327,15 @@ class GraphRAGComposer:
             REQUIRED.  Forwarded to every downstream store call so the
             ACL invariant is transitively enforced.
         as_of:
-            Optional ADR-0008 §5 bitemporal anchor.  When set, the
-            anchor stage's :meth:`GraphStore.traverse` call carries it
-            so the candidate subgraph is the one that was valid at T;
-            the vector stage in #133 is unfiltered on time and scoped
-            **only by the chunk/source ids the graph traversal
-            returned** (Qdrant ``as_of`` lands separately in #134).
-            Issue #133.
+            Optional ADR-0008 §5 bitemporal anchor.  When set, both the
+            anchor stage's :meth:`GraphStore.traverse` call AND the
+            vector stage's :meth:`VectorStore.search` call carry it so
+            the candidate subgraph and the chunk-payload filter both
+            reflect the world at T.  This is the cross-store consistency
+            contract: a v3 graph entity at ``as_of=T1`` returns chunks
+            linked to the v1 chunk version that was valid at T1.
+            Issue #134 closed the gap in this PR; issue #133 added the
+            graph-side plumbing.
 
         Returns
         -------
@@ -365,6 +369,7 @@ class GraphRAGComposer:
             request=request,
             workspace_id=workspace_id,
             anchor=anchor,
+            as_of=effective,
         )
         merged = self._run_merge_stage(
             request=request,
@@ -485,6 +490,7 @@ class GraphRAGComposer:
         request: SearchRequest,
         workspace_id: uuid.UUID,
         anchor: _AnchorStageResult,
+        as_of: datetime | None = None,
     ) -> SearchResult:
         """Run the vector search, scoped to anchor candidates when present.
 
@@ -492,12 +498,20 @@ class GraphRAGComposer:
         so the merge stage has enough headroom to re-order.  The
         ``sources`` filter is populated only when the anchor produced
         candidates; otherwise the request is passed through unchanged.
+
+        ``as_of`` (issue #134) is forwarded to
+        :meth:`VectorStore.search` so the bitemporal predicate is
+        applied at the chunk-payload layer; cross-store consistency is
+        therefore mechanical — the candidate subgraph from the graph
+        anchor stage and the chunk filter from the vector stage both
+        reflect the world at ``as_of``.
         """
         stage_start = time.monotonic()
         widened = _widen_request(request, anchor=anchor)
         result = await self._vector_store.search(
             request=widened,
             workspace_id=workspace_id,
+            as_of=as_of,
         )
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="vector").observe(duration)

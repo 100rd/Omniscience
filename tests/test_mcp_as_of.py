@@ -765,7 +765,11 @@ class TestComposerForwardsAsOf:
 
         class _StubVector:
             async def search(
-                self, *, request: SearchRequest, workspace_id: uuid.UUID
+                self,
+                *,
+                request: SearchRequest,
+                workspace_id: uuid.UUID,
+                as_of: datetime | None = None,
             ) -> SearchResult:
                 return SearchResult(
                     hits=[],
@@ -810,7 +814,11 @@ class TestComposerForwardsAsOf:
 
         class _StubVector:
             async def search(
-                self, *, request: SearchRequest, workspace_id: uuid.UUID
+                self,
+                *,
+                request: SearchRequest,
+                workspace_id: uuid.UUID,
+                as_of: datetime | None = None,
             ) -> SearchResult:
                 return SearchResult(
                     hits=[],
@@ -1019,7 +1027,13 @@ async def test_end_to_end_as_of_flows_through_mcp_to_graph_store() -> None:
     store = _planted_store()
 
     class _StubVector:
-        async def search(self, *, request: SearchRequest, workspace_id: uuid.UUID) -> SearchResult:
+        async def search(
+            self,
+            *,
+            request: SearchRequest,
+            workspace_id: uuid.UUID,
+            as_of: datetime | None = None,
+        ) -> SearchResult:
             return SearchResult(
                 hits=[],
                 query_stats=QueryStats(

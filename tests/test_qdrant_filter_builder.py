@@ -11,6 +11,7 @@ PR #119 fixed on the graph side.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 
 import pytest
 from omniscience_index.stores.qdrant_constants import (
@@ -18,10 +19,13 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_EXTERNAL_ID,
     PAYLOAD_SOURCE_ID,
     PAYLOAD_TOMBSTONED_AT,
+    PAYLOAD_VALID_FROM,
+    PAYLOAD_VALID_TO,
     PAYLOAD_WORKSPACE_ID,
 )
 from omniscience_index.stores.qdrant_filters import (
     QdrantFilterBuilder,
+    build_as_of_filter,
     build_tombstone_sweep_filter,
 )
 from qdrant_client import models as qm
@@ -129,6 +133,127 @@ def test_different_workspaces_produce_different_filters() -> None:
     assert isinstance(a_match, qm.MatchValue)
     assert isinstance(b_match, qm.MatchValue)
     assert a_match.value != b_match.value
+
+
+# ---------------------------------------------------------------------------
+# ADR-0008 §5 ``as_of`` predicate (issue #134)
+# ---------------------------------------------------------------------------
+
+
+_AS_OF = datetime(2026, 4, 12, 19, 25, 0, tzinfo=UTC)
+
+
+def _ranges_in_must(flt: qm.Filter) -> list[tuple[str, qm.DatetimeRange]]:
+    """Extract ``(key, DatetimeRange)`` pairs from top-level ``must`` clauses."""
+    out: list[tuple[str, qm.DatetimeRange]] = []
+    for c in flt.must or []:
+        if (
+            isinstance(c, qm.FieldCondition)
+            and c.range is not None
+            and isinstance(c.range, qm.DatetimeRange)
+        ):
+            out.append((c.key, c.range))
+    return out
+
+
+def test_with_as_of_none_omits_predicate_entirely() -> None:
+    """``as_of=None`` is the current-state hot path — no ``valid_*`` clauses on the wire."""
+    flt = QdrantFilterBuilder(workspace_id=_WS_A).with_as_of(None).build()
+    keys = _field_keys(flt)
+    assert PAYLOAD_VALID_FROM not in keys
+    assert PAYLOAD_VALID_TO not in keys
+    # Only the workspace clause is on the wire.
+    assert keys == [PAYLOAD_WORKSPACE_ID]
+
+
+def test_with_as_of_adds_valid_from_lte_clause() -> None:
+    """``valid_from <= as_of`` lands as a ``DatetimeRange(lte=as_of)`` clause."""
+    flt = QdrantFilterBuilder(workspace_id=_WS_A).with_as_of(_AS_OF).build()
+    ranges = dict(_ranges_in_must(flt))
+    assert PAYLOAD_VALID_FROM in ranges
+    assert ranges[PAYLOAD_VALID_FROM].lte == _AS_OF
+    assert ranges[PAYLOAD_VALID_FROM].lt is None
+
+
+def test_with_as_of_adds_valid_to_gt_or_null_subfilter() -> None:
+    """``valid_to > as_of OR valid_to IS NULL`` lands as a ``should``-block sub-filter."""
+    flt = QdrantFilterBuilder(workspace_id=_WS_A).with_as_of(_AS_OF).build()
+    sub_filters = [c for c in (flt.must or []) if isinstance(c, qm.Filter)]
+    assert len(sub_filters) == 1
+    sub = sub_filters[0]
+    assert sub.should is not None
+    # Sub-filter has exactly two should clauses: valid_to gt-range + IsNull.
+    range_clauses = [
+        c
+        for c in sub.should
+        if isinstance(c, qm.FieldCondition) and isinstance(c.range, qm.DatetimeRange)
+    ]
+    null_clauses = [c for c in sub.should if isinstance(c, qm.IsNullCondition)]
+    assert len(range_clauses) == 1
+    assert range_clauses[0].key == PAYLOAD_VALID_TO
+    assert range_clauses[0].range.gt == _AS_OF  # type: ignore[union-attr]
+    assert len(null_clauses) == 1
+    assert null_clauses[0].is_null.key == PAYLOAD_VALID_TO
+
+
+def test_workspace_clause_survives_as_of() -> None:
+    """ACL invariant holds even when ``as_of`` is layered on."""
+    flt = QdrantFilterBuilder(workspace_id=_WS_A).with_as_of(_AS_OF).build()
+    keys = _field_keys(flt)
+    # Workspace is still the first clause (anchor, not afterthought).
+    assert keys[0] == PAYLOAD_WORKSPACE_ID
+    workspace_clauses = [
+        c
+        for c in (flt.must or [])
+        if isinstance(c, qm.FieldCondition) and c.key == PAYLOAD_WORKSPACE_ID
+    ]
+    assert len(workspace_clauses) == 1
+    assert isinstance(workspace_clauses[0].match, qm.MatchValue)
+    assert workspace_clauses[0].match.value == str(_WS_A)
+
+
+def test_with_as_of_preserves_other_narrowers() -> None:
+    """``with_as_of`` composes with ``with_source_ids`` / ``exclude_tombstoned``."""
+    src = uuid.uuid4()
+    flt = (
+        QdrantFilterBuilder(workspace_id=_WS_A)
+        .with_source_ids([src])
+        .exclude_tombstoned()
+        .with_as_of(_AS_OF)
+        .build()
+    )
+    keys = _field_keys(flt)
+    assert PAYLOAD_SOURCE_ID in keys
+    assert PAYLOAD_VALID_FROM in keys
+    null_conds = [c for c in (flt.must or []) if isinstance(c, qm.IsNullCondition)]
+    # Tombstone-null clause is present (excludes tombstoned).
+    tombstone_nulls = [c for c in null_conds if c.is_null.key == PAYLOAD_TOMBSTONED_AT]
+    assert len(tombstone_nulls) == 1
+
+
+def test_with_as_of_is_immutable_and_chainable() -> None:
+    """``with_as_of`` returns a new builder; the original keeps ``as_of=None``."""
+    b0 = QdrantFilterBuilder(workspace_id=_WS_A)
+    b1 = b0.with_as_of(_AS_OF)
+    assert b0.as_of is None
+    assert b1.as_of == _AS_OF
+    assert b0 is not b1
+
+
+def test_build_as_of_filter_is_workspace_scoped() -> None:
+    """The standalone helper carries the workspace must-clause, ADR-0006 §ACL."""
+    flt = build_as_of_filter(workspace_id=_WS_A, as_of=_AS_OF)
+    keys = _field_keys(flt)
+    assert PAYLOAD_WORKSPACE_ID in keys
+    assert PAYLOAD_VALID_FROM in keys
+
+
+def test_build_as_of_filter_with_source_ids() -> None:
+    """The standalone helper accepts a source-id narrower."""
+    src = uuid.uuid4()
+    flt = build_as_of_filter(workspace_id=_WS_A, as_of=_AS_OF, source_ids=(src,))
+    keys = _field_keys(flt)
+    assert PAYLOAD_SOURCE_ID in keys
 
 
 def test_tombstone_sweep_filter_is_explicitly_global() -> None:

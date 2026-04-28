@@ -35,6 +35,7 @@ from omniscience_core.storage.vector import (
     UpsertOutcome,
 )
 from omniscience_embeddings.base import EmbeddingProvider
+from prometheus_client import Counter
 from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qm
 from qdrant_client.http.exceptions import UnexpectedResponse
@@ -66,6 +67,7 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_TITLE,
     PAYLOAD_TOMBSTONED_AT,
     PAYLOAD_URI,
+    PAYLOAD_VALID_FROM,
     PAYLOAD_VALID_TO,
     PAYLOAD_WORKSPACE_ID,
     TIER_WARM,
@@ -83,6 +85,32 @@ if TYPE_CHECKING:  # Lazy type-only import to avoid a core <-> retrieval cycle.
     from omniscience_retrieval.models import SearchRequest, SearchResult
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Telemetry — issue #134 ops visibility
+# ---------------------------------------------------------------------------
+
+#: Counter incremented every time a Qdrant read carries the ADR-0008 §5
+#: ``as_of`` predicate.  Labelled by ``method`` (one of ``"search"``,
+#: ``"count"``, ``"count_chunks"``, ``"count_chunks_by_source"``) so ops
+#: can see which read paths exercise the bitemporal filter.  Per #173
+#: the ``as_of_kind`` histogram label on
+#: ``omniscience_request_duration_seconds`` covers MCP/REST surfaces;
+#: this counter is the lower-level adapter signal that the predicate
+#: actually reached Qdrant.
+QDRANT_AS_OF_FILTERED_TOTAL: Counter = Counter(
+    name="omniscience_qdrant_as_of_filtered_total",
+    documentation=(
+        "Total Qdrant reads that applied the ADR-0008 §5 ``as_of`` "
+        "predicate (issue #134). Increments once per read call when "
+        "``as_of`` is supplied; current-state reads (``as_of=None``) "
+        "are not counted so the metric is a clean signal of historical "
+        "read load."
+    ),
+    labelnames=["method"],
+)
+
 
 # ---------------------------------------------------------------------------
 # Embedding provider protocol — minimal shape required by the adapter
@@ -263,7 +291,12 @@ class QdrantVectorStore:
     @staticmethod
     def _payload_schema_for(field_name: str) -> qm.PayloadSchemaType:
         """Map payload field name to its Qdrant index schema type."""
-        if field_name in (PAYLOAD_RECORDED_AT, PAYLOAD_TOMBSTONED_AT):
+        if field_name in (
+            PAYLOAD_RECORDED_AT,
+            PAYLOAD_TOMBSTONED_AT,
+            PAYLOAD_VALID_FROM,
+            PAYLOAD_VALID_TO,
+        ):
             return qm.PayloadSchemaType.DATETIME
         # `snapshot_date` is stored as ISO calendar-day string; KEYWORD
         # gives O(1) point-lookup which is the warm-tier read pattern.
@@ -588,16 +621,32 @@ class QdrantVectorStore:
         *,
         request: SearchRequest,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> SearchResult:
         """Vector-only search, confined to the caller's workspace.
 
         ADR-0006 §ACL carry-forward: ``workspace_id`` is the
         mandatory must-clause filter; no code path in this method
         can construct a ``Filter`` without it.
+
+        ``as_of`` (issue #134) is the optional ADR-0008 §5 bitemporal
+        anchor.  When supplied, the canonical open-closed predicate
+        ``valid_from <= as_of AND (valid_to > as_of OR valid_to IS NULL)``
+        is layered onto the filter as additional ``must`` clauses; the
+        workspace must-clause is never replaced.  When ``None`` (default)
+        the filter is byte-identical to the pre-#134 contract — current-
+        state reads do not pay the predicate cost.  ``as_of`` precedence
+        with ``request.as_of``: the keyword wins so server-side overrides
+        stay explicit (mirrors :class:`GraphRAGComposer.search`).
         """
         start = time.monotonic()
         query_vector = await self._embed_query(request.query)
-        flt = self._request_to_filter(request=request, workspace_id=workspace_id)
+        effective_as_of = as_of if as_of is not None else request.as_of
+        flt = self._request_to_filter(
+            request=request,
+            workspace_id=workspace_id,
+            as_of=effective_as_of,
+        )
         hits = await self._qc.query_points(
             collection_name=self._collection_name,
             query=query_vector,
@@ -608,15 +657,24 @@ class QdrantVectorStore:
             with_vectors=False,
         )
         duration_ms = (time.monotonic() - start) * 1000.0
+        if effective_as_of is not None:
+            QDRANT_AS_OF_FILTERED_TOTAL.labels(method="search").inc()
         return _build_search_result(
             scored=hits.points, top_k=request.top_k, duration_ms=duration_ms
         )
 
-    def _request_to_filter(self, *, request: SearchRequest, workspace_id: uuid.UUID) -> qm.Filter:
+    def _request_to_filter(
+        self,
+        *,
+        request: SearchRequest,
+        workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
+    ) -> qm.Filter:
         """Build the Qdrant filter for a search request.
 
         ``workspace_id`` is always present.  Optional narrowers
-        (sources, tombstone exclusion) are layered on top.
+        (sources, tombstone exclusion, ``as_of`` predicate) are layered
+        on top.
         """
         builder = QdrantFilterBuilder(workspace_id=workspace_id)
         source_ids = _extract_source_ids(request)
@@ -624,6 +682,8 @@ class QdrantVectorStore:
             builder = builder.with_source_ids(source_ids)
         if not request.include_tombstoned:
             builder = builder.exclude_tombstoned()
+        if as_of is not None:
+            builder = builder.with_as_of(as_of)
         return builder.build()
 
     async def _embed_query(self, query: str) -> list[float]:
@@ -634,21 +694,32 @@ class QdrantVectorStore:
     # Count
     # ------------------------------------------------------------------
 
-    async def count(self, *, source_id: uuid.UUID, workspace_id: uuid.UUID | None = None) -> int:
+    async def count(
+        self,
+        *,
+        source_id: uuid.UUID,
+        workspace_id: uuid.UUID | None = None,
+        as_of: datetime | None = None,
+    ) -> int:
         """Return the number of active (non-tombstoned) documents for a source.
 
         ``workspace_id`` is keyword-only; see ``delete_by_document`` for
         the rationale on the ``| None`` default and the fail-closed
-        check.
+        check.  ``as_of`` (issue #134) is the optional ADR-0008 §5
+        bitemporal anchor — when supplied, only documents valid at
+        ``as_of`` are counted.
         """
         if workspace_id is None:
             raise ValueError("QdrantVectorStore.count requires workspace_id (ADR-0006 §ACL).")
-        flt = (
+        builder = (
             QdrantFilterBuilder(workspace_id=workspace_id)
             .with_source_ids([source_id])
             .exclude_tombstoned()
-            .build()
         )
+        if as_of is not None:
+            builder = builder.with_as_of(as_of)
+            QDRANT_AS_OF_FILTERED_TOTAL.labels(method="count").inc()
+        flt = builder.build()
         records = await self._scroll_all(flt=flt, with_payload=True)
         document_ids = {r.payload.get(PAYLOAD_DOCUMENT_ID) for r in records if r.payload}
         return len({d for d in document_ids if d is not None})
@@ -662,17 +733,23 @@ class QdrantVectorStore:
         *,
         workspace_id: uuid.UUID,
         source_id: uuid.UUID | None = None,
+        as_of: datetime | None = None,
     ) -> int:
         """Count active (non-tombstoned) chunk points within a workspace.
 
         Uses the native Qdrant ``count`` API, which evaluates the filter
         on the server and returns a single integer — no point payloads
         traverse the wire.  Mandatory ``workspace_id`` is enforced via
-        ``QdrantFilterBuilder``.
+        ``QdrantFilterBuilder``.  ``as_of`` (issue #134) is the optional
+        ADR-0008 §5 bitemporal anchor — when supplied, only chunks valid
+        at ``as_of`` are counted.
         """
         builder = QdrantFilterBuilder(workspace_id=workspace_id).exclude_tombstoned()
         if source_id is not None:
             builder = builder.with_source_ids([source_id])
+        if as_of is not None:
+            builder = builder.with_as_of(as_of)
+            QDRANT_AS_OF_FILTERED_TOTAL.labels(method="count_chunks").inc()
         flt = builder.build()
         result = await self._qc.count(
             collection_name=self._collection_name,
@@ -865,6 +942,7 @@ class QdrantVectorStore:
         self,
         *,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> dict[str, int]:
         """Per-source histogram of active chunk points within a workspace.
 
@@ -872,9 +950,14 @@ class QdrantVectorStore:
         client-side: Qdrant has no group-by primitive in the Python
         client.  The pull is bounded by the workspace and excludes
         tombstoned points so the working-set size is the live chunk
-        count, not the historical total.
+        count, not the historical total.  ``as_of`` (issue #134) narrows
+        the histogram to chunks valid at the supplied timestamp.
         """
-        flt = QdrantFilterBuilder(workspace_id=workspace_id).exclude_tombstoned().build()
+        builder = QdrantFilterBuilder(workspace_id=workspace_id).exclude_tombstoned()
+        if as_of is not None:
+            builder = builder.with_as_of(as_of)
+            QDRANT_AS_OF_FILTERED_TOTAL.labels(method="count_chunks_by_source").inc()
+        flt = builder.build()
         offset: qm.ExtendedPointId | None = None
         page_size = 1000
         counts: dict[str, int] = {}
@@ -977,7 +1060,16 @@ def _build_chunk_payload(
     Fields follow ADR-0006 §Schema posture §Required payload fields
     plus doc-level fields needed for document reconstruction
     (external_id, uri, title, content_hash, doc_version).
+
+    Bitemporal fields (ADR-0008 §6, issue #134): every chunk carries
+    ``valid_from``, ``valid_to``, ``recorded_at`` so the ``as_of``
+    predicate in :class:`QdrantFilterBuilder` is index-backed on every
+    read.  Defaults: ``recorded_at = now()``, ``valid_from = recorded_at``,
+    ``valid_to = None`` (still-valid sentinel from ADR-0008 §1).  The
+    historical-import path with caller-supplied ``valid_*`` is a separate
+    sub-issue per #134 non-goals.
     """
+    now_iso = datetime.now(UTC).isoformat()
     return {
         PAYLOAD_WORKSPACE_ID: str(workspace_id),
         PAYLOAD_SOURCE_ID: str(source_id),
@@ -999,7 +1091,9 @@ def _build_chunk_payload(
             str(ingestion_run_id) if ingestion_run_id is not None else None
         ),
         PAYLOAD_TOMBSTONED_AT: None,
-        PAYLOAD_RECORDED_AT: datetime.now(UTC).isoformat(),
+        PAYLOAD_RECORDED_AT: now_iso,
+        PAYLOAD_VALID_FROM: now_iso,
+        PAYLOAD_VALID_TO: None,
         "doc_metadata": dict(metadata),
     }
 

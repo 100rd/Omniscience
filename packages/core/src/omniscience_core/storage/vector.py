@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any, Literal, Protocol, TypedDict, runtime_checkable
 
 # ---------------------------------------------------------------------------
@@ -186,6 +186,7 @@ class VectorStore(Protocol):
         *,
         request: Any,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> Any:
         """Execute a retrieval query, confined to the caller's workspace.
 
@@ -200,6 +201,13 @@ class VectorStore(Protocol):
             REQUIRED.  Adapters MUST confine every match to this
             workspace.  The Qdrant adapter enforces the invariant
             natively via a payload filter.
+        as_of:
+            Optional ADR-0008 §5 bitemporal anchor (issue #134).  When
+            supplied, the canonical open-closed predicate
+            ``valid_from <= as_of AND (valid_to > as_of OR valid_to IS NULL)``
+            narrows the result set to rows valid at ``as_of``.  ``None``
+            (default) is the current-state hot path — byte-identical to
+            the pre-#134 contract.
 
         Returns
         -------
@@ -208,11 +216,18 @@ class VectorStore(Protocol):
         """
         ...
 
-    async def count(self, *, source_id: uuid.UUID) -> int:
+    async def count(
+        self,
+        *,
+        source_id: uuid.UUID,
+        as_of: datetime | None = None,
+    ) -> int:
         """Return the number of active (non-tombstoned) documents for a source.
 
         Mirrors an admin/observability call-site (freshness worker,
-        MCP ``sources`` tool).  Tombstoned rows are excluded.
+        MCP ``sources`` tool).  Tombstoned rows are excluded.  ``as_of``
+        (issue #134) narrows the count to documents valid at the
+        supplied bitemporal anchor.
         """
         ...
 
@@ -225,12 +240,14 @@ class VectorStore(Protocol):
         *,
         workspace_id: uuid.UUID,
         source_id: uuid.UUID | None = None,
+        as_of: datetime | None = None,
     ) -> int:
         """Return the number of active (non-tombstoned) chunk points.
 
         Workspace-scoped per the protocol's ACL invariant.  When
         ``source_id`` is supplied the count is further narrowed to that
-        source, otherwise the whole workspace is summed.
+        source, otherwise the whole workspace is summed.  ``as_of``
+        (issue #134) narrows to chunks valid at the supplied timestamp.
 
         Used by the stats overview endpoint and by the per-source stats
         table.  Tombstoned chunk points are excluded.
@@ -241,13 +258,16 @@ class VectorStore(Protocol):
         self,
         *,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> dict[str, int]:
         """Return a per-source chunk count map within ``workspace_id``.
 
         Map keys are the stringified ``source_id`` UUIDs; values are
         non-negative counts of active (non-tombstoned) chunk points.
         Used to assemble the per-source stats table in a single
-        backend round-trip rather than N source-id queries.
+        backend round-trip rather than N source-id queries.  ``as_of``
+        (issue #134) narrows the histogram to chunks valid at the
+        supplied bitemporal anchor.
         """
         ...
 
