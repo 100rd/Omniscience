@@ -1,8 +1,9 @@
 """FastMCP server setup for Omniscience.
 
-Registers five tools:
+Registers six tools:
 - search              (requires scope: search)
 - get_document        (requires scope: search)
+- get_entity          (requires scope: search + workspace-scoped token)
 - get_related_entities (requires scope: search + workspace-scoped token)
 - list_sources        (requires scope: sources:read)
 - source_stats        (requires scope: sources:read)
@@ -14,11 +15,22 @@ Auth:
 The FastMCP instance is module-level.  Before mounting, call
 ``set_fastapi_app(app)`` so tool handlers can reach the FastAPI
 app.state (db_session_factory, retrieval_service).
+
+Bitemporal reads (issue #133)
+-----------------------------
+
+``search``, ``get_entity`` and ``get_related_entities`` accept an
+optional ``as_of`` parameter — an ISO-8601 timezone-aware UTC datetime
+string (``Z`` suffix or ``+00:00``).  Naive datetimes are rejected with
+the structured error code ``invalid_timezone``.  See ADR-0008 §5 for
+the bitemporal predicate semantics.  ``resolve_incident`` is filed as
+issue #153 and will surface its own ``as_of`` natively when it lands.
 """
 
 from __future__ import annotations
 
 import os
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -33,8 +45,13 @@ from omniscience_core.telemetry.clients import (
     get_client_registry,
 )
 
+from omniscience_server.as_of import (
+    INVALID_TIMEZONE_CODE,
+    INVALID_TIMEZONE_MESSAGE,
+)
 from omniscience_server.mcp.tools import (
     mcp_get_document,
+    mcp_get_entity,
     mcp_get_related_entities,
     mcp_list_sources,
     mcp_search,
@@ -109,6 +126,37 @@ def _require_scope(token: ApiToken | None, scope: Scope) -> None:
         raise ValueError(f"forbidden:Token lacks required scope '{scope}'")
 
 
+def _parse_as_of(raw: str | None) -> datetime | None:
+    """Parse an ISO-8601 ``as_of`` string from the MCP wire format.
+
+    Issue #133: ``as_of`` is exposed as a string parameter (the FastMCP
+    JSON-Schema for tool inputs lacks a native datetime type) so this
+    helper does the wire->datetime conversion.  Validation rules:
+
+    - ``None`` / empty -> ``None`` (still-current read).
+    - ``Z`` suffix is accepted as a synonym for ``+00:00``.
+    - Naive datetimes and unparseable strings raise ``ValueError`` with
+      the structured ``invalid_timezone:<message>`` error envelope so
+      the FastMCP transport surfaces it as an MCP error.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, datetime):  # pragma: no cover - SDK robustness
+        if raw.tzinfo is None:
+            raise ValueError(f"{INVALID_TIMEZONE_CODE}:{INVALID_TIMEZONE_MESSAGE}")
+        return raw
+    if not raw:
+        return None
+    # ``fromisoformat`` accepts the Python 3.11+ ``Z`` suffix natively.
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f"{INVALID_TIMEZONE_CODE}:{INVALID_TIMEZONE_MESSAGE}") from exc
+    if parsed.tzinfo is None or parsed.tzinfo.utcoffset(parsed) is None:
+        raise ValueError(f"{INVALID_TIMEZONE_CODE}:{INVALID_TIMEZONE_MESSAGE}")
+    return parsed
+
+
 def _record_tool_invocation(*, tool_name: str, token: ApiToken | None) -> None:
     """Record a single MCP tools/call invocation in the telemetry registry.
 
@@ -135,7 +183,9 @@ def _record_tool_invocation(*, tool_name: str, token: ApiToken | None) -> None:
     name="search",
     description=(
         "Hybrid vector + BM25 retrieval over the Omniscience index. "
-        "Returns ranked chunks with citations and lineage."
+        "Returns ranked chunks with citations and lineage. "
+        "Optional `as_of` (ISO-8601 UTC datetime) anchors the result "
+        "to the graph state at that time per ADR-0008 §5."
     ),
 )
 async def search(
@@ -148,6 +198,7 @@ async def search(
     filters: dict[str, Any] | None = None,
     include_tombstoned: bool = False,
     retrieval_strategy: str = "hybrid",
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """Search tool — requires scope 'search'.
 
@@ -156,11 +207,16 @@ async def search(
     (issue #107) can enforce its ACL invariant and, when the backend
     stack permits it, run the GraphRAG composed pipeline.  Tokens
     without a workspace still get legacy-path results.
+
+    The optional ``as_of`` parameter (issue #133) is an ISO-8601
+    timezone-aware UTC datetime; non-UTC and naive values are rejected
+    with the structured ``invalid_timezone`` error code.
     """
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
     _record_tool_invocation(tool_name="search", token=token)
     workspace_id = get_workspace_id(token) if token is not None else None
+    parsed_as_of = _parse_as_of(as_of)
 
     return await mcp_search(
         app=_get_app(),
@@ -173,6 +229,7 @@ async def search(
         include_tombstoned=include_tombstoned,
         retrieval_strategy=retrieval_strategy,
         workspace_id=workspace_id,
+        as_of=parsed_as_of,
     )
 
 
@@ -214,7 +271,9 @@ async def get_document(
         "Traverse the entity graph from a named entity. "
         "Returns the seed entity, related entities up to max_depth hops, "
         "and the edges that connect them. Each entity includes chunk text for context. "
-        "Requires a workspace-scoped token."
+        "Requires a workspace-scoped token. "
+        "Optional `as_of` (ISO-8601 UTC datetime) anchors the traversal "
+        "to the graph state at that time per ADR-0008 §5."
     ),
 )
 async def get_related_entities(
@@ -222,12 +281,17 @@ async def get_related_entities(
     ctx: Context[Any, Any, Any],
     max_depth: int = 1,
     edge_types: list[str] | None = None,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """get_related_entities tool — requires scope 'search' AND a workspace-scoped token.
 
     The graph is workspace-scoped.  A token that is not bound to any
     workspace cannot silently traverse the global graph (issue #117);
     it is rejected with a ``forbidden:`` error.
+
+    ``as_of`` (issue #133) anchors the traversal to ADR-0008 §5's
+    bitemporal predicate.  See module docstring for the format and
+    error envelope.
     """
     token = await _resolve_token(ctx)
     _require_scope(token, Scope.search)
@@ -243,6 +307,7 @@ async def get_related_entities(
         )
         raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
 
+    parsed_as_of = _parse_as_of(as_of)
     try:
         return await mcp_get_related_entities(
             app=_get_app(),
@@ -250,12 +315,61 @@ async def get_related_entities(
             workspace_id=workspace_id,
             max_depth=max_depth,
             edge_types=edge_types,
+            as_of=parsed_as_of,
         )
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("entity_not_found:"):
             raise
         raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: get_entity (issue #133)
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="get_entity",
+    description=(
+        "Resolve a single entity by name within the caller's workspace. "
+        "Optional `as_of` (ISO-8601 UTC datetime) returns the entity "
+        "as it was at that time per ADR-0008 §5; default is the still-current "
+        "state. Requires a workspace-scoped token."
+    ),
+)
+async def get_entity(
+    entity_name: str,
+    ctx: Context[Any, Any, Any],
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """get_entity tool — requires scope 'search' AND a workspace-scoped token.
+
+    Mirrors the auth posture of :func:`get_related_entities` — graph
+    reads are workspace-scoped, fail-closed, and reject unscoped
+    tokens.  ``as_of`` is optional; when set it is parsed per the
+    issue #133 contract and forwarded to ``GraphStore.get_entity``.
+    """
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="get_entity", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_get_entity_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+
+    parsed_as_of = _parse_as_of(as_of)
+    return await mcp_get_entity(
+        app=_get_app(),
+        entity_name=entity_name,
+        workspace_id=workspace_id,
+        as_of=parsed_as_of,
+    )
 
 
 # ---------------------------------------------------------------------------

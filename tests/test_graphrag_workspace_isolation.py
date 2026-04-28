@@ -80,6 +80,7 @@ class _WorkspaceAwareGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
@@ -93,12 +94,14 @@ class _WorkspaceAwareGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
         return await self.traverse(
             entity_name=entity_name,
             workspace_id=workspace_id,
+            as_of=as_of,
             max_depth=max_depth,
             edge_types=edge_types,
         )

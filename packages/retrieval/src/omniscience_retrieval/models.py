@@ -3,14 +3,27 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SearchRequest(BaseModel):
-    """Parameters for a hybrid search query."""
+    """Parameters for a hybrid search query.
+
+    The optional ``as_of`` field surfaces ADR-0008's bitemporal predicate
+    through the public retrieval contract (issue #133).  When supplied,
+    the GraphRAG composer forwards it to ``GraphStore.traverse`` /
+    ``GraphStore.find_related`` so the anchor-stage subgraph is the one
+    that was valid at ``as_of``; the vector stage is then scoped to
+    those source IDs.  ``None`` (default) preserves the current-state
+    contract exactly — see ADR-0008 §5 hot-path guarantee.
+
+    ``as_of`` MUST be timezone-aware.  Naive datetimes are rejected at
+    validation time with a ``ValueError`` carrying the structured
+    ``invalid_timezone`` code (issue #133 §B).
+    """
 
     query: str
     top_k: int = Field(default=10, ge=1, le=500)
@@ -20,6 +33,31 @@ class SearchRequest(BaseModel):
     filters: dict[str, Any] | None = None
     include_tombstoned: bool = False
     retrieval_strategy: Literal["hybrid", "keyword", "structural", "auto"] = "hybrid"
+    as_of: datetime | None = Field(
+        default=None,
+        description=(
+            "Optional ISO-8601 timezone-aware UTC datetime (e.g. "
+            "'2026-04-12T19:25:00Z'). When set, the search is "
+            "evaluated against the graph state that was valid at "
+            "this time per ADR-0008 §5. Naive datetimes are rejected."
+        ),
+    )
+
+    @field_validator("as_of", mode="after")
+    @classmethod
+    def _validate_as_of_utc(cls, value: datetime | None) -> datetime | None:
+        """Reject naive datetimes; normalise non-UTC offsets to UTC.
+
+        Mirrors :func:`omniscience_server.as_of.enforce_utc` — kept
+        local to keep the retrieval package free of a server-side
+        import.  The error code ``invalid_timezone`` is identical so
+        the MCP/REST layer surfaces the same envelope.
+        """
+        if value is None:
+            return None
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            raise ValueError("invalid_timezone")
+        return value.astimezone(UTC)
 
 
 class Citation(BaseModel):
@@ -84,7 +122,36 @@ class QueryStats(BaseModel):
 
 
 class SearchResult(BaseModel):
-    """Top-level response returned by RetrievalService.search()."""
+    """Top-level response returned by RetrievalService.search().
+
+    ``effective_as_of`` echoes the timestamp the response reflects per
+    issue #133.  For ``as_of=None`` requests this is the response
+    generation time; for an explicit ``as_of`` it is the value the
+    server processed (so callers can pin it for retries and detect
+    pagination drift).
+
+    ``meta`` carries optional response-side hints — currently only
+    ``degraded_response="as_of_before_recorded_history"`` when the
+    caller's ``as_of`` precedes any recorded history for the workspace
+    (issue #133 §B).  ``None`` means "no hints to convey" and serialises
+    as a plain absent field.
+    """
 
     hits: list[SearchHit]
     query_stats: QueryStats
+    effective_as_of: datetime | None = Field(
+        default=None,
+        description=(
+            "Server-resolved bitemporal anchor for this response. "
+            "Echoes back the request's ``as_of`` when explicit; "
+            "otherwise the response generation time."
+        ),
+    )
+    meta: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional response-side hints. May include "
+            "``degraded_response`` when the requested ``as_of`` "
+            "predates any recorded history for the workspace."
+        ),
+    )
