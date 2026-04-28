@@ -8,6 +8,10 @@
 
 Placeholder. This ADR flips to `Implemented` when the Wave 6 closer ([#139](https://github.com/100rd/Omniscience/issues/139)) lands — i.e. when the retention worker ([#135](https://github.com/100rd/Omniscience/issues/135)), retention metrics ([#136](https://github.com/100rd/Omniscience/issues/136)), and bitemporal contract tests ([#138](https://github.com/100rd/Omniscience/issues/138)) all merge and the property-test gate is green for at least one full ingestion cycle on a representative fixture.
 
+### Wave 6 — retention invariant validation gate ([#138](https://github.com/100rd/Omniscience/issues/138))
+
+The property-test suite at `tests/property/test_retention_invariants.py` validates the four ADR-0009 §1/§2/§3 invariants holistically: no data loss across hot→warm transitions (§1 Warm + §4), archive degradation envelope (§4 — `meta.degraded_response = "as_of_in_archive_tier"`), per-version eviction idempotency (§3), and cross-workspace eviction isolation (§Consequences-security). The simulator at `tests/property/_simulator.py` encodes the §2 eligibility predicate (`recorded_at` cutoff, edge end-dating does NOT trigger eviction) and the §1 tier shapes verbatim; `hypothesis` generates 120 examples per property over multi-workspace fixtures. The integration test at `tests/integration/test_incident_demo_historical.py` exercises the full hot/warm/archive read-path on a deterministic six-month fixture, including the §4 invariant that archive existence MUST NOT leak across workspaces (the degraded envelope is identical in shape regardless of whether a workspace has archive data). Live-mode runs against testcontainers are gated behind `OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1` and `OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS=1`; see `tests/property/README.md` for the env-var matrix. With #138 green, this ADR is eligible for the status flip in [#139](https://github.com/100rd/Omniscience/issues/139).
+
 ## Context
 
 Vision §5.3 ([`docs/vision.md`](../vision.md) line 76) commits Omniscience to a tiered retention posture:

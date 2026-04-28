@@ -81,6 +81,9 @@ ignore = [
     "S607",  # Partial executable path — controlled test environment
     "B017",  # Do not assert blind exception — inherited from contract tests
 ]
+"benchmarks/*" = [
+    "S101",  # assert is the standard pytest assertion mechanism
+]
 
 [tool.mypy]
 python_version = "3.12"
