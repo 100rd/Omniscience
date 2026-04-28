@@ -28,6 +28,42 @@ Unauthenticated. Returns `{ "status": "ok", "version": "..." }` when the service
 Body: same as MCP `search` input.
 Response: same as MCP `search` output.
 
+Optional query parameter `as_of` (ISO-8601 UTC datetime) anchors the result to graph state at that time per [ADR-0008](../decisions/0008-bitemporal-schema-for-neo4j.md) §5. May also be supplied inside the request body — the query-string value wins when both are present. See **Bitemporal `as_of` parameter** below. Naive or non-UTC values return 400 `INVALID_TIMEZONE`.
+
+### `GET /entities/{name}`
+
+Resolve a single entity by name within the caller's workspace. Workspace-scoped token required.
+
+Optional query parameter `as_of` returns the entity as it was at that point in time (issue [#133](https://github.com/100rd/Omniscience/issues/133), ADR-0008 §5).
+
+Response:
+
+```json
+{
+  "entity": {
+    "name": "svc.ratings",
+    "kind": "deployed",
+    "source": "uuid",
+    "chunk_text": "...",
+    "valid_from": "2026-04-12T08:00:00Z",
+    "valid_to": null,
+    "recorded_at": "2026-04-12T08:00:00Z"
+  },
+  "effective_as_of": "2026-04-12T19:25:00Z",
+  "meta": null
+}
+```
+
+When the entity is unknown at the supplied `as_of`, the response is 200 with `entity: null` and `meta.degraded_response = "as_of_before_recorded_history"`. When the entity is unknown without `as_of`, the response is 404.
+
+### `GET /entities/{name}/related`
+
+Traverse the entity graph from a named entity. Workspace-scoped token required.
+
+Query parameters: `max_depth` (int, default 1), `edge_types` (repeat for multi-value), `as_of` (ISO-8601 UTC datetime, optional).
+
+Response carries the seed, related entities, edges, plus `effective_as_of` and an optional `meta` block. A pre-history `as_of` returns 200 with an empty payload + `meta.degraded_response = "as_of_before_recorded_history"`.
+
 ### `GET /sources`
 
 List sources. Query params: `type`, `status`.
@@ -76,6 +112,26 @@ Single run detail.
 
 Token management (admin scope).
 
+## Bitemporal `as_of` parameter
+
+The `as_of` parameter (issue [#133](https://github.com/100rd/Omniscience/issues/133)) anchors a read to the graph state that was valid at a point in time per [ADR-0008](../decisions/0008-bitemporal-schema-for-neo4j.md) §5.
+
+**Format**: ISO-8601 timezone-aware UTC datetime (e.g. `2026-04-12T19:25:00Z` or `2026-04-12T19:25:00+00:00`). Naive datetimes and non-UTC offsets return 400 `INVALID_TIMEZONE`.
+
+**Boundary semantics** (ADR-0008 §5):
+- Open-closed interval: `valid_from <= as_of < valid_to`.
+- Still-current rows have `valid_to = null`; they are returned for any `as_of >= valid_from`.
+- A future `as_of` resolves to the still-current row (equivalent to omitting the parameter).
+- A pre-history `as_of` returns 200 with an empty payload and `meta.degraded_response = "as_of_before_recorded_history"`.
+
+**Response envelope**: every response carries `effective_as_of` — for `as_of=null` requests this is the response generation time; for an explicit `as_of` it is echoed back so callers can pin retries.
+
+**ACL invariant**: `as_of` is a query-time predicate, NOT an authorisation surface. The token-derived `workspace_id` continues to gate every read. A token for workspace A cannot read workspace B's data at any `as_of`.
+
+**Out of scope**:
+- Qdrant `as_of` payload filter — issue [#134](https://github.com/100rd/Omniscience/issues/134).
+- `POST /incidents/{id}/resolve` — issue [#153](https://github.com/100rd/Omniscience/issues/153).
+
 ## Error format
 
 ```json
@@ -88,7 +144,7 @@ Token management (admin scope).
 }
 ```
 
-HTTP status codes map to error codes (401 → `unauthorized`, 403 → `forbidden`, 404 → `*_not_found`, 429 → `rate_limited`, 500 → `internal`).
+HTTP status codes map to error codes (401 → `unauthorized`, 403 → `forbidden`, 404 → `*_not_found`, 429 → `rate_limited`, 500 → `internal`, 400 → `invalid_timezone` for malformed `as_of`).
 
 ## Rate limiting
 

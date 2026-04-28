@@ -76,6 +76,7 @@ class _FakeGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
@@ -83,6 +84,7 @@ class _FakeGraphStore:
             {
                 "entity_name": entity_name,
                 "workspace_id": workspace_id,
+                "as_of": as_of,
                 "max_depth": max_depth,
                 "edge_types": edge_types,
             }
@@ -99,12 +101,14 @@ class _FakeGraphStore:
         *,
         entity_name: str,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
         max_depth: int = 1,
         edge_types: list[str] | None = None,
     ) -> GraphResultView:
         return await self.traverse(
             entity_name=entity_name,
             workspace_id=workspace_id,
+            as_of=as_of,
             max_depth=max_depth,
             edge_types=edge_types,
         )
@@ -363,7 +367,13 @@ class TestLegacyFallback:
         req = SearchRequest(query="hello")
         ws = uuid.uuid4()
         result = await composer.search(req, workspace_id=ws)
-        assert result is legacy_result
+        # Issue #133: composer always stamps ``effective_as_of`` into
+        # the response envelope (response generation time when as_of
+        # is None).  The hits and query_stats round-trip unchanged.
+        assert result.hits == legacy_result.hits
+        assert result.query_stats == legacy_result.query_stats
+        assert result.effective_as_of is not None
+        assert result.meta is None
         assert len(legacy.search_calls) == 1
         assert len(g.traverse_calls) == 0
         assert len(v.search_calls) == 0

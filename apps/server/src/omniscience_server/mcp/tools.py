@@ -16,11 +16,18 @@ from typing import Any
 import structlog
 from fastapi import FastAPI
 from omniscience_core.db.models import Chunk, Document, IngestionRun, Source
-from omniscience_core.storage import GraphResultView, GraphStore
+from omniscience_core.storage import EntityNodeView, GraphResultView, GraphStore
 from omniscience_retrieval.graph_rag import GraphRAGComposer
 from omniscience_retrieval.models import SearchRequest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from omniscience_server.as_of import (
+    DEGRADED_PRE_HISTORY,
+    enforce_utc,
+    record_request_duration,
+    resolve_effective_as_of,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -44,6 +51,7 @@ async def mcp_search(
     include_tombstoned: bool = False,
     retrieval_strategy: str = "hybrid",
     workspace_id: uuid.UUID | None = None,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Execute retrieval and return hits with citations.
 
@@ -52,11 +60,18 @@ async def mcp_search(
     a ``workspace_id`` receive a ``RuntimeError`` — workspace scoping
     is a non-negotiable invariant (#117).
 
+    The optional ``as_of`` parameter (issue #133) anchors the
+    underlying graph traversal to ADR-0008 §5's bitemporal predicate;
+    the vector step is unfiltered on time and scoped only by the
+    chunk/source ids the graph traversal returned.  Qdrant's own
+    ``as_of`` filter lands in #134.
+
     The legacy ``RetrievalService`` (pgvector + BM25) was removed in
     v0.2; ``app.state.retrieval_service`` is preserved as an optional
     escape hatch for operators that wire a custom federation-peer
     shim, but it is never populated by default.
     """
+    normalised_as_of = enforce_utc(as_of)
     composer: GraphRAGComposer | None = getattr(app.state, "graph_rag_composer", None)
     request = SearchRequest(
         query=query,
@@ -67,17 +82,36 @@ async def mcp_search(
         filters=filters,
         include_tombstoned=include_tombstoned,
         retrieval_strategy=retrieval_strategy,  # type: ignore[arg-type]
+        as_of=normalised_as_of,
     )
-    if composer is not None and workspace_id is not None:
-        result = await composer.search(request, workspace_id=workspace_id)
-        return result.model_dump(mode="json")
+    with record_request_duration(surface="mcp", tool="search", as_of=normalised_as_of) as patcher:
+        if composer is not None and workspace_id is not None:
+            result = await composer.search(
+                request,
+                workspace_id=workspace_id,
+                as_of=normalised_as_of,
+            )
+            payload: dict[str, Any] = result.model_dump(mode="json")
+            if (
+                normalised_as_of is not None
+                and isinstance(payload.get("meta"), dict)
+                and payload["meta"].get("degraded_response") == DEGRADED_PRE_HISTORY
+            ):
+                patcher.mark_pre_history()
+            return payload
 
-    service: Any | None = getattr(app.state, "retrieval_service", None)
-    if service is None:
-        raise RuntimeError("retrieval_service not available on app.state")
-    result = await service.search(request)
-    dumped: dict[str, Any] = result.model_dump(mode="json")
-    return dumped
+        service: Any | None = getattr(app.state, "retrieval_service", None)
+        if service is None:
+            raise RuntimeError("retrieval_service not available on app.state")
+        legacy_result = await service.search(request)
+        legacy_payload: dict[str, Any] = legacy_result.model_dump(mode="json")
+        # Legacy path doesn't honour as_of; still echo back the resolved
+        # effective_as_of so contract tests are satisfied.
+        legacy_payload.setdefault(
+            "effective_as_of",
+            resolve_effective_as_of(normalised_as_of).isoformat(),
+        )
+        return legacy_payload
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +348,7 @@ async def mcp_get_related_entities(
     workspace_id: uuid.UUID,
     max_depth: int = 1,
     edge_types: list[str] | None = None,
+    as_of: datetime | None = None,
 ) -> dict[str, Any]:
     """Traverse the entity graph starting from a named entity.
 
@@ -322,21 +357,136 @@ async def mcp_get_related_entities(
     background: graph retrieval used to bypass workspace scoping and leak
     cross-tenant entities.
 
+    The optional ``as_of`` (issue #133) anchors the traversal to
+    ADR-0008 §5's bitemporal predicate.  ``None`` (default) returns the
+    still-current graph; an explicit value returns the graph as it was
+    at T (ADR-0008 §5).
+
     Returns the seed entity, related entities (up to max_depth hops),
     and the edges connecting them.  Each entity includes its associated
-    chunk text for context.
+    chunk text for context.  ``effective_as_of`` echoes the resolved
+    bitemporal anchor; ``meta.degraded_response`` is set when the
+    seed entity is unknown at ``as_of``.
     """
+    normalised_as_of = enforce_utc(as_of)
     graph_store: GraphStore | None = getattr(app.state, "graph_store", None)
     if graph_store is None:
         raise RuntimeError("graph_store not available on app.state")
 
-    result = await graph_store.find_related(
-        entity_name=entity_name,
-        workspace_id=workspace_id,
-        max_depth=max_depth,
-        edge_types=edge_types,
-    )
-    return _graph_view_to_dict(result)
+    with record_request_duration(
+        surface="mcp", tool="get_related_entities", as_of=normalised_as_of
+    ) as patcher:
+        try:
+            result = await graph_store.find_related(
+                entity_name=entity_name,
+                workspace_id=workspace_id,
+                as_of=normalised_as_of,
+                max_depth=max_depth,
+                edge_types=edge_types,
+            )
+        except ValueError as exc:
+            if normalised_as_of is not None and str(exc).startswith("entity_not_found:"):
+                # Pre-history / unknown-at-T: degraded response, not error.
+                patcher.mark_pre_history()
+                return _empty_graph_payload(
+                    entity_name=entity_name,
+                    as_of=normalised_as_of,
+                    degraded=True,
+                )
+            raise
+        payload = _graph_view_to_dict(result)
+        payload["effective_as_of"] = resolve_effective_as_of(normalised_as_of).isoformat()
+        return payload
+
+
+async def mcp_get_entity(
+    app: FastAPI,
+    entity_name: str,
+    workspace_id: uuid.UUID,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    """Resolve a single entity by name within the caller's workspace.
+
+    Issue #133 §A — pass-through to ``GraphStore.get_entity`` carrying
+    ``as_of`` when supplied.  Returns the still-current ``:Entity``
+    mirror when ``as_of`` is ``None``, or the ``:EntityState`` row that
+    was valid at T per ADR-0008 §5.
+
+    Empty/unknown-at-T responses surface the
+    ``"as_of_before_recorded_history"`` degraded-response hint to
+    distinguish "no record" from "deleted/unauthorised".  Cross-workspace
+    entities are indistinguishable from "not found" by design — see
+    ``GraphStore.get_entity`` docstring.
+    """
+    normalised_as_of = enforce_utc(as_of)
+    graph_store: GraphStore | None = getattr(app.state, "graph_store", None)
+    if graph_store is None:
+        raise RuntimeError("graph_store not available on app.state")
+
+    with record_request_duration(
+        surface="mcp", tool="get_entity", as_of=normalised_as_of
+    ) as patcher:
+        node: EntityNodeView | None = await graph_store.get_entity(
+            entity_name=entity_name,
+            workspace_id=workspace_id,
+            as_of=normalised_as_of,
+        )
+        if node is None:
+            if normalised_as_of is not None:
+                patcher.mark_pre_history()
+            return {
+                "entity": None,
+                "effective_as_of": resolve_effective_as_of(normalised_as_of).isoformat(),
+                "meta": (
+                    {"degraded_response": DEGRADED_PRE_HISTORY}
+                    if normalised_as_of is not None
+                    else None
+                ),
+            }
+        return {
+            "entity": _entity_view_to_dict(node),
+            "effective_as_of": resolve_effective_as_of(normalised_as_of).isoformat(),
+            "meta": None,
+        }
+
+
+def _entity_view_to_dict(node: EntityNodeView) -> dict[str, Any]:
+    """Serialise an :class:`EntityNodeView` to the MCP/REST wire format."""
+    return {
+        "name": node.name,
+        "kind": node.kind,
+        "source": node.source,
+        "chunk_text": node.chunk_text,
+        "valid_from": node.valid_from.isoformat() if node.valid_from else None,
+        "valid_to": node.valid_to.isoformat() if node.valid_to else None,
+        "recorded_at": node.recorded_at.isoformat() if node.recorded_at else None,
+    }
+
+
+def _empty_graph_payload(
+    *,
+    entity_name: str,
+    as_of: datetime | None,
+    degraded: bool,
+) -> dict[str, Any]:
+    """Build the empty-result envelope for a pre-history graph traversal."""
+    return {
+        "seed": {
+            "name": entity_name,
+            "kind": None,
+            "source": None,
+            "chunk_text": None,
+        },
+        "related": [],
+        "edges": [],
+        "stats": {
+            "entities_found": 0,
+            "edges_traversed": 0,
+            "depth_reached": 0,
+        },
+        "effective_as_of": resolve_effective_as_of(as_of).isoformat(),
+        "meta": ({"degraded_response": DEGRADED_PRE_HISTORY} if degraded else None),
+    }
 
 
 def _graph_view_to_dict(result: GraphResultView) -> dict[str, Any]:

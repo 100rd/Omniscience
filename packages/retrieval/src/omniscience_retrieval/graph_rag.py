@@ -52,6 +52,7 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import structlog
@@ -111,6 +112,12 @@ MIN_AFFINITY: float = 0.0
 #: contract") — the anchor is a transport-layer hint, not a model
 #: field.
 ANCHOR_FILTER_KEY: str = "graphrag_anchor"
+
+#: ``meta.degraded_response`` value emitted when the caller supplies an
+#: ``as_of`` that precedes any recorded history for the workspace.
+#: Issue #133 §B contract — surfaces an explicit hint so an empty
+#: response is not interpreted as "deleted" or "unauthorised".
+DEGRADED_PRE_HISTORY: str = "as_of_before_recorded_history"
 
 
 # ---------------------------------------------------------------------------
@@ -301,6 +308,7 @@ class GraphRAGComposer:
         request: SearchRequest,
         *,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> SearchResult:
         """Execute a GraphRAG composed search (or fall back to legacy).
 
@@ -310,25 +318,49 @@ class GraphRAGComposer:
             The public ``SearchRequest`` model.  Callers may include
             an anchor-entity hint via ``request.filters[ANCHOR_FILTER_KEY]``;
             when absent the anchor stage is skipped and the vector
-            stage runs unscoped.
+            stage runs unscoped.  ``request.as_of`` is honoured when
+            the explicit ``as_of`` keyword argument is ``None`` — the
+            keyword wins to keep server-side overrides explicit.
         workspace_id:
             REQUIRED.  Forwarded to every downstream store call so the
             ACL invariant is transitively enforced.
+        as_of:
+            Optional ADR-0008 §5 bitemporal anchor.  When set, the
+            anchor stage's :meth:`GraphStore.traverse` call carries it
+            so the candidate subgraph is the one that was valid at T;
+            the vector stage in #133 is unfiltered on time and scoped
+            **only by the chunk/source ids the graph traversal
+            returned** (Qdrant ``as_of`` lands separately in #134).
+            Issue #133.
 
         Returns
         -------
         ``SearchResult`` with the same shape the MCP ``search`` tool
         produces today.  ``query_stats.duration_ms`` reflects the
         end-to-end wall-clock time of the composed query.
+        ``effective_as_of`` echoes the resolved bitemporal anchor;
+        ``meta.degraded_response`` is set to
+        :data:`DEGRADED_PRE_HISTORY` when the caller supplied
+        ``as_of`` AND the anchor stage produced an empty subgraph.
         """
+        # ``request.as_of`` is the SearchRequest field; the keyword
+        # ``as_of`` wins when both are supplied so server-side overrides
+        # remain explicit.
+        effective = as_of if as_of is not None else request.as_of
+
         if not self._graphrag_active:
             _COMPOSED_QUERIES_TOTAL.labels(path="legacy").inc()
-            return await self._legacy_service.search(request)
+            legacy = await self._legacy_service.search(request)
+            return _stamp_envelope(legacy, as_of=effective, degraded=False)
 
         _COMPOSED_QUERIES_TOTAL.labels(path="graphrag").inc()
         start = time.monotonic()
 
-        anchor = await self._run_anchor_stage(request=request, workspace_id=workspace_id)
+        anchor = await self._run_anchor_stage(
+            request=request,
+            workspace_id=workspace_id,
+            as_of=effective,
+        )
         vector_result = await self._run_vector_stage(
             request=request,
             workspace_id=workspace_id,
@@ -350,13 +382,25 @@ class GraphRAGComposer:
             vector_hits=len(vector_result.hits),
             returned=len(merged.hits),
             duration_ms=duration_ms,
+            as_of=effective.isoformat() if effective else None,
+        )
+        # Pre-history detection: caller supplied an explicit ``as_of``,
+        # graph anchor returned no hits AND zero merged hits remain.
+        # Cheap proxy for "as_of < earliest recorded_at" without a
+        # dedicated round-trip.  Issue #133 §B contract.
+        degraded = (
+            effective is not None
+            and anchor.anchor_requested
+            and not anchor.anchor_hit
+            and not merged.hits
         )
         # Re-use the vector result's QueryStats but patch duration.
-        return merged.model_copy(
+        stamped = merged.model_copy(
             update={
                 "query_stats": merged.query_stats.model_copy(update={"duration_ms": duration_ms})
             }
         )
+        return _stamp_envelope(stamped, as_of=effective, degraded=degraded)
 
     # ------------------------------------------------------------------
     # Stage 1 — anchor
@@ -367,8 +411,16 @@ class GraphRAGComposer:
         *,
         request: SearchRequest,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> _AnchorStageResult:
-        """Resolve the anchor entity (when supplied) and collect candidates."""
+        """Resolve the anchor entity (when supplied) and collect candidates.
+
+        ``as_of`` (issue #133) is forwarded to ``GraphStore.traverse``
+        so the anchor subgraph is the one that was valid at T.  When
+        ``None`` the traversal hits the ADR-0008 §5 hot-path; when set
+        it hits the bitemporal-predicate template.  See ADR-0008 §5 for
+        the cost/benefit of each path.
+        """
         stage_start = time.monotonic()
         anchor_name = _extract_anchor(request)
 
@@ -390,6 +442,7 @@ class GraphRAGComposer:
             graph_result = await self._graph_store.traverse(
                 entity_name=anchor_name,
                 workspace_id=workspace_id,
+                as_of=as_of,
                 max_depth=MAX_ANCHOR_DEPTH,
             )
         except ValueError:
@@ -597,9 +650,36 @@ def _linear_blend(*, vector_score: float, graph_affinity: float) -> float:
     return (1.0 - MERGE_ALPHA) * vector_score + MERGE_ALPHA * graph_affinity
 
 
+def _stamp_envelope(
+    result: SearchResult,
+    *,
+    as_of: datetime | None,
+    degraded: bool,
+) -> SearchResult:
+    """Attach ``effective_as_of`` and the optional ``meta`` block.
+
+    Issue #133 contract: explicit ``as_of`` echoes back; ``None`` is
+    replaced with response generation time.  When ``degraded`` is true
+    the ``meta`` block carries the ``"as_of_before_recorded_history"``
+    hint so callers can distinguish "empty because no history yet"
+    from "empty because nothing matched".
+    """
+    effective_as_of = as_of if as_of is not None else datetime.now(UTC)
+    meta: dict[str, Any] | None = None
+    if degraded:
+        meta = {"degraded_response": DEGRADED_PRE_HISTORY}
+    return result.model_copy(
+        update={
+            "effective_as_of": effective_as_of,
+            "meta": meta,
+        }
+    )
+
+
 __all__ = [
     "ANCHOR_FILTER_KEY",
     "CANDIDATE_EXPANSION_FACTOR",
+    "DEGRADED_PRE_HISTORY",
     "GRAPH_AFFINITY_BASE",
     "MAX_ANCHOR_CANDIDATES",
     "MAX_ANCHOR_DEPTH",
