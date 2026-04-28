@@ -85,7 +85,7 @@ Workspace is **not** the collection key. Workspace is a payload field with a man
 | `content_type` | keyword | yes | Document class filter |
 | `tags` | keyword[] | yes | User-supplied scoping |
 | `provenance` | object | — | Ingestion run id, strategy, confidence (see §5.2 vision) |
-| `valid_from`, `valid_to`, `recorded_at` | datetime | `recorded_at` indexed | Bitemporal alignment with graph (§5.3 vision) |
+| `valid_from`, `valid_to`, `recorded_at` | datetime | all three indexed (post-[#134](https://github.com/100rd/Omniscience/issues/134)) | Bitemporal alignment with graph — see ADR-0008 §1 (open-closed `[valid_from, valid_to)`) and §5 (canonical `as_of` predicate). All three fields are populated on every chunk upsert and indexed so the bitemporal filter is index-backed. |
 | `created_at`, `updated_at` | datetime | no | Operational |
 
 **Point IDs**: chunk UUIDs, not sequential integers. Deterministic upserts, idempotent re-ingest, matches chunk identity in Postgres and Neo4j. `chunk_id` is not duplicated into the payload because the point id is already the chunk id.

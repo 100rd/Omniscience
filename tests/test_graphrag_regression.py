@@ -213,7 +213,9 @@ class _CorpusVectorStore:
         *,
         request: SearchRequest,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> SearchResult:
+        del as_of  # corpus regression test is bitemporal-naive on purpose
         if workspace_id != self._ws:
             return SearchResult(
                 hits=[],

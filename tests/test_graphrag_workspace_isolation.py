@@ -127,7 +127,9 @@ class _WorkspaceAwareVectorStore:
         *,
         request: SearchRequest,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> SearchResult:
+        del as_of  # workspace-isolation test is bitemporal-naive on purpose
         scoped = [hit for ws, hit in self._chunks if ws == workspace_id]
         # Apply any ``sources`` filter the composer passed in, as a real
         # vector backend would.

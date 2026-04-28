@@ -126,8 +126,11 @@ class _FakeVectorStore:
         *,
         request: SearchRequest,
         workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
     ) -> SearchResult:
-        self.search_calls.append({"request": request, "workspace_id": workspace_id})
+        self.search_calls.append(
+            {"request": request, "workspace_id": workspace_id, "as_of": as_of}
+        )
         return self._result
 
 
@@ -645,6 +648,156 @@ class TestWidenRequest:
         )
         widened = _widen_request(req, anchor=anchor)
         assert widened.filters == {"keep": "bar"}
+
+
+# ---------------------------------------------------------------------------
+# Cross-store ``as_of`` propagation (issue #134)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestAsOfThreading:
+    """Both the graph step AND the vector step receive ``as_of``."""
+
+    async def test_as_of_forwarded_to_vector_stage(self, force_graphrag: None) -> None:
+        """Issue #134: composer threads ``as_of`` to ``VectorStore.search``.
+
+        Pre-#134 only the graph step carried ``as_of``; the vector stage
+        was unfiltered on time.  This test asserts the new contract on
+        the wire — the composer calls ``vector_store.search(as_of=T)``.
+        """
+        seed = uuid.uuid4()
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed, related=[]))
+        v = _FakeVectorStore(_make_result([_make_hit(source_id=seed, score=0.9)]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        as_of_t1 = datetime(2026, 4, 12, 19, 25, 0, tzinfo=UTC)
+        await composer.search(
+            SearchRequest(query="cross-store", filters={ANCHOR_FILTER_KEY: "X"}),
+            workspace_id=uuid.uuid4(),
+            as_of=as_of_t1,
+        )
+        # Graph step received as_of (from #170).
+        assert g.traverse_calls[0]["as_of"] == as_of_t1
+        # Vector step also received as_of (NEW in #134).
+        assert v.search_calls[0]["as_of"] == as_of_t1
+
+    async def test_as_of_none_does_not_propagate_predicate(self, force_graphrag: None) -> None:
+        """``as_of=None`` reaches the vector store as ``None`` — current-state read."""
+        seed = uuid.uuid4()
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed, related=[]))
+        v = _FakeVectorStore(_make_result([_make_hit(source_id=seed, score=0.5)]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        await composer.search(
+            SearchRequest(query="hot-path", filters={ANCHOR_FILTER_KEY: "X"}),
+            workspace_id=uuid.uuid4(),
+            as_of=None,
+        )
+        assert v.search_calls[0]["as_of"] is None
+
+    async def test_as_of_from_request_is_threaded_to_vector(self, force_graphrag: None) -> None:
+        """``request.as_of`` (no kw override) reaches the vector stage too."""
+        seed = uuid.uuid4()
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed, related=[]))
+        v = _FakeVectorStore(_make_result([_make_hit(source_id=seed, score=0.5)]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        as_of_t1 = datetime(2026, 4, 12, 19, 25, 0, tzinfo=UTC)
+        await composer.search(
+            SearchRequest(
+                query="from-request",
+                filters={ANCHOR_FILTER_KEY: "X"},
+                as_of=as_of_t1,
+            ),
+            workspace_id=uuid.uuid4(),
+            # No keyword override — request.as_of is the source of truth.
+        )
+        assert v.search_calls[0]["as_of"] == as_of_t1
+
+    async def test_keyword_as_of_overrides_request_as_of(self, force_graphrag: None) -> None:
+        """The keyword ``as_of`` wins over ``request.as_of`` — explicit server override.
+
+        Documented contract on :meth:`GraphRAGComposer.search`; this
+        test pins it for the vector stage too so both halves of the
+        cross-store consistency contract observe the same effective T.
+        """
+        seed = uuid.uuid4()
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed, related=[]))
+        v = _FakeVectorStore(_make_result([_make_hit(source_id=seed, score=0.5)]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        as_of_request = datetime(2026, 1, 1, tzinfo=UTC)
+        as_of_kw = datetime(2026, 6, 1, tzinfo=UTC)
+        await composer.search(
+            SearchRequest(
+                query="override",
+                filters={ANCHOR_FILTER_KEY: "X"},
+                as_of=as_of_request,
+            ),
+            workspace_id=uuid.uuid4(),
+            as_of=as_of_kw,
+        )
+        # Both stages see the keyword value.
+        assert g.traverse_calls[0]["as_of"] == as_of_kw
+        assert v.search_calls[0]["as_of"] == as_of_kw
+
+    async def test_cross_store_consistency_v3_entity_returns_v1_chunk(
+        self, force_graphrag: None
+    ) -> None:
+        """A v3 graph entity at ``as_of=T1`` returns chunks linked to v1 state.
+
+        The graph store's ``traverse(as_of=T1)`` returns the v1 entity
+        (seed_source=v1_src).  The vector store, called with the same
+        ``as_of=T1``, must filter to chunks valid at T1 — those chunks
+        were planted with ``source_id=v1_src``.  Both stores agree on
+        T1 → same source → cross-store consistent evidence.
+        """
+        v1_src = uuid.uuid4()  # the v1 entity's source at as_of=T1
+        v3_src = uuid.uuid4()  # the v3 entity's source (current state)
+        as_of_t1 = datetime(2026, 1, 15, tzinfo=UTC)
+
+        # Graph @T1 -> v1 entity (source = v1_src).
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=v1_src, related=[]))
+        # Vector simulator: returns chunks scoped to whatever ``sources``
+        # the composer asked for — the request.sources comes from the
+        # graph candidates, so a hit will have source_id == v1_src.  The
+        # vector adapter ALSO receives as_of, which a real Qdrant adapter
+        # would apply to its bitemporal filter; the fake captures it on
+        # ``search_calls`` so the test can pin the propagation contract.
+        hit_v1 = _make_hit(source_id=v1_src, score=0.9)
+        v = _FakeVectorStore(_make_result([hit_v1]))
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        result = await composer.search(
+            SearchRequest(query="incident", filters={ANCHOR_FILTER_KEY: "Pod"}),
+            workspace_id=uuid.uuid4(),
+            as_of=as_of_t1,
+        )
+        # Both stores received the same as_of.
+        assert g.traverse_calls[0]["as_of"] == as_of_t1
+        assert v.search_calls[0]["as_of"] == as_of_t1
+        # Graph candidates (sources=[v1_src]) flowed into the vector request.
+        v_req: SearchRequest = v.search_calls[0]["request"]
+        assert v_req.sources == [str(v1_src)]
+        # The returned chunk's source matches the v1 (point-in-time) entity,
+        # not v3 (current state).
+        assert len(result.hits) == 1
+        assert result.hits[0].source.id == v1_src
+        # Sanity: v3_src is the "current" entity but is not in the result
+        # because the graph filter at T1 returned v1 only.
+        assert v3_src != v1_src
+        assert all(h.source.id != v3_src for h in result.hits)
 
 
 # Silence unused-import warning on Any (used only in annotations above).

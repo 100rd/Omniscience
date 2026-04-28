@@ -66,6 +66,14 @@ PAYLOAD_CONTENT_HASH: Final[str] = "content_hash"
 PAYLOAD_DOC_VERSION: Final[str] = "doc_version"
 PAYLOAD_TOMBSTONED_AT: Final[str] = "tombstoned_at"
 PAYLOAD_RECORDED_AT: Final[str] = "recorded_at"
+#: Bitemporal validity-window start on a chunk payload — ADR-0008 §1 +
+#: §6, issue #134.  Populated on every chunk upsert (writer path);
+#: defaults to ``recorded_at`` when the connector does not supply an
+#: explicit ``valid_from``.  Open-closed `[valid_from, valid_to)` per
+#: ADR-0008 §1; the canonical ``as_of`` predicate per ADR-0008 §5 is
+#: ``valid_from <= $as_of AND ($as_of < valid_to OR valid_to IS NULL)``
+#: applied as an additional ``must`` clause via :class:`QdrantFilterBuilder`.
+PAYLOAD_VALID_FROM: Final[str] = "valid_from"
 #: Bitemporal validity-window end on a chunk payload — ADR-0008 §6 +
 #: issue #137.  Set by ``QdrantVectorStore.end_date_chunks`` instead of
 #: hard-deleting points when ``GRAPH_BITEMPORAL=enabled``.  Absent /
@@ -104,6 +112,12 @@ INDEXED_PAYLOAD_FIELDS: Final[tuple[str, ...]] = (
     PAYLOAD_TAGS,
     PAYLOAD_TOMBSTONED_AT,
     PAYLOAD_RECORDED_AT,
+    # ADR-0008 §6 + issue #134: payload-indexed `valid_from` / `valid_to`
+    # so the bitemporal `as_of` predicate is index-backed on every read.
+    # `recorded_at` is the writer / retention timestamp; `valid_from` /
+    # `valid_to` are the validity window the open-closed predicate hits.
+    PAYLOAD_VALID_FROM,
+    PAYLOAD_VALID_TO,
     # ADR-0009 §5: payload-indexed `tier` so hot reads add a cheap
     # `tier = "hot"` filter without an HNSW scan over warm payload-only
     # points.  Snapshot-date is indexed too so warm reads at a given
@@ -159,6 +173,7 @@ __all__ = [
     "PAYLOAD_TITLE",
     "PAYLOAD_TOMBSTONED_AT",
     "PAYLOAD_URI",
+    "PAYLOAD_VALID_FROM",
     "PAYLOAD_VALID_TO",
     "PAYLOAD_WORKSPACE_ID",
     "TIER_HOT",

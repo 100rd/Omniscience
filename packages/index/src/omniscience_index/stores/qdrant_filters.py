@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 
 from qdrant_client import models as qm
 
@@ -40,6 +41,7 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_SOURCE_ID,
     PAYLOAD_TIER,
     PAYLOAD_TOMBSTONED_AT,
+    PAYLOAD_VALID_FROM,
     PAYLOAD_VALID_TO,
     PAYLOAD_WORKSPACE_ID,
 )
@@ -60,6 +62,7 @@ class QdrantFilterBuilder:
     document_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
     external_id: str | None = None
     exclude_tombstoned_flag: bool = False
+    as_of: datetime | None = None
 
     def with_source_ids(self, source_ids: list[uuid.UUID]) -> QdrantFilterBuilder:
         """Return a new builder narrowed to the given sources."""
@@ -76,6 +79,18 @@ class QdrantFilterBuilder:
     def exclude_tombstoned(self) -> QdrantFilterBuilder:
         """Return a new builder that excludes tombstoned points."""
         return replace(self, exclude_tombstoned_flag=True)
+
+    def with_as_of(self, as_of: datetime | None) -> QdrantFilterBuilder:
+        """Return a new builder that applies the ADR-0008 §5 ``as_of`` predicate.
+
+        When ``as_of`` is ``None`` the predicate is omitted entirely —
+        this is the current-state read path and is byte-identical to the
+        pre-bitemporal contract (no ``valid_*`` clauses on the wire).
+        When ``as_of`` is supplied the canonical open-closed predicate
+        ``valid_from <= as_of AND (valid_to > as_of OR valid_to IS NULL)``
+        is layered onto the workspace-scoped ``must``.
+        """
+        return replace(self, as_of=as_of)
 
     def build(self) -> qm.Filter:
         """Emit the concrete Qdrant filter.
@@ -126,7 +141,95 @@ class QdrantFilterBuilder:
             # clause keeps the selection tight rather than relying on
             # must_not/not-matching semantics.
             must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_TOMBSTONED_AT)))
+        if self.as_of is not None:
+            # ADR-0008 §5 canonical open-closed predicate, ADR-0006 §6
+            # cross-store alignment.  Layered as additional ``must``
+            # clauses on top of workspace_id — never replaces it.
+            must.extend(_as_of_must_clauses(self.as_of))
         return qm.Filter(must=must)
+
+
+def _as_of_must_clauses(
+    as_of: datetime,
+) -> list[
+    qm.FieldCondition
+    | qm.IsEmptyCondition
+    | qm.IsNullCondition
+    | qm.HasIdCondition
+    | qm.HasVectorCondition
+    | qm.NestedCondition
+    | qm.Filter
+]:
+    """Build the ADR-0008 §5 ``as_of`` predicate as Qdrant ``must`` clauses.
+
+    The canonical predicate is
+    ``valid_from <= $as_of AND ($as_of < valid_to OR valid_to IS NULL)``.
+
+    - ``valid_from <= as_of`` maps to ``DatetimeRange(lte=as_of)`` on the
+      ``valid_from`` payload field.
+    - ``valid_to > as_of OR valid_to IS NULL`` maps to a sub-``Filter``
+      with ``should=[DatetimeRange(gt=as_of), IsNullCondition]`` —
+      Qdrant evaluates a ``should`` block as logical OR.
+
+    Boundary semantics (open-closed `[valid_from, valid_to)` per ADR-0008 §1):
+    ``as_of == valid_from`` is included (``lte``); ``as_of == valid_to``
+    is excluded (strict ``gt``) — the row that ended exactly at ``as_of``
+    has stopped being valid by ``as_of``.
+
+    ``as_of`` is serialised through Qdrant's native ``DatetimeRange`` so
+    timezone-aware values round-trip cleanly.  The caller is responsible
+    for ensuring ``as_of`` is timezone-aware (the ``SearchRequest``
+    validator at the public API surface enforces this).
+    """
+    valid_from_clause: (
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ) = qm.FieldCondition(
+        key=PAYLOAD_VALID_FROM,
+        range=qm.DatetimeRange(lte=as_of),
+    )
+    valid_to_open_clause: (
+        qm.FieldCondition
+        | qm.IsEmptyCondition
+        | qm.IsNullCondition
+        | qm.HasIdCondition
+        | qm.HasVectorCondition
+        | qm.NestedCondition
+        | qm.Filter
+    ) = qm.Filter(
+        should=[
+            qm.FieldCondition(
+                key=PAYLOAD_VALID_TO,
+                range=qm.DatetimeRange(gt=as_of),
+            ),
+            qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)),
+        ]
+    )
+    return [valid_from_clause, valid_to_open_clause]
+
+
+def build_as_of_filter(
+    *,
+    workspace_id: uuid.UUID,
+    as_of: datetime,
+    source_ids: tuple[uuid.UUID, ...] = (),
+) -> qm.Filter:
+    """Standalone helper: workspace-scoped filter with the ``as_of`` predicate.
+
+    Mirrors :class:`QdrantFilterBuilder` for callers that want a
+    one-shot constructor (e.g. test fixtures).  In production code path
+    prefer ``QdrantFilterBuilder(workspace_id=...).with_as_of(t)`` so
+    the workspace invariant is anchored at construction time.
+    """
+    builder = QdrantFilterBuilder(workspace_id=workspace_id).with_as_of(as_of)
+    if source_ids:
+        builder = builder.with_source_ids(list(source_ids))
+    return builder.build()
 
 
 def build_retention_eligible_filter(
@@ -319,6 +422,7 @@ def build_tombstone_sweep_filter(*, cutoff_iso: str) -> qm.Filter:
 
 __all__ = [
     "QdrantFilterBuilder",
+    "build_as_of_filter",
     "build_end_date_chunks_filter",
     "build_retention_eligible_filter",
     "build_tombstone_sweep_filter",
