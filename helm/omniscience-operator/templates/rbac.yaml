@@ -1,6 +1,7 @@
 {{- if .Values.rbac.create -}}
-# v0.2 RBAC: cluster-scoped read-only on Pods. Adding kinds is a follow-up
-# issue per epic #98 — keep this list minimal.
+# v0.2 RBAC: cluster-scoped read-only on workload primitives. Verbs are
+# strictly get/list/watch — the operator never mutates K8s state. Per
+# ADR-0007 §ACL the operator is observation-only.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -8,8 +9,19 @@ metadata:
   labels:
     {{- include "omniscience-operator.labels" . | nindent 4 }}
 rules:
+  # Pods (issue #101 — operator scaffold).
   - apiGroups: [""]
     resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  # Workload watchers (issue #157): Deployment, ReplicaSet, StatefulSet,
+  # DaemonSet — the apps/v1 quartet that owns / is owned by Pods.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list", "watch"]
+  # Workload watcher (issue #157): Job. CronJob is deferred to a follow-up
+  # sub-issue — do NOT add "cronjobs" here until that issue lands.
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
     verbs: ["get", "list", "watch"]
   # Leader election lease — namespaced; gated to the operator's own namespace
   # below.

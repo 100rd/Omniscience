@@ -72,6 +72,14 @@ type Event struct {
 	// flat (no nested maps beyond labels) so the Pydantic side can validate
 	// without a discriminated union.
 	Metadata map[string]string `json:"metadata"`
+
+	// Edges carries OWNS relationships sourced from
+	// metadata.ownerReferences on the watched resource. Optional and
+	// omitempty for backward compatibility with v0.2 consumers (the Pod
+	// path emits no edges in v0.2 — Pods' parents are emitted by the
+	// ReplicaSet/StatefulSet/DaemonSet/Job watchers). See ADR-0007
+	// §causal-fidelity: edges are NEVER inferred from name patterns.
+	Edges []OwnerEdge `json:"edges,omitempty"`
 }
 
 // PodToEvent maps a corev1.Pod plus an action into an Event. Pure function
