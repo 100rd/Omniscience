@@ -33,6 +33,29 @@ const SourceType = "k8s-operator"
 // kinds (Deployment, Service, etc.) will be added in follow-up issues.
 const EntityKindPod = "k8s_resource"
 
+// EntityKindK8sResource is the canonical kind prefix for every Kubernetes
+// resource entity emitted by the operator. The Pod-specific alias above is
+// preserved for source-compatibility with the v0.2 scaffold; new kinds use
+// this constant directly.
+const EntityKindK8sResource = "k8s_resource"
+
+// Edge relation types emitted by the operator. Kept as named constants so
+// the consumer side can switch over a closed set rather than match strings
+// at every call site. See ADR-0007 — edges are derived from K8s-native
+// fields only and never inferred from labels.
+const (
+	// RelationInCluster connects a cluster-scoped or namespaced resource to
+	// the per-cluster anchor entity (issue #159; #167's identity story
+	// builds on this).
+	RelationInCluster = "in_cluster"
+	// RelationInNamespace connects a namespaced resource to its Namespace
+	// anchor (added per-mapper in follow-up Pod/Deployment edits — this
+	// issue lands the Namespace target side only).
+	RelationInNamespace = "in_namespace"
+	// RelationOfClass connects a PersistentVolume to its StorageClass.
+	RelationOfClass = "of_class"
+)
+
 // Event is the operator-side payload published to NATS. Its JSON shape is a
 // superset of omniscience_server.ingestion.events.DocumentChangeEvent: we
 // add WorkspaceID (operator path is pre-tenanted; the worker accepts it
@@ -80,10 +103,11 @@ type Event struct {
 	Edges []OwnerEdge `json:"edges,omitempty"`
 
 	// TopologyEdges is the (optional) topology edge list emitted alongside
-	// this entity (issue #158). Always derived from K8s-native pointers
-	// (spec.rules, spec.volumes, …) — never inferred from labels. Pod and
-	// workload events leave this field nil; consumers MUST treat absent
-	// and empty as identical. See common.go for EdgeRef.
+	// this entity. Always derived from K8s-native pointers (spec.rules,
+	// spec.volumes, spec.nodeName, spec.storageClassName, …) — never
+	// inferred from labels. Pod and workload events leave this field nil;
+	// consumers MUST treat absent and empty as identical. See common.go for
+	// EdgeRef.
 	TopologyEdges []EdgeRef `json:"topology_edges,omitempty"`
 }
 
@@ -140,10 +164,39 @@ func PodToEvent(pod *corev1.Pod, action Action, workspaceID uuid.UUID, clusterNa
 // operator restarts and pod identity changes, which gives the server a
 // stable foreign key for the operator-emitted Source.
 func deriveSourceID(workspaceID uuid.UUID, clusterName string) uuid.UUID {
-	// nsOmniscienceOperator is a fixed UUIDv4 picked once for this purpose.
-	// Defining it here (not in config) makes the derivation reproducible
-	// from any operator instance without coordination.
-	nsOmniscienceOperator := uuid.MustParse("d6c4a5b1-3e7f-4a92-9c2d-7e1f8b6c4a5b")
-	name := workspaceID.String() + "/" + clusterName
-	return uuid.NewSHA1(nsOmniscienceOperator, []byte(name))
+	return uuid.NewSHA1(nsOmniscienceOperator, []byte(workspaceID.String()+"/"+clusterName))
+}
+
+// nsOmniscienceOperator is the fixed UUIDv4 namespace used to derive every
+// operator-side UUIDv5. Sharing one namespace across SourceID and ClusterID
+// keeps the derivation reproducible from any operator instance without
+// coordination. Defined as a package var (computed once) so callers can use
+// it without paying MustParse on every invocation.
+var nsOmniscienceOperator = uuid.MustParse("d6c4a5b1-3e7f-4a92-9c2d-7e1f8b6c4a5b")
+
+// DeriveClusterID returns a deterministic UUIDv5 identifying a cluster
+// instance for #167's multi-cluster identity model. The derivation is:
+//
+//	uuid5(nsOmniscienceOperator, "cluster/" + workspaceID + "/" + clusterName)
+//
+// This collides with no SourceID derivation (different prefix path), is
+// deterministic across operator restarts, and is the value the cluster
+// anchor entity carries as metadata["cluster_id"]. Two workspaces with the
+// same OMNISCIENCE_CLUSTER_NAME produce two distinct cluster_ids — that's
+// the per-tenant isolation the ACL invariant requires.
+func DeriveClusterID(workspaceID uuid.UUID, clusterName string) uuid.UUID {
+	return uuid.NewSHA1(nsOmniscienceOperator, []byte("cluster/"+workspaceID.String()+"/"+clusterName))
+}
+
+// ClusterExternalID returns the canonical external_id for the per-cluster
+// anchor entity. The format matches the issue body verbatim:
+//
+//	k8s_resource/Cluster/{cluster_name}
+//
+// The form deliberately omits the workspace_id — server-side uniqueness is
+// the (workspace_id, external_id) composite, so two workspaces that share a
+// cluster_name produce two distinct rows. #167 will flip a same-workspace
+// collision into a structured error.
+func ClusterExternalID(clusterName string) string {
+	return EntityKindK8sResource + "/Cluster/" + clusterName
 }
