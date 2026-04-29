@@ -123,6 +123,7 @@ class TestSourceModel:
             "terraform",
             "s3",
             "aws",
+            "alerts",
         }
         assert {t.value for t in SourceType} == expected
 

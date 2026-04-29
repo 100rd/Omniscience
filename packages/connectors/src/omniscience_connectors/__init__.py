@@ -35,6 +35,11 @@ from omniscience_connectors.agentic import (
     OllamaLLMProvider,
     build_provider,
 )
+from omniscience_connectors.alerts.connector import (
+    AlertsConfig,
+    AlertsConnector,
+    NormalizedAlert,
+)
 from omniscience_connectors.aws.connector import AwsConfig, AwsConnector
 from omniscience_connectors.base import (
     Connector,
@@ -71,6 +76,7 @@ _registry.register(K8sAgenticConnector)
 _registry.register(DatabaseConnector)
 _registry.register(S3Connector)
 _registry.register(AwsConnector)
+_registry.register(AlertsConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -78,6 +84,8 @@ default_registry: ConnectorRegistry = _registry
 __all__ = [
     "AgentConfig",
     "AgenticConnector",
+    "AlertsConfig",
+    "AlertsConnector",
     "AwsConfig",
     "AwsConnector",
     "ConfluenceConnector",
@@ -94,6 +102,7 @@ __all__ = [
     "K8sAgenticConfig",
     "K8sAgenticConnector",
     "LLMProvider",
+    "NormalizedAlert",
     "NotFoundError",
     "NotionConnector",
     "OllamaLLMProvider",

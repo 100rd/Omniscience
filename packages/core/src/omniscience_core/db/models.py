@@ -51,6 +51,7 @@ class SourceType(enum.StrEnum):
     terraform = "terraform"
     s3 = "s3"
     aws = "aws"
+    alerts = "alerts"
 
 
 class SourceStatus(enum.StrEnum):
