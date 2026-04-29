@@ -26,8 +26,15 @@ from omniscience_connectors.base import (
     WebhookHandler,
     WebhookPayload,
 )
+from omniscience_connectors.slack.entities import extract_slack_graph
 
 __all__ = ["SlackConfig", "SlackConnector"]
+
+# Metadata keys under which the connector stamps the extracted entity
+# surface for the downstream ingestion pipeline.  Documented as part of
+# the connector contract — pipeline code reads these by name.
+_META_ENTITIES_KEY: str = "entities"
+_META_EDGES_KEY: str = "edges"
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +215,14 @@ class SlackConnector(Connector):
         secrets: dict[str, str],
         ref: DocumentRef,
     ) -> FetchedDocument:
-        """Fetch a Slack thread (root + replies) and return as Markdown."""
+        """Fetch a Slack thread (root + replies) and return as Markdown.
+
+        Side effect (issue #149): stamps the extracted entity surface onto
+        ``ref.metadata['entities']`` / ``ref.metadata['edges']`` for the
+        downstream ingestion pipeline to emit into the graph.  Workspace
+        identity is NEVER read from the Slack payload — the pipeline
+        layer derives it from ``Source.tenant_id`` and stamps each entity.
+        """
         cfg: SlackConfig = config  # type: ignore[assignment]
         headers = _auth_headers(secrets)
 
@@ -220,34 +234,57 @@ class SlackConnector(Connector):
                 f"DocumentRef missing 'channel_id' or 'thread_ts' in metadata: {ref.uri!r}"
             )
 
-        # Fetch root message
-        root_messages = await self._history_page(channel_id, thread_ts, thread_ts, headers)
-        root_text = ""
-        if root_messages:
-            root_text = _message_to_markdown(root_messages[0])
+        ordered = await self._collect_thread_messages(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            include_replies=cfg.include_threads,
+            headers=headers,
+        )
 
-        # Fetch replies if configured
-        reply_text = ""
-        if cfg.include_threads:
-            replies = await self._fetch_replies(channel_id, thread_ts, headers)
-            reply_lines = [_message_to_markdown(m) for m in replies if m.get("ts") != thread_ts]
-            if reply_lines:
-                reply_text = "\n\n".join(reply_lines)
+        channel_name = str(ref.metadata.get("channel_name", channel_id))
+        content = _render_thread_markdown(channel_name, thread_ts, ordered)
 
-        # Assemble document
-        channel_name = ref.metadata.get("channel_name", channel_id)
-        parts = [f"## #{channel_name} — Thread {thread_ts}"]
-        if root_text:
-            parts.append(root_text)
-        if reply_text:
-            parts.append("### Replies\n\n" + reply_text)
+        # Stamp the extracted entity surface (issue #149).  The downstream
+        # ingestion pipeline reads these keys; absence is benign.
+        entities, edges = extract_slack_graph(
+            channel_id=channel_id,
+            thread_ts=thread_ts,
+            channel_name=channel_name,
+            messages=ordered,
+        )
+        ref.metadata[_META_ENTITIES_KEY] = entities
+        ref.metadata[_META_EDGES_KEY] = edges
 
-        content = "\n\n".join(parts)
         return FetchedDocument(
             ref=ref,
             content_bytes=content.encode("utf-8"),
             content_type="text/markdown",
         )
+
+    async def _collect_thread_messages(
+        self,
+        *,
+        channel_id: str,
+        thread_ts: str,
+        include_replies: bool,
+        headers: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Fetch the root + (optional) replies and return them in ts order.
+
+        Centralised so :meth:`fetch` can both render Markdown AND feed the
+        message dicts to the entity extractor without re-fetching.
+        """
+        root_messages = await self._history_page(channel_id, thread_ts, thread_ts, headers)
+        ordered: list[dict[str, Any]] = []
+        if root_messages:
+            ordered.append(root_messages[0])
+
+        if include_replies:
+            replies = await self._fetch_replies(channel_id, thread_ts, headers)
+            for m in replies:
+                if m.get("ts") != thread_ts:
+                    ordered.append(m)
+        return ordered
 
     def webhook_handler(self) -> WebhookHandler | None:
         return SlackWebhookHandler()
@@ -440,6 +477,28 @@ def _auth_headers(secrets: dict[str, str]) -> dict[str, str]:
     if not token.startswith("xoxb-"):
         raise ValueError("Slack 'bot_token' must start with 'xoxb-'.")
     return {"Authorization": f"Bearer {token}"}
+
+
+def _render_thread_markdown(
+    channel_name: str,
+    thread_ts: str,
+    messages: list[dict[str, Any]],
+) -> str:
+    """Render an ordered list of Slack message dicts as a Markdown thread.
+
+    First message is treated as the thread root.  Remaining messages are
+    rendered under a ``### Replies`` heading to match the prior contract
+    (existing tests in ``tests/test_connectors_v2.py`` assert against
+    "Reply here" appearing in the body).
+    """
+    parts = [f"## #{channel_name} — Thread {thread_ts}"]
+    if messages:
+        parts.append(_message_to_markdown(messages[0]))
+        replies = messages[1:]
+        if replies:
+            reply_lines = [_message_to_markdown(m) for m in replies]
+            parts.append("### Replies\n\n" + "\n\n".join(reply_lines))
+    return "\n\n".join(parts)
 
 
 def _message_to_markdown(msg: dict[str, Any]) -> str:
