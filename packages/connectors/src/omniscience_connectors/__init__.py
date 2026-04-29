@@ -21,9 +21,9 @@ Registry::
     from omniscience_connectors import ConnectorRegistry, get_connector
 
 Built-in connectors (``git``, ``github_pr``, ``fs``, ``confluence``, ``notion``,
-``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``) are registered below and available
-immediately on import.  Third-party connectors call :func:`get_connector`
-after registering against the shared registry.
+``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``, ``alerts``, ``otel``) are
+registered below and available immediately on import.  Third-party connectors call
+:func:`get_connector` after registering against the shared registry.
 """
 
 from omniscience_connectors.agentic import (
@@ -55,6 +55,18 @@ from omniscience_connectors.git.connector import GitConnector
 from omniscience_connectors.github_pr.connector import GithubPrConfig, GithubPrConnector
 from omniscience_connectors.jira.connector import JiraConnector
 from omniscience_connectors.notion.connector import NotionConnector
+from omniscience_connectors.otel import (
+    OtelConfig,
+    OtelConnector,
+    OtelDecodeError,
+    ParsedSpan,
+    ParsedTrace,
+    ParsedTraces,
+    canonical_pod_name,
+    canonical_service_name,
+    canonical_trace_name,
+    parse_otlp_payload,
+)
 from omniscience_connectors.registry import (
     ConnectorRegistry,
     NotFoundError,
@@ -77,6 +89,7 @@ _registry.register(DatabaseConnector)
 _registry.register(S3Connector)
 _registry.register(AwsConnector)
 _registry.register(AlertsConnector)
+_registry.register(OtelConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -106,12 +119,22 @@ __all__ = [
     "NotFoundError",
     "NotionConnector",
     "OllamaLLMProvider",
+    "OtelConfig",
+    "OtelConnector",
+    "OtelDecodeError",
+    "ParsedSpan",
+    "ParsedTrace",
+    "ParsedTraces",
     "S3Config",
     "S3Connector",
     "SlackConnector",
     "WebhookHandler",
     "WebhookPayload",
     "build_provider",
+    "canonical_pod_name",
+    "canonical_service_name",
+    "canonical_trace_name",
     "default_registry",
     "get_connector",
+    "parse_otlp_payload",
 ]

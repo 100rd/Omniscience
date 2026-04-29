@@ -12,6 +12,7 @@ class Scope(enum.StrEnum):
     sources_read = "sources:read"
     sources_write = "sources:write"
     stats_read = "stats:read"
+    otel_write = "otel:write"
     admin = "admin"
 
 
@@ -22,11 +23,13 @@ SCOPE_HIERARCHY: dict[Scope, set[Scope]] = {
         Scope.sources_read,
         Scope.sources_write,
         Scope.stats_read,
+        Scope.otel_write,
         Scope.admin,
     },
     Scope.sources_write: {Scope.sources_write},
     Scope.sources_read: {Scope.sources_read},
     Scope.stats_read: {Scope.stats_read},
+    Scope.otel_write: {Scope.otel_write},
     Scope.search: {Scope.search},
 }
 

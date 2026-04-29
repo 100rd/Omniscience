@@ -124,6 +124,7 @@ class TestSourceModel:
             "s3",
             "aws",
             "alerts",
+            "otel",
         }
         assert {t.value for t in SourceType} == expected
 

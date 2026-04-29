@@ -52,6 +52,7 @@ class SourceType(enum.StrEnum):
     s3 = "s3"
     aws = "aws"
     alerts = "alerts"
+    otel = "otel"
 
 
 class SourceStatus(enum.StrEnum):

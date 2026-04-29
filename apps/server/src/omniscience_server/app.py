@@ -51,6 +51,7 @@ from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.middleware import TelemetryMiddleware, TracingMiddleware
 from omniscience_server.rest import api_v1_router, register_error_handlers
+from omniscience_server.rest.otlp_ingester import OtlpIngester
 from omniscience_server.retention_worker import RetentionWorker
 from omniscience_server.routes import health_router, tokens_router
 from omniscience_server.scheduler import SchedulerWorker
@@ -243,6 +244,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # ACL invariant from ADR-0005/0006 carries through the live path the
     # same way the migration runner enforces it for backfills.
     index_writer = IndexWriter(session_factory)
+    # OTLP/HTTP trace receiver (#152) — wired here so the route in
+    # ``rest/otlp.py`` can pull the per-workspace ingester off
+    # ``app.state``.  Tenant identity is resolved from the bearer token
+    # by the route; this ingester is workspace-agnostic on construction.
+    app.state.otlp_ingester = OtlpIngester(session_factory=session_factory)
     consumer: QueueConsumer[DocumentChangeEvent] = QueueConsumer(
         js=nats_conn.jetstream,
         stream="INGEST_CHANGES",
