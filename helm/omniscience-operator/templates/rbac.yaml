@@ -23,6 +23,19 @@ rules:
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["get", "list", "watch"]
+  # ── #158 networking + config watchers ──────────────────────────────────
+  # Read-only verbs only. The Secret get/list permission is unavoidable for
+  # the watcher to function; the controller's secret_controller.go +
+  # internal/entity/secret.go drop all values at the mapper boundary, and
+  # the structural test in entity/secret_test.go asserts no value bytes
+  # ever reach the published Event. See docs/connectors/k8s-operator-secrets.md.
+  - apiGroups: [""]
+    resources: ["services", "endpoints", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["ingresses", "networkpolicies"]
+    verbs: ["get", "list", "watch"]
+  # ── end #158 ──────────────────────────────────────────────────────────
   # Leader election lease — namespaced; gated to the operator's own namespace
   # below.
   {{- if .Values.leaderElection.enabled }}

@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/google/uuid"
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -32,6 +34,9 @@ var scheme = runtime.NewScheme()
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	// ── #158 networking + config watchers — register networking.k8s.io/v1 ──
+	utilruntime.Must(networkingv1.AddToScheme(scheme))
+	// ── end #158 ──
 }
 
 func main() {
@@ -150,6 +155,16 @@ func run() error {
 	}
 	// ─── End workload watchers (#157) ─────────────────────────────────────
 
+	// ── #158 networking + config watchers ─────────────────────────────────
+	// One reconciler per kind. Setup order doesn't matter — controller-
+	// runtime resolves dependencies at start time. Each Setup* call returns
+	// a wrapped error so a single line in kubectl logs identifies which
+	// kind failed to register.
+	if err := setupNetworkingAndConfigWatchers(mgr, pub, cfg.WorkspaceID, cfg.ClusterName); err != nil {
+		return err
+	}
+	// ── end #158 ──────────────────────────────────────────────────────────
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
 	}
@@ -163,3 +178,59 @@ func run() error {
 	}
 	return nil
 }
+
+// ── #158 networking + config watchers — registration helper ────────────────
+//
+// setupNetworkingAndConfigWatchers wires the Service / Endpoints / Ingress /
+// NetworkPolicy / ConfigMap / Secret reconcilers into the manager. Kept in
+// its own function so the run() body stays readable and so adding/removing a
+// kind is a localised change. APPEND-only relative to the original main.go
+// per the parallel-team protocol.
+//
+// Each constructor validates its inputs (non-nil client, non-zero workspace,
+// non-empty cluster name) — those errors are wrapped with the kind so kubectl
+// logs identify the offender immediately on init failure.
+//
+// Goroutine-safety: each reconciler is independent and shares no mutable
+// state with the others. The publisher is concurrency-safe (NATS connection
+// is goroutine-safe by design).
+func setupNetworkingAndConfigWatchers(
+	mgr ctrl.Manager,
+	pub publisher.Publisher,
+	workspaceID uuid.UUID,
+	clusterName string,
+) error {
+	if svc, err := controller.NewServiceReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+		return fmt.Errorf("service reconciler init: %w", err)
+	} else if err := svc.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("service reconciler setup: %w", err)
+	}
+	if ep, err := controller.NewEndpointsReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+		return fmt.Errorf("endpoints reconciler init: %w", err)
+	} else if err := ep.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("endpoints reconciler setup: %w", err)
+	}
+	if ing, err := controller.NewIngressReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+		return fmt.Errorf("ingress reconciler init: %w", err)
+	} else if err := ing.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("ingress reconciler setup: %w", err)
+	}
+	if np, err := controller.NewNetworkPolicyReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+		return fmt.Errorf("networkpolicy reconciler init: %w", err)
+	} else if err := np.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("networkpolicy reconciler setup: %w", err)
+	}
+	if cm, err := controller.NewConfigMapReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+		return fmt.Errorf("configmap reconciler init: %w", err)
+	} else if err := cm.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("configmap reconciler setup: %w", err)
+	}
+	if sec, err := controller.NewSecretReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+		return fmt.Errorf("secret reconciler init: %w", err)
+	} else if err := sec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("secret reconciler setup: %w", err)
+	}
+	return nil
+}
+
+// ── end #158 ────────────────────────────────────────────────────────────────
