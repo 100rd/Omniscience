@@ -6,12 +6,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 
 	"github.com/google/uuid"
 	networkingv1 "k8s.io/api/networking/v1"
+	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -37,6 +39,11 @@ func init() {
 	// ── #158 networking + config watchers — register networking.k8s.io/v1 ──
 	utilruntime.Must(networkingv1.AddToScheme(scheme))
 	// ── end #158 ──
+	// --- BEGIN issue #159: cluster-scoped watchers scheme registration ---
+	// storage.k8s.io/v1 carries StorageClass; the core scheme registered
+	// above already covers Node, Namespace, PersistentVolume.
+	utilruntime.Must(storagev1.AddToScheme(scheme))
+	// --- END issue #159 ---
 }
 
 func main() {
@@ -165,12 +172,79 @@ func run() error {
 	}
 	// ── end #158 ──────────────────────────────────────────────────────────
 
+	// --- BEGIN issue #159: cluster-scoped watcher registration ---
+	// Register the four cluster-scoped reconcilers (Node, Namespace,
+	// PersistentVolume, StorageClass). Each follows the same constructor /
+	// SetupWithManager shape as the Pod reconciler above; failure on any of
+	// them is a hard startup error so the operator never runs partial.
+	nodeRec, err := controller.NewNodeReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("node reconciler init: %w", err)
+	}
+	if err := nodeRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("node reconciler setup: %w", err)
+	}
+
+	nsRec, err := controller.NewNamespaceReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("namespace reconciler init: %w", err)
+	}
+	if err := nsRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("namespace reconciler setup: %w", err)
+	}
+
+	pvRec, err := controller.NewPersistentVolumeReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("persistentvolume reconciler init: %w", err)
+	}
+	if err := pvRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("persistentvolume reconciler setup: %w", err)
+	}
+
+	scRec, err := controller.NewStorageClassReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("storageclass reconciler init: %w", err)
+	}
+	if err := scRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("storageclass reconciler setup: %w", err)
+	}
+	// --- END issue #159 ---
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
 	}
 	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
 		return fmt.Errorf("add readyz: %w", err)
 	}
+
+	// --- BEGIN issue #159: Cluster anchor entity publish at startup ---
+	// The Cluster anchor is the per-cluster top-level entity; it is emitted
+	// once before the manager loop starts so every subsequent watch event
+	// can reference it via an IN_CLUSTER edge. Restart re-publishes the
+	// same external_id and cluster_id (deterministic UUIDv5), so the
+	// server-side upsert is idempotent. The kubernetes_version and
+	// cluster_endpoint fields are passed empty here — they are populated
+	// in a follow-up that reads from the rest config + a Node sample once
+	// the manager cache is warm. The empty-string strategy keeps this
+	// change small and pure-stamping.
+	anchorPub, err := controller.NewClusterAnchorPublisher(pub, cfg.WorkspaceID, cfg.ClusterName, "", "")
+	if err != nil {
+		return fmt.Errorf("cluster anchor init: %w", err)
+	}
+	if err := anchorPub.PublishOnce(context.Background()); err != nil {
+		// Cluster anchor publish failure is logged but not fatal — the
+		// operator can still emit per-resource events; the consumer side
+		// upserts the cluster on first IN_CLUSTER edge resolution if the
+		// anchor never lands. Hard-erroring here would mean a brief NATS
+		// outage at startup blocks the whole operator.
+		logger.Error(err, "cluster anchor publish; continuing without anchor")
+	} else {
+		logger.Info("cluster anchor published",
+			"cluster_name", cfg.ClusterName,
+			"cluster_id", anchorPub.BuildEvent().Metadata["cluster_id"],
+		)
+	}
+	// --- END issue #159 ---
 
 	logger.Info("starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

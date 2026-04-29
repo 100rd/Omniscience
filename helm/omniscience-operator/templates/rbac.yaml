@@ -36,6 +36,18 @@ rules:
     resources: ["ingresses", "networkpolicies"]
     verbs: ["get", "list", "watch"]
   # ── end #158 ──────────────────────────────────────────────────────────
+  # --- BEGIN issue #159: cluster-scoped watcher RBAC ---
+  # Node, Namespace, PersistentVolume — all cluster-scoped under the core
+  # API group. ClusterRole + ClusterRoleBinding above already grants the
+  # binding cluster-wide; no per-namespace RoleBinding is needed.
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "persistentvolumes"]
+    verbs: ["get", "list", "watch"]
+  # StorageClass lives under storage.k8s.io/v1 — cluster-scoped.
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+  # --- END issue #159 ---
   # Leader election lease — namespaced; gated to the operator's own namespace
   # below.
   {{- if .Values.leaderElection.enabled }}
