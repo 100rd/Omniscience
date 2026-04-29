@@ -49,11 +49,19 @@ from omniscience_server.as_of import (
     INVALID_TIMEZONE_CODE,
     INVALID_TIMEZONE_MESSAGE,
 )
+from omniscience_server.incidents import (
+    ALERT_NOT_FOUND_CODE,
+    DEFAULT_MAX_DEPTH,
+    INVALID_ALERT_ID_CODE,
+    MAX_MAX_DEPTH,
+    MIN_MAX_DEPTH,
+)
 from omniscience_server.mcp.tools import (
     mcp_get_document,
     mcp_get_entity,
     mcp_get_related_entities,
     mcp_list_sources,
+    mcp_resolve_incident,
     mcp_search,
     mcp_source_stats,
 )
@@ -415,6 +423,69 @@ async def source_stats(
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("source_not_found:"):
+            raise
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: resolve_incident (issue #153)
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="resolve_incident",
+    description=(
+        "Compose a recommendation bundle for an alert: target resource, "
+        "responsible PR, related Slack threads, and a v0.1 confidence score. "
+        "alert_id MUST be of the form 'alert://{provider}/{provider_alert_id}'. "
+        "Optional `as_of` (ISO-8601 UTC datetime) anchors the traversal to "
+        "graph state at that time per ADR-0008 §5. Requires a workspace-scoped "
+        "token. Confidence-score model: v0.1 deterministic placeholder per "
+        "issue #153 §C; calibrated model lands in #155."
+    ),
+)
+async def resolve_incident(
+    alert_id: str,
+    ctx: Context[Any, Any, Any],
+    max_depth: int = DEFAULT_MAX_DEPTH,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """resolve_incident tool — requires scope 'search' AND a workspace token.
+
+    Mirrors the auth posture of :func:`get_related_entities` — graph
+    reads are workspace-scoped, fail-closed, and reject unscoped
+    tokens.  Cross-workspace ``alert_id`` resolution returns
+    ``alert_not_found`` to avoid leaking alert existence (issue #153
+    §D / #117).
+    """
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="resolve_incident", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_resolve_incident_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+
+    parsed_as_of = _parse_as_of(as_of)
+    clamped_depth = max(MIN_MAX_DEPTH, min(max_depth, MAX_MAX_DEPTH))
+    try:
+        return await mcp_resolve_incident(
+            app=_get_app(),
+            alert_id=alert_id,
+            workspace_id=workspace_id,
+            as_of=parsed_as_of,
+            max_depth=clamped_depth,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if msg.startswith(f"{INVALID_ALERT_ID_CODE}:"):
+            raise
+        if msg.startswith(f"{ALERT_NOT_FOUND_CODE}:"):
             raise
         raise
 

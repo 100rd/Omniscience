@@ -28,6 +28,12 @@ from omniscience_server.as_of import (
     record_request_duration,
     resolve_effective_as_of,
 )
+from omniscience_server.incidents import mcp_resolve_incident as _mcp_resolve_incident
+
+# Re-exported so ``omniscience_server.mcp.tools.mcp_resolve_incident`` is
+# the canonical import path for the tool, matching the layout of the
+# other MCP tools registered in ``omniscience_server.mcp.server``.
+mcp_resolve_incident = _mcp_resolve_incident
 
 log = structlog.get_logger(__name__)
 

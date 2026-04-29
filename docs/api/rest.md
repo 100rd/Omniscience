@@ -64,6 +64,18 @@ Query parameters: `max_depth` (int, default 1), `edge_types` (repeat for multi-v
 
 Response carries the seed, related entities, edges, plus `effective_as_of` and an optional `meta` block. A pre-history `as_of` returns 200 with an empty payload + `meta.degraded_response = "as_of_before_recorded_history"`.
 
+### `POST /incidents/{alert_id}/resolve`
+
+Mirror of the MCP `resolve_incident` tool (issue [#153](https://github.com/100rd/Omniscience/issues/153)). Workspace-scoped token required.
+
+`alert_id` is the path parameter (URL-encoded) and MUST be of the form `alert://{provider}/{provider_alert_id}`. Other forms return 400 `invalid_alert_id`.
+
+Query parameters: `max_depth` (int, default 2; clamped to `[1, 5]`), `as_of` (ISO-8601 UTC datetime, optional).
+
+Returns the same JSON shape as the MCP tool — see [MCP API → `resolve_incident`](mcp.md#resolve_incident) for the schema, the v0.1 confidence-score heuristic, and the error matrix.
+
+**Workspace-mismatch behaviour**: a foreign workspace's `alert_id` returns 404 `alert_not_found` (not 403) to avoid leaking alert existence — same response a non-existent alert would produce.
+
 ### `GET /sources`
 
 List sources. Query params: `type`, `status`.
@@ -130,7 +142,6 @@ The `as_of` parameter (issue [#133](https://github.com/100rd/Omniscience/issues/
 
 **Out of scope**:
 - Qdrant `as_of` payload filter — issue [#134](https://github.com/100rd/Omniscience/issues/134).
-- `POST /incidents/{id}/resolve` — issue [#153](https://github.com/100rd/Omniscience/issues/153).
 
 ## Error format
 
