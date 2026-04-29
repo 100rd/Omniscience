@@ -7,6 +7,7 @@
 package entity
 
 import (
+	"sort"
 	"strconv"
 	"time"
 
@@ -168,3 +169,130 @@ func newWorkloadEvent(
 func formatReplicas(n int32) string {
 	return strconv.FormatInt(int64(n), 10)
 }
+
+// ---------------------------------------------------------------------------
+// #158 — networking + config watcher helpers (added on top of #157's base)
+// ---------------------------------------------------------------------------
+
+// Edge kinds emitted by operator mappers. Centralised to keep the controller
+// graph contract reviewable in one place.
+const (
+	// EdgeKindSelects: Service -> Pod, resolved via Endpoints (NEVER by
+	// re-evaluating selectors). The Endpoints controller owns this edge.
+	EdgeKindSelects = "SELECTS"
+
+	// EdgeKindRoutesTo: Ingress -> Service, from spec.rules[].http.paths[]
+	// .backend.service.name.
+	EdgeKindRoutesTo = "ROUTES_TO"
+
+	// EdgeKindAppliesTo: NetworkPolicy -> Pod, derived from spec.podSelector.
+	// The operator emits the *selector* on the NetworkPolicy entity; resolving
+	// which pods match is left to the server side (label index lives there).
+	EdgeKindAppliesTo = "APPLIES_TO"
+
+	// EdgeKindConsumes: Pod -> ConfigMap | Secret, from spec.volumes[] and
+	// spec.containers[].envFrom[]. The Pod controller owns these edges.
+	EdgeKindConsumes = "CONSUMES"
+)
+
+// EdgeRef is a lightweight, JSON-safe edge descriptor emitted alongside an
+// entity. Topology edges are derived from K8s-native pointers (spec.rules,
+// spec.volumes, etc.) — we NEVER infer edges from labels or annotations.
+type EdgeRef struct {
+	Kind             string `json:"kind"`
+	TargetExternalID string `json:"target_external_id"`
+}
+
+// DeriveSourceID returns the deterministic UUIDv5 source id for a
+// (workspaceID, clusterName) pair. Exported so #158's mappers (Service,
+// Ingress, etc.) share the same derivation as PodToEvent.
+func DeriveSourceID(workspaceID uuid.UUID, clusterName string) uuid.UUID {
+	return deriveSourceID(workspaceID, clusterName)
+}
+
+// resolveNamespace returns metaNamespace, falling back to "default" for
+// resources that arrive with an empty namespace. Public alias of
+// defaultedNamespace for the #158 mapper call sites.
+func resolveNamespace(metaNamespace string) string {
+	return defaultedNamespace(metaNamespace)
+}
+
+// externalIDFor returns "k8s_resource/{kind}/{namespace}/{name}". Public
+// alias of externalID for the #158 mapper call sites.
+func externalIDFor(kind, namespace, name string) string {
+	return externalID(kind, namespace, name)
+}
+
+// uriFor returns "kube://{cluster}/{namespace}/{kind}/{name}". Public alias
+// of resourceURI for the #158 mapper call sites.
+func uriFor(clusterName, namespace, kind, name string) string {
+	return resourceURI(clusterName, namespace, kind, name)
+}
+
+// sortedKeys returns the keys of m in lexicographic order. Used by
+// ConfigMapToEvent / SecretToEvent to emit a stable `data_keys` list (the
+// *names* of the keys, never their values — the security invariant).
+func sortedKeys[V any](m map[string]V) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+// formatLabelSelector renders a metav1.LabelSelector to a deterministic
+// string form so it can be carried in metadata as a single value. The
+// rendering is the standard Kubernetes label-selector syntax (matchLabels are
+// emitted as `k=v` joined by `,`, in lexicographic key order, followed by
+// matchExpressions in insertion order). Empty selector renders as the empty
+// string.
+//
+// We carry the selector as opaque text because the operator does NOT resolve
+// pods locally — see EdgeKindAppliesTo doc.
+func formatLabelSelector(sel *metav1.LabelSelector) string {
+	if sel == nil {
+		return ""
+	}
+	out := ""
+	keys := make([]string, 0, len(sel.MatchLabels))
+	for k := range sel.MatchLabels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for i, k := range keys {
+		if i > 0 {
+			out += ","
+		}
+		out += k + "=" + sel.MatchLabels[k]
+	}
+	for _, expr := range sel.MatchExpressions {
+		if out != "" {
+			out += ","
+		}
+		out += expr.Key + " " + string(expr.Operator)
+		if len(expr.Values) > 0 {
+			out += " (" + joinSorted(expr.Values) + ")"
+		}
+	}
+	return out
+}
+
+// joinSorted returns vs sorted lexicographically and joined with ",".
+// Defined here (not inline) so the formatLabelSelector body stays small.
+func joinSorted(vs []string) string {
+	cp := make([]string, len(vs))
+	copy(cp, vs)
+	sort.Strings(cp)
+	out := ""
+	for i, v := range cp {
+		if i > 0 {
+			out += ","
+		}
+		out += v
+	}
+	return out
+}
+

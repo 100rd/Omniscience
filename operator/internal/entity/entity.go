@@ -75,11 +75,16 @@ type Event struct {
 
 	// Edges carries OWNS relationships sourced from
 	// metadata.ownerReferences on the watched resource. Optional and
-	// omitempty for backward compatibility with v0.2 consumers (the Pod
-	// path emits no edges in v0.2 — Pods' parents are emitted by the
-	// ReplicaSet/StatefulSet/DaemonSet/Job watchers). See ADR-0007
+	// omitempty for backward compatibility with v0.2 consumers. See ADR-0007
 	// §causal-fidelity: edges are NEVER inferred from name patterns.
 	Edges []OwnerEdge `json:"edges,omitempty"`
+
+	// TopologyEdges is the (optional) topology edge list emitted alongside
+	// this entity (issue #158). Always derived from K8s-native pointers
+	// (spec.rules, spec.volumes, …) — never inferred from labels. Pod and
+	// workload events leave this field nil; consumers MUST treat absent
+	// and empty as identical. See common.go for EdgeRef.
+	TopologyEdges []EdgeRef `json:"topology_edges,omitempty"`
 }
 
 // PodToEvent maps a corev1.Pod plus an action into an Event. Pure function

@@ -20,3 +20,14 @@ Smoke test — create a Pod and watch for the entity:
 
 See https://github.com/100rd/Omniscience/blob/main/docs/decisions/0007-k8s-operator-architecture.md
 for the architecture decisions.
+
+Security note (Secret + ConfigMap watchers — issue #158):
+
+  The operator runs with cluster-scoped read on Pods, Services, Endpoints,
+  Ingresses, NetworkPolicies, ConfigMaps, and Secrets. The Secret get/list
+  permission is unavoidable for the watcher to function — but values are
+  ALWAYS dropped at the mapper boundary, and the test suite enforces this
+  structurally. ConfigMap values are dropped by default; opt-in is per-
+  ConfigMap via the annotation `omniscience.io/index-data: "true"`.
+
+  See docs/connectors/k8s-operator-secrets.md for the complete posture.

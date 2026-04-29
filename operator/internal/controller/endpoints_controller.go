@@ -1,0 +1,99 @@
+// endpoints_controller.go: controller for corev1.Endpoints.
+//
+// Endpoints is the topology resolver for Service-[SELECTS]->Pod (see
+// internal/entity/endpoints.go). Same lifecycle pattern as PodReconciler.
+package controller
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/google/uuid"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/100rd/omniscience/operator/internal/entity"
+	"github.com/100rd/omniscience/operator/internal/publisher"
+)
+
+// EndpointsReconciler watches Endpoints and publishes change events.
+type EndpointsReconciler struct {
+	Client      client.Client
+	Publisher   publisher.Publisher
+	WorkspaceID uuid.UUID
+	ClusterName string
+	Now         func() time.Time
+}
+
+// NewEndpointsReconciler returns a reconciler with sane defaults.
+func NewEndpointsReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*EndpointsReconciler, error) {
+	if c == nil {
+		return nil, errors.New("controller: client must not be nil")
+	}
+	if pub == nil {
+		return nil, errors.New("controller: publisher must not be nil")
+	}
+	if workspaceID.String() == "00000000-0000-0000-0000-000000000000" {
+		return nil, errors.New("controller: workspaceID must not be the zero UUID")
+	}
+	if clusterName == "" {
+		return nil, errors.New("controller: clusterName is required")
+	}
+	return &EndpointsReconciler{
+		Client:      c,
+		Publisher:   pub,
+		WorkspaceID: workspaceID,
+		ClusterName: clusterName,
+		Now:         time.Now,
+	}, nil
+}
+
+// Reconcile is invoked by controller-runtime on every Endpoints add/update/delete.
+func (r *EndpointsReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	logger := log.FromContext(ctx).WithValues(
+		"endpoints", req.String(),
+		"workspace_id", r.WorkspaceID.String(),
+	)
+
+	var ep corev1.Endpoints
+	err := r.Client.Get(ctx, req.NamespacedName, &ep)
+	switch {
+	case err == nil:
+		ev := entity.EndpointsToEvent(&ep, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
+			logger.Error(perr, "publish failed; will requeue")
+			return ctrl.Result{}, fmt.Errorf("publish endpoints event: %w", perr)
+		}
+		logger.V(1).Info("published endpoints upsert", "external_id", ev.ExternalID)
+		return ctrl.Result{}, nil
+
+	case apierrors.IsNotFound(err):
+		stub := &corev1.Endpoints{}
+		stub.Namespace = req.Namespace
+		stub.Name = req.Name
+		ev := entity.EndpointsToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
+			logger.Error(perr, "publish deletion failed; will requeue")
+			return ctrl.Result{}, fmt.Errorf("publish endpoints deletion: %w", perr)
+		}
+		logger.V(1).Info("published endpoints deletion", "external_id", ev.ExternalID)
+		return ctrl.Result{}, nil
+
+	default:
+		logger.Error(err, "get endpoints failed")
+		return ctrl.Result{}, fmt.Errorf("get endpoints %s: %w", req.NamespacedName, err)
+	}
+}
+
+// SetupWithManager registers the reconciler with the manager.
+func (r *EndpointsReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&corev1.Endpoints{}).
+		Named("endpoints-watcher").
+		Complete(r)
+}
