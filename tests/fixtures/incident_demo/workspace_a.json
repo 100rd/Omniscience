@@ -1,0 +1,84 @@
+{
+  "_comment": "Incident demo fixture for workspace_a (issue #154). All timestamps in UTC. The alert fired_at is the anchor; PR/Slack/trace times are offsets from it.",
+  "workspace_id": "aaaaaaaa-1111-2222-3333-4444aa000154",
+  "alert_fired_at": "2026-04-12T19:30:00+00:00",
+  "alert": {
+    "name": "alert://pagerduty/INC-2026-04-12-001",
+    "kind": "alert",
+    "source": "src-alerts-ws-a",
+    "chunk_text": "PagerDuty: api pod 5xx spike — pod/api-7f9b9d4c-xj4kp",
+    "depth": 0,
+    "edge_type": null,
+    "valid_from": "2026-04-12T19:30:00+00:00"
+  },
+  "neighbours": [
+    {
+      "_role": "target_pod",
+      "name": "pod/api-7f9b9d4c-xj4kp",
+      "kind": "k8s_pod",
+      "source": "src-alerts-ws-a",
+      "chunk_text": null,
+      "depth": 1,
+      "edge_type": "FIRES_AGAINST",
+      "valid_from": "2026-04-12T15:00:00+00:00"
+    },
+    {
+      "_role": "responsible_pr_recent",
+      "name": "https://github.com/acme/api/pull/4242",
+      "kind": "pull_request",
+      "source": "src-github-ws-a",
+      "chunk_text": "PR #4242: Bump api request timeout to 5s",
+      "depth": 2,
+      "edge_type": "DEPLOYED_BY",
+      "valid_from": "2026-04-12T15:30:00+00:00"
+    },
+    {
+      "_role": "older_pr_outside_window",
+      "name": "https://github.com/acme/api/pull/4099",
+      "kind": "pull_request",
+      "source": "src-github-ws-a",
+      "chunk_text": "PR #4099: Refactor logging — merged 7 days ago",
+      "depth": 2,
+      "edge_type": "DEPLOYED_BY",
+      "valid_from": "2026-04-05T19:30:00+00:00"
+    },
+    {
+      "_role": "related_slack_thread",
+      "name": "slack://channel/C0INCIDENTS/thread/1744486200.001100",
+      "kind": "slack_thread",
+      "source": "src-slack-ws-a",
+      "chunk_text": "alice: pod/api-7f9b9d4c-xj4kp is throwing 5xx — see https://github.com/acme/api/pull/4242",
+      "depth": 2,
+      "edge_type": "DISCUSSED_IN",
+      "valid_from": "2026-04-12T19:32:00+00:00"
+    },
+    {
+      "_role": "unrelated_slack_thread",
+      "name": "slack://channel/C0RANDOM/thread/1744000000.000700",
+      "kind": "slack_thread",
+      "source": "src-slack-ws-a",
+      "chunk_text": "bob: lunch order — sushi or pizza?",
+      "depth": 2,
+      "edge_type": "DISCUSSED_IN",
+      "valid_from": "2026-04-07T12:00:00+00:00"
+    },
+    {
+      "_role": "trace",
+      "name": "trace://4bf92f3577b34da6a3ce929d0e0e4736",
+      "kind": "otel_trace",
+      "source": "src-otel-ws-a",
+      "chunk_text": null,
+      "depth": 1,
+      "edge_type": "OBSERVED_IN",
+      "valid_from": "2026-04-12T19:29:55+00:00"
+    }
+  ],
+  "edges": [
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "pod/api-7f9b9d4c-xj4kp", "edge_type": "FIRES_AGAINST"},
+    {"from_entity": "pod/api-7f9b9d4c-xj4kp", "to_entity": "https://github.com/acme/api/pull/4242", "edge_type": "DEPLOYED_BY"},
+    {"from_entity": "pod/api-7f9b9d4c-xj4kp", "to_entity": "https://github.com/acme/api/pull/4099", "edge_type": "DEPLOYED_BY"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "slack://channel/C0INCIDENTS/thread/1744486200.001100", "edge_type": "DISCUSSED_IN"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "slack://channel/C0RANDOM/thread/1744000000.000700", "edge_type": "DISCUSSED_IN"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "trace://4bf92f3577b34da6a3ce929d0e0e4736", "edge_type": "OBSERVED_IN"}
+  ]
+}
