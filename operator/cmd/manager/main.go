@@ -24,9 +24,10 @@ import (
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
-// scheme is the runtime scheme used by the manager's client and cache. Only
-// core/v1 is needed in v0.2 (Pod); follow-up issues that watch additional
-// API groups will register them here.
+// scheme is the runtime scheme used by the manager's client and cache.
+// clientgoscheme registers the standard core / apps / batch / etc. API
+// groups in one call — sufficient for every workload kind watched in v0.2
+// (Pod, Deployment, ReplicaSet, StatefulSet, DaemonSet, Job).
 var scheme = runtime.NewScheme()
 
 func init() {
@@ -101,6 +102,53 @@ func run() error {
 	if err := rec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("pod reconciler setup: %w", err)
 	}
+
+	// ─── Workload watchers (#157) ─────────────────────────────────────────
+	// Appended below the Pod controller so the existing registration block
+	// is untouched. Each new reconciler is registered in dependency-natural
+	// order (Deployment → ReplicaSet → StatefulSet → DaemonSet → Job) but
+	// the manager itself runs them concurrently — order here only affects
+	// startup logging, not runtime semantics.
+	depRec, err := controller.NewDeploymentReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("deployment reconciler init: %w", err)
+	}
+	if err := depRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("deployment reconciler setup: %w", err)
+	}
+
+	rsRec, err := controller.NewReplicaSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("replicaset reconciler init: %w", err)
+	}
+	if err := rsRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("replicaset reconciler setup: %w", err)
+	}
+
+	ssRec, err := controller.NewStatefulSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("statefulset reconciler init: %w", err)
+	}
+	if err := ssRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("statefulset reconciler setup: %w", err)
+	}
+
+	dsRec, err := controller.NewDaemonSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("daemonset reconciler init: %w", err)
+	}
+	if err := dsRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("daemonset reconciler setup: %w", err)
+	}
+
+	jobRec, err := controller.NewJobReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	if err != nil {
+		return fmt.Errorf("job reconciler init: %w", err)
+	}
+	if err := jobRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("job reconciler setup: %w", err)
+	}
+	// ─── End workload watchers (#157) ─────────────────────────────────────
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
