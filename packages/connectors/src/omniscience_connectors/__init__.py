@@ -20,8 +20,8 @@ Registry::
 
     from omniscience_connectors import ConnectorRegistry, get_connector
 
-Built-in connectors (``git``, ``fs``, ``confluence``, ``notion``, ``slack``,
-``jira``, ``k8s-agentic``, ``s3``, ``aws``) are registered below and available
+Built-in connectors (``git``, ``github_pr``, ``fs``, ``confluence``, ``notion``,
+``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``) are registered below and available
 immediately on import.  Third-party connectors call :func:`get_connector`
 after registering against the shared registry.
 """
@@ -47,6 +47,7 @@ from omniscience_connectors.confluence.connector import ConfluenceConnector
 from omniscience_connectors.database.connector import DatabaseConnector
 from omniscience_connectors.fs.connector import FsConnector
 from omniscience_connectors.git.connector import GitConnector
+from omniscience_connectors.github_pr.connector import GithubPrConfig, GithubPrConnector
 from omniscience_connectors.jira.connector import JiraConnector
 from omniscience_connectors.notion.connector import NotionConnector
 from omniscience_connectors.registry import (
@@ -60,6 +61,7 @@ from omniscience_connectors.slack.connector import SlackConnector
 
 # Register built-in connectors in the shared module-level registry
 _registry.register(GitConnector)
+_registry.register(GithubPrConnector)
 _registry.register(FsConnector)
 _registry.register(ConfluenceConnector)
 _registry.register(NotionConnector)
@@ -86,6 +88,8 @@ __all__ = [
     "FetchedDocument",
     "FsConnector",
     "GitConnector",
+    "GithubPrConfig",
+    "GithubPrConnector",
     "JiraConnector",
     "K8sAgenticConfig",
     "K8sAgenticConnector",
