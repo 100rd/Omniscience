@@ -72,8 +72,8 @@ Every cross-source link carries a **confidence score** with explicit strategy at
 
 State that existed yesterday is different from state that exists now. Incident reasoning frequently requires both.
 
-- **Bitemporal model** per entity and edge: `valid_from`, `valid_to` (real-world time) plus `recorded_at` (ingestion time).
-- **Retention**: 90 days hot (queryable at full fidelity), 1 year warm (queryable at snapshot granularity), archive beyond.
+- **Bitemporal model** per entity and edge: `valid_from`, `valid_to` (real-world time) plus `recorded_at` (ingestion time). See [ADR-0008](decisions/0008-bitemporal-schema-for-neo4j.md) for the canonical schema and the open-closed `[valid_from, valid_to)` predicate convention.
+- **Retention**: 90 days hot (queryable at full fidelity), 1 year warm (queryable at snapshot granularity), archive beyond. See [ADR-0009](decisions/0009-retention-tiering-policy.md) for the tier shapes, eviction triggers, and worker design.
 - **Delta layers** (v2, for Action Mode): a proposed change materializes as a graph overlay that policy engines validate before any real action.
 
 ### 5.4 Collection layer — passive observers

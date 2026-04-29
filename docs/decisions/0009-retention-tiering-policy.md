@@ -1,12 +1,19 @@
 # ADR 0009 — Retention tiering policy and storage layout
 
-- **Status**: Proposed
+- **Status**: Implemented
 - **Date**: 2026-04-24
+- **Implemented**: 2026-04-29 (closer: [#139](https://github.com/100rd/Omniscience/issues/139))
 - **Amends**: [ADR-0005](0005-neo4j-as-graph-store.md) §Negative-operational (graph footprint posture, retention is the dominant cost driver), [ADR-0006](0006-qdrant-as-vector-store.md) §Deployment-posture (Qdrant retention mirror)
 
 ## Implementation notes
 
-Placeholder. This ADR flips to `Implemented` when the Wave 6 closer ([#139](https://github.com/100rd/Omniscience/issues/139)) lands — i.e. when the retention worker ([#135](https://github.com/100rd/Omniscience/issues/135)), retention metrics ([#136](https://github.com/100rd/Omniscience/issues/136)), and bitemporal contract tests ([#138](https://github.com/100rd/Omniscience/issues/138)) all merge and the property-test gate is green for at least one full ingestion cycle on a representative fixture.
+Epic [#97](https://github.com/100rd/Omniscience/issues/97) Wave 4 delivered this ADR. The PRs that contributed:
+
+- **Wave 4 — retention worker** ([#135](https://github.com/100rd/Omniscience/issues/135), PR [#169](https://github.com/100rd/Omniscience/pull/169)): `RetentionWorker` driven by FastAPI lifespan + plain `asyncio.sleep` (chosen over APScheduler to match `FreshnessWorker` / `SchedulerWorker` precedent — same contract). Three-phase **read-then-mark-then-move**. Snapshot-per-day projection materialized as `(:EntitySnapshot:Daily)` discriminator labels per §1 Warm. Archive flow writes parquet (entities + edges, framed with a 4-byte BE length prefix) to `s3://{bucket}/{workspace_id}/{year}/{month}/{day}/snapshot.parquet`; KMS encryption mandatory, AES256 fallback with a structured WARN log. `/api/v1/admin/retention/report` always forces dry-run via `Settings.model_copy(update={"retention_dry_run": True})` so the response is guaranteed mutation-free.
+- **Wave 4 — retention metrics** ([#136](https://github.com/100rd/Omniscience/issues/136), PR [#172](https://github.com/100rd/Omniscience/pull/172)): Grafana dashboard `monitoring/grafana/dashboards/retention.json` (5 panels), Prometheus alerts at `monitoring/prometheus/alerts/retention.yaml` (`RetentionWorkerLagWarning` 24h, `RetentionWorkerLagCritical` 7d P1, `RetentionWorkerStalled`, `RetentionEvictionInconsistent`), admin UI Retention page at `apps/admin/src/pages/RetentionPage.tsx` plus a dashboard home card. New endpoints `GET /api/v1/admin/retention/status` and `POST /api/v1/admin/retention/run-now`, both `stats:read`-gated.
+- **Wave 6 — validation gate** ([#138](https://github.com/100rd/Omniscience/issues/138), PR [#175](https://github.com/100rd/Omniscience/pull/175)): the property-test suite at `tests/property/test_retention_invariants.py` validates §1 / §2 / §3 holistically — no data loss across hot→warm transitions, archive degradation envelope (`meta.degraded_response = "as_of_in_archive_tier"`), per-version eviction idempotency, **cross-workspace eviction isolation** (the P0 ACL gate, mirrors §Consequences-security #1 — every retention call carries exactly one `workspace_id`). Simulator at `tests/property/_simulator.py` encodes the §2 eligibility predicate verbatim (`recorded_at` cutoff; edge end-dating does NOT trigger eviction). 120 hypothesis examples per property over multi-workspace fixtures.
+
+Live-mode runs against testcontainers are gated behind `OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1` and `OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS=1`; perf-lab fixtures behind `OMNISCIENCE_RUN_BITEMPORAL_PERF=1`. See `tests/property/README.md` for the env-var matrix.
 
 ### Wave 6 — retention invariant validation gate ([#138](https://github.com/100rd/Omniscience/issues/138))
 
