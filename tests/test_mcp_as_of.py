@@ -940,18 +940,24 @@ class TestMcpToolSchemaContract:
             )
 
     @pytest.mark.asyncio
-    async def test_resolve_incident_not_present_yet(self) -> None:
-        """``resolve_incident`` is filed for issue #153 — still absent.
+    async def test_resolve_incident_schema_has_as_of(self) -> None:
+        """``resolve_incident`` (issue #153) is registered with ``as_of``.
 
-        This guard documents the deliberate scope decision: when #153
-        lands and adds the tool, this test fails and reminds the
-        engineer to add ``as_of`` schema coverage there.
+        The forcing-function test from #173 has been replaced with this
+        positive contract test now that #153 has landed.  The new tool
+        accepts ``as_of`` and forwards it to the bitemporal-aware
+        ``GraphStore`` reads (#170 / #173 / #174).
         """
         tools = await mcp_server.list_tools()
-        names = {t.name for t in tools}
-        assert "resolve_incident" not in names, (
-            "resolve_incident is now registered — issue #133 scope decision "
-            "tracked it as out-of-scope; please extend the as_of contract test."
+        names = {t.name: t for t in tools}
+        assert "resolve_incident" in names, (
+            "resolve_incident must be registered now that issue #153 has landed."
+        )
+        schema = names["resolve_incident"].inputSchema
+        props = schema.get("properties", {})
+        assert "as_of" in props, (
+            "MCP tool 'resolve_incident' input schema must declare 'as_of' "
+            "(issue #153 contract; supersedes the #173 forcing-function test)."
         )
 
 

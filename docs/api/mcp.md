@@ -180,6 +180,78 @@ Traverse the entity graph from a named entity. Workspace-scoped token required.
 
 **Output** mirrors the REST `/entities/{name}/related` shape and adds `effective_as_of` plus the optional `meta` block.
 
+### `resolve_incident`
+
+Compose a recommendation bundle for a single alert: the alert itself, the affected target resource (pod / ARN / service), the responsible PR (when one is reachable in the graph), the matching Slack discussions, and a v0.1 confidence score. Workspace-scoped token required.
+
+**Input**:
+
+| Param | Type | Description |
+|---|---|---|
+| `alert_id` | string | Canonical alert URI of the form `alert://{provider}/{provider_alert_id}`. Other forms return `invalid_alert_id`. |
+| `max_depth` | int (default 2) | BFS depth from the alert seed; clamped to `[1, 5]`. |
+| `as_of` | ISO-8601 datetime (optional) | Anchor traversal to graph state at this time. See **Bitemporal `as_of` parameter** below. |
+
+**Output**:
+
+```json
+{
+  "alert": {
+    "name": "alert://pagerduty/INC-123",
+    "kind": "alert",
+    "source": "src-alerts",
+    "chunk_text": "...",
+    "valid_from": "2026-04-12T19:30:00Z"
+  },
+  "target_resource": {
+    "name": "pod/api-7f9b",
+    "kind": "cross_ref_target",
+    "source": "src-alerts",
+    "edge_type": "FIRES_AGAINST"
+  },
+  "responsible_pr": {
+    "name": "https://github.com/acme/api/pull/42",
+    "kind": "pull_request",
+    "source": "src-github",
+    "edge_type": "DEPLOYED_BY",
+    "merged_at": "2026-04-12T17:30:00Z"
+  },
+  "slack_threads": [
+    {
+      "name": "slack://channel/C0001/thread/1700000000.000100",
+      "kind": "slack_thread",
+      "source": "src-slack",
+      "chunk_text": "...thread excerpt...",
+      "edge_type": "DISCUSSED_IN"
+    }
+  ],
+  "confidence_score": 0.9,
+  "effective_as_of": "2026-04-12T19:30:00Z",
+  "meta": null
+}
+```
+
+**Confidence score** (v0.1 placeholder; calibrated model lands in [#155](https://github.com/100rd/Omniscience/issues/155)):
+
+| Score | Condition |
+|---|---|
+| 0.9 | Responsible PR found AND merged within 24h before the alert fired |
+| 0.6 | Responsible PR found but no temporal correlation |
+| 0.4 | Target resource resolved but no PR |
+| 0.1 | Only the alert entity itself was resolvable |
+| 0.0 | Documented for completeness; alert-resolution failure 404s upstream |
+
+**Errors**:
+
+| Code | Meaning |
+|---|---|
+| `invalid_alert_id` | `alert_id` is not of the form `alert://{provider}/{id}` |
+| `alert_not_found` | The alert is unknown in the caller's workspace (also returned for cross-workspace lookups — see ACL invariant) |
+| `forbidden` | Token is not workspace-scoped |
+| `invalid_timezone` | `as_of` is naive or non-UTC |
+
+**ACL invariant**: `workspace_id` is taken from the caller's bearer token, never from input. A foreign workspace's `alert_id` returns `alert_not_found` — the same response a non-existent alert would produce. Existence is never leaked.
+
 ## Bitemporal `as_of` parameter
 
 The `as_of` parameter (issue [#133](https://github.com/100rd/Omniscience/issues/133)) anchors a read to the graph state that was valid at a point in time per [ADR-0008](../decisions/0008-bitemporal-schema-for-neo4j.md) §5.
@@ -200,7 +272,6 @@ The `as_of` parameter (issue [#133](https://github.com/100rd/Omniscience/issues/
 
 **Out of scope (separate sub-issues)**:
 - Qdrant `as_of` payload filter — issue [#134](https://github.com/100rd/Omniscience/issues/134). The vector step in `search` is unfiltered on time and scoped only by chunk ids the graph traversal returned.
-- `resolve_incident` MCP tool — issue [#153](https://github.com/100rd/Omniscience/issues/153). When it lands it will surface its own native `as_of`.
 
 ## Errors
 
@@ -214,6 +285,8 @@ All tools return standard MCP error objects. Notable codes:
 | `source_not_found` | Requested source id doesn't exist |
 | `embedding_provider_unavailable` | Can't embed query — retry later |
 | `invalid_timezone` | `as_of` is naive or non-UTC (issue #133) |
+| `invalid_alert_id` | `resolve_incident.alert_id` is not `alert://{provider}/{id}` (issue #153) |
+| `alert_not_found` | `resolve_incident` cannot resolve the alert in the caller's workspace (issue #153) |
 | `internal` | Unexpected failure (check logs) |
 
 ## Streaming

@@ -7,6 +7,7 @@ from fastapi import APIRouter
 from omniscience_server.rest.documents import router as documents_router
 from omniscience_server.rest.entities import router as entities_router
 from omniscience_server.rest.freshness import router as freshness_router
+from omniscience_server.rest.incidents import router as incidents_router
 from omniscience_server.rest.ingestion_runs import router as ingestion_runs_router
 from omniscience_server.rest.otlp import router as otlp_router
 from omniscience_server.rest.retention import router as retention_router
@@ -27,5 +28,6 @@ api_v1_router.include_router(freshness_router)
 api_v1_router.include_router(stats_router)
 api_v1_router.include_router(retention_router)
 api_v1_router.include_router(otlp_router)
+api_v1_router.include_router(incidents_router)
 
 __all__ = ["api_v1_router"]
