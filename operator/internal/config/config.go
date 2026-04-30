@@ -20,6 +20,16 @@ import (
 const (
 	envWorkspaceID = "OMNISCIENCE_WORKSPACE_ID"
 	envClusterName = "OMNISCIENCE_CLUSTER_NAME"
+	// envClusterID is the multi-cluster identity disambiguator (issue #167).
+	// Required when OMNISCIENCE_WORKSPACE_ID is shared across multiple
+	// operators (the multi-cluster case). Optional in single-cluster
+	// deployments; when unset the operator derives a deterministic
+	// uuid5(workspace_id, cluster_name) — back-compat with v0.2 deployments.
+	// MUST be a valid UUID and MUST come from a mounted Secret. Validation
+	// CANNOT enforce that two operators in different clusters use distinct
+	// values — that is the platform team's discipline; the server-side
+	// collision detector is the second line of defence.
+	envClusterID   = "OMNISCIENCE_CLUSTER_ID"
 	envNATSURL     = "OMNISCIENCE_NATS_URL"
 	// envNATSCreds is the env var name for the credentials file path; the
 	// value is a path on disk, never a credential body. The #nosec
@@ -65,6 +75,14 @@ type Config struct {
 	// ClusterName is a human-readable label included in entity metadata. Not
 	// security-bearing — only used for display and lineage.
 	ClusterName string
+
+	// ClusterID is the multi-cluster identity (issue #167). Stamped into
+	// every emitted entity's external_id so the same Kind+namespace+name in
+	// two clusters under one workspace produce DISTINCT graph entities.
+	// When OMNISCIENCE_CLUSTER_ID is unset, Load derives the deterministic
+	// default uuid5(workspace_id, cluster_name) — preserves v0.2 single-
+	// cluster identity stability across operator restarts.
+	ClusterID uuid.UUID
 
 	// NATSURL is the JetStream endpoint. Single URL; the operator does not
 	// perform DNS heroics. Example: "nats://omniscience-nats:4222".
@@ -124,6 +142,23 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("config: %s is required (used as entity metadata label)", envClusterName)
 	}
 
+	// ClusterID resolution (issue #167):
+	//   - Explicit OMNISCIENCE_CLUSTER_ID — parse, fail-closed on malformed.
+	//   - Unset — derive uuid5(workspace_id, cluster_name) so single-cluster
+	//     deployments keep stable identity across restarts. The deterministic
+	//     default matches the v0.2 #159 cluster_id derivation, so existing
+	//     v0.2 graph data lines up byte-for-byte after the re-keying once
+	//     the migration script runs (deferred to a separate sub-issue).
+	if cidRaw := os.Getenv(envClusterID); cidRaw != "" {
+		cid, cerr := uuid.Parse(cidRaw)
+		if cerr != nil {
+			return nil, fmt.Errorf("config: %s is not a valid UUID: %w", envClusterID, cerr)
+		}
+		cfg.ClusterID = cid
+	} else {
+		cfg.ClusterID = deriveDefaultClusterID(cfg.WorkspaceID, cfg.ClusterName)
+	}
+
 	if raw := os.Getenv(envResyncSec); raw != "" {
 		secs, perr := time.ParseDuration(raw + "s")
 		if perr != nil {
@@ -143,4 +178,20 @@ func envOrDefault(name, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// nsClusterIDDefault is the fixed UUID namespace used to derive the
+// deterministic-default cluster_id from (workspace_id, cluster_name) when
+// OMNISCIENCE_CLUSTER_ID is unset. Matches the namespace used by
+// entity.DeriveClusterID so the value is byte-equal to the #159 v0.2
+// derivation — single-cluster v0.2 deployments retain identity continuity
+// when the operator picks up #167.
+var nsClusterIDDefault = uuid.MustParse("d6c4a5b1-3e7f-4a92-9c2d-7e1f8b6c4a5b")
+
+// deriveDefaultClusterID returns uuid5(workspaceID, "cluster/" + workspaceID
+// + "/" + clusterName). The "cluster/" prefix matches entity.DeriveClusterID
+// — both derivations live in lockstep so the deterministic default is
+// observable in tests without importing a server-side helper.
+func deriveDefaultClusterID(workspaceID uuid.UUID, clusterName string) uuid.UUID {
+	return uuid.NewSHA1(nsClusterIDDefault, []byte("cluster/"+workspaceID.String()+"/"+clusterName))
 }

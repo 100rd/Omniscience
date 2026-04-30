@@ -41,13 +41,14 @@ type ArgoCDApplicationReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewArgoCDApplicationReconciler returns a reconciler with sane defaults
 // and the same precondition checks the workload reconcilers enforce.
-func NewArgoCDApplicationReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*ArgoCDApplicationReconciler, error) {
+func NewArgoCDApplicationReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*ArgoCDApplicationReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -64,6 +65,7 @@ func NewArgoCDApplicationReconciler(c client.Client, pub publisher.Publisher, wo
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -85,7 +87,7 @@ func (r *ArgoCDApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 			logger.Error(derr, "decode application failed; skipping reconcile")
 			return ctrl.Result{}, nil
 		}
-		ev := entity.ApplicationToEvent(app, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ApplicationToEvent(app, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish application event: %w", perr)
@@ -97,7 +99,7 @@ func (r *ArgoCDApplicationReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		stub := &argocd.Application{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ApplicationToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ApplicationToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish application deletion: %w", perr)

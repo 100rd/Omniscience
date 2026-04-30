@@ -23,12 +23,13 @@ type DaemonSetReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewDaemonSetReconciler validates inputs identically to NewPodReconciler.
-func NewDaemonSetReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*DaemonSetReconciler, error) {
+func NewDaemonSetReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*DaemonSetReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -45,6 +46,7 @@ func NewDaemonSetReconciler(c client.Client, pub publisher.Publisher, workspaceI
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -61,7 +63,7 @@ func (r *DaemonSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	err := r.Client.Get(ctx, req.NamespacedName, &ds)
 	switch {
 	case err == nil:
-		ev := entity.DaemonSetToEvent(&ds, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.DaemonSetToEvent(&ds, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish daemonset event: %w", perr)
@@ -73,7 +75,7 @@ func (r *DaemonSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		stub := &appsv1.DaemonSet{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.DaemonSetToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.DaemonSetToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish daemonset deletion: %w", perr)

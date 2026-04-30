@@ -32,6 +32,7 @@ import (
 type ClusterAnchorPublisher struct {
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 
 	// KubernetesVersion and ClusterEndpoint are optional cluster facts
@@ -49,7 +50,7 @@ type ClusterAnchorPublisher struct {
 // the watcher reconcilers do — workspace must be a non-zero UUID, cluster
 // name must be set, publisher must be non-nil. Returning an error rather
 // than panicking lets main.go exit non-zero with a useful message.
-func NewClusterAnchorPublisher(pub publisher.Publisher, workspaceID uuid.UUID, clusterName, kubernetesVersion, clusterEndpoint string) (*ClusterAnchorPublisher, error) {
+func NewClusterAnchorPublisher(pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName, kubernetesVersion, clusterEndpoint string) (*ClusterAnchorPublisher, error) {
 	if pub == nil {
 		return nil, errors.New("cluster anchor: publisher must not be nil")
 	}
@@ -62,6 +63,7 @@ func NewClusterAnchorPublisher(pub publisher.Publisher, workspaceID uuid.UUID, c
 	return &ClusterAnchorPublisher{
 		Publisher:         pub,
 		WorkspaceID:       workspaceID,
+		ClusterID:         clusterID,
 		ClusterName:       clusterName,
 		KubernetesVersion: kubernetesVersion,
 		ClusterEndpoint:   clusterEndpoint,
@@ -77,6 +79,7 @@ func (p *ClusterAnchorPublisher) PublishOnce(ctx context.Context) error {
 	ev := entity.ClusterToEvent(
 		entity.ActionCreated,
 		p.WorkspaceID,
+		p.ClusterID,
 		p.ClusterName,
 		p.KubernetesVersion,
 		p.ClusterEndpoint,
@@ -97,6 +100,7 @@ func (p *ClusterAnchorPublisher) BuildEvent() *entity.Event {
 	return entity.ClusterToEvent(
 		entity.ActionCreated,
 		p.WorkspaceID,
+		p.ClusterID,
 		p.ClusterName,
 		p.KubernetesVersion,
 		p.ClusterEndpoint,

@@ -28,13 +28,14 @@ type NodeReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewNodeReconciler returns a reconciler with sane defaults. Symmetric with
 // NewPodReconciler — same validation, same defaults.
-func NewNodeReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*NodeReconciler, error) {
+func NewNodeReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*NodeReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -51,6 +52,7 @@ func NewNodeReconciler(c client.Client, pub publisher.Publisher, workspaceID uui
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -69,7 +71,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	err := r.Client.Get(ctx, req.NamespacedName, &node)
 	switch {
 	case err == nil:
-		ev := entity.NodeToEvent(&node, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.NodeToEvent(&node, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish node event: %w", perr)
@@ -80,7 +82,7 @@ func (r *NodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	case apierrors.IsNotFound(err):
 		stub := &corev1.Node{}
 		stub.Name = req.Name
-		ev := entity.NodeToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.NodeToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish node deletion: %w", perr)

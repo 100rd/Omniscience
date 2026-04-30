@@ -62,11 +62,12 @@ func ApplicationToEvent(
 	app *argocd.Application,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
 	namespace := resolveNamespace(app.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindApplication, app.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindApplication, app.Name)
 
 	// spec.project — logical owner (AppProject). Empty when unset; ArgoCD
 	// defaults to "default" but we surface what the CR actually carries.
@@ -106,10 +107,10 @@ func ApplicationToEvent(
 		meta["operation_phase"] = app.Status.OperationState.Phase
 	}
 
-	extID := externalIDFor(EntityKindApplication, namespace, app.Name)
+	extID := externalIDFor(clusterID, EntityKindApplication, namespace, app.Name)
 
-	edges := buildApplicationDeploysEdges(app.Status.Resources)
-	edges = append(edges, inClusterEdge(clusterName))
+	edges := buildApplicationDeploysEdges(clusterID, app.Status.Resources)
+	edges = append(edges, inClusterEdge(clusterID, clusterName))
 
 	ev := &Event{
 		SourceID:      DeriveSourceID(workspaceID, clusterName),
@@ -127,7 +128,7 @@ func ApplicationToEvent(
 	// top-of-chain but can be created by an ApplicationSet — when that
 	// happens, the ApplicationSet controller writes the ownerReference on
 	// the child Application. Honour whatever K8s populates; do not invent.
-	ev.Edges = ownerEdges(app.OwnerReferences, namespace, extID)
+	ev.Edges = ownerEdges(clusterID, app.OwnerReferences, namespace, extID)
 
 	return ev
 }
@@ -141,7 +142,7 @@ func ApplicationToEvent(
 // Edges to resources outside the operator's coverage (e.g. CRDs not in
 // the watch set) emit dangling edges; per the issue body the server-side
 // ingestion worker handles dangling-edge resolution.
-func buildApplicationDeploysEdges(resources []argocd.ResourceStatus) []EdgeRef {
+func buildApplicationDeploysEdges(clusterID uuid.UUID, resources []argocd.ResourceStatus) []EdgeRef {
 	if len(resources) == 0 {
 		return nil
 	}
@@ -153,7 +154,7 @@ func buildApplicationDeploysEdges(resources []argocd.ResourceStatus) []EdgeRef {
 			continue
 		}
 		ns := resolveNamespace(r.Namespace)
-		ext := externalIDFor(strings.TrimSpace(r.Kind), ns, r.Name)
+		ext := externalIDFor(clusterID, strings.TrimSpace(r.Kind), ns, r.Name)
 		if _, ok := seen[ext]; ok {
 			continue
 		}

@@ -37,9 +37,9 @@ func TestIngressToEvent_RoutesToFromRulesAndDefaultBackend(t *testing.T) {
 			},
 		},
 	}
-	ev := entity.IngressToEvent(ing, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.IngressToEvent(ing, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/Ingress/team-a/main" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Ingress/team-a/main" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if ev.Metadata["ingress_class"] != "nginx" {
@@ -52,9 +52,9 @@ func TestIngressToEvent_RoutesToFromRulesAndDefaultBackend(t *testing.T) {
 		t.Fatalf("tls_count = %q", ev.Metadata["tls_count"])
 	}
 	wantTargets := map[string]bool{
-		"k8s_resource/Service/team-a/default-svc": false,
-		"k8s_resource/Service/team-a/checkout":    false,
-		"k8s_resource/Service/team-a/billing":     false,
+		"k8s_resource/99999999-8888-7777-6666-555555555555/Service/team-a/default-svc": false,
+		"k8s_resource/99999999-8888-7777-6666-555555555555/Service/team-a/checkout":    false,
+		"k8s_resource/99999999-8888-7777-6666-555555555555/Service/team-a/billing":     false,
 	}
 	if got := len(ev.TopologyEdges); got != 3 {
 		t.Fatalf("expected 3 deduped edges, got %d (%v)", got, ev.TopologyEdges)
@@ -74,7 +74,7 @@ func TestIngressToEvent_NoRulesEmitsZeroEdges(t *testing.T) {
 	ing := &networkingv1.Ingress{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "empty"},
 	}
-	ev := entity.IngressToEvent(ing, entity.ActionDeleted, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.IngressToEvent(ing, entity.ActionDeleted, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.TopologyEdges) != 0 {
 		t.Fatalf("expected 0 edges, got %d", len(ev.TopologyEdges))
 	}

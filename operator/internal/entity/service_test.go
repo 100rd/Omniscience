@@ -33,9 +33,9 @@ func newService(namespace, name string, selector map[string]string, t corev1.Ser
 
 func TestServiceToEvent_HappyPath(t *testing.T) {
 	svc := newService("team-a", "checkout", map[string]string{"app": "checkout", "tier": "frontend"}, corev1.ServiceTypeClusterIP)
-	ev := entity.ServiceToEvent(svc, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.ServiceToEvent(svc, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/Service/team-a/checkout" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Service/team-a/checkout" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if ev.URI != "kube://prod-eu/team-a/Service/checkout" {
@@ -67,7 +67,7 @@ func TestServiceToEvent_HappyPath(t *testing.T) {
 func TestServiceToEvent_HeadlessNoSelector(t *testing.T) {
 	svc := newService("team-a", "headless", nil, corev1.ServiceTypeClusterIP)
 	svc.Spec.ClusterIP = "None"
-	ev := entity.ServiceToEvent(svc, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.ServiceToEvent(svc, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if ev.Metadata["selector"] != "" {
 		t.Fatalf("empty selector should render as \"\"; got %q", ev.Metadata["selector"])
 	}
@@ -78,8 +78,8 @@ func TestServiceToEvent_HeadlessNoSelector(t *testing.T) {
 
 func TestServiceToEvent_NamespacelessFallsBack(t *testing.T) {
 	svc := newService("", "rogue", nil, corev1.ServiceTypeClusterIP)
-	ev := entity.ServiceToEvent(svc, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
-	if ev.ExternalID != "k8s_resource/Service/default/rogue" {
+	ev := entity.ServiceToEvent(svc, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Service/default/rogue" {
 		t.Fatalf("external_id = %q (expected default fallback)", ev.ExternalID)
 	}
 }

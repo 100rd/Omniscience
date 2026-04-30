@@ -18,12 +18,13 @@ import (
 )
 
 // StorageClassToEvent maps a storagev1.StorageClass into an Event.
-func StorageClassToEvent(sc *storagev1.StorageClass, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
-	externalID := EntityKindK8sResource + "/StorageClass/" + sc.Name
+func StorageClassToEvent(sc *storagev1.StorageClass, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
+	externalID := externalIDForClusterScoped(clusterID, "StorageClass", sc.Name)
 	uri := "kube://" + clusterName + "/StorageClass/" + sc.Name
 
 	meta := map[string]string{
 		"cluster":     clusterName,
+		"cluster_id":  clusterID.String(),
 		"name":        sc.Name,
 		"kind":        "StorageClass",
 		"provisioner": sc.Provisioner,
@@ -33,7 +34,7 @@ func StorageClassToEvent(sc *storagev1.StorageClass, action Action, workspaceID 
 		meta["reclaim_policy"] = string(*sc.ReclaimPolicy)
 	}
 
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 
 	return &Event{
 		SourceID:    deriveSourceID(workspaceID, clusterName),

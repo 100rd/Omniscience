@@ -49,11 +49,12 @@ func ApplicationSetToEvent(
 	appset *argocd.ApplicationSet,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
 	namespace := resolveNamespace(appset.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindApplicationSet, appset.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindApplicationSet, appset.Name)
 
 	if names := collectGeneratorNames(appset.Spec.Generators); len(names) > 0 {
 		meta["generators"] = strings.Join(names, ",")
@@ -62,10 +63,10 @@ func ApplicationSetToEvent(
 		meta["template_metadata_name"] = v
 	}
 
-	extID := externalIDFor(EntityKindApplicationSet, namespace, appset.Name)
+	extID := externalIDFor(clusterID, EntityKindApplicationSet, namespace, appset.Name)
 
-	edges := buildGeneratesEdges(appset.Status.ApplicationStatus, namespace)
-	edges = append(edges, inClusterEdge(clusterName))
+	edges := buildGeneratesEdges(clusterID, appset.Status.ApplicationStatus, namespace)
+	edges = append(edges, inClusterEdge(clusterID, clusterName))
 
 	ev := &Event{
 		SourceID:      DeriveSourceID(workspaceID, clusterName),
@@ -79,7 +80,7 @@ func ApplicationSetToEvent(
 		TopologyEdges: edges,
 	}
 
-	ev.Edges = ownerEdges(appset.OwnerReferences, namespace, extID)
+	ev.Edges = ownerEdges(clusterID, appset.OwnerReferences, namespace, extID)
 
 	return ev
 }
@@ -119,7 +120,7 @@ func collectGeneratorNames(gs []argocd.ApplicationSetGenerator) []string {
 // ApplicationSet's namespace as the target namespace; if the ArgoCD setup
 // places child applications in a different namespace, the edge will dangle
 // — server-side resolution handles that as designed.
-func buildGeneratesEdges(statuses []argocd.ApplicationSetApplicationStatus, namespace string) []EdgeRef {
+func buildGeneratesEdges(clusterID uuid.UUID, statuses []argocd.ApplicationSetApplicationStatus, namespace string) []EdgeRef {
 	if len(statuses) == 0 {
 		return nil
 	}
@@ -129,7 +130,7 @@ func buildGeneratesEdges(statuses []argocd.ApplicationSetApplicationStatus, name
 		if s.Application == "" {
 			continue
 		}
-		ext := externalIDFor(EntityKindApplication, namespace, s.Application)
+		ext := externalIDFor(clusterID, EntityKindApplication, namespace, s.Application)
 		if _, ok := seen[ext]; ok {
 			continue
 		}

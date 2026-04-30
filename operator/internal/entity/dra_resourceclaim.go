@@ -62,16 +62,16 @@ const EdgeKindAllocates = "ALLOCATES"
 // device_count counts the allocated devices in status.allocation.devices.results.
 // When unallocated (Pending) it falls back to the requested count from
 // spec.devices.requests so callers can still see "how many were asked for".
-func ResourceClaimToEvent(rc *resourcev1beta1.ResourceClaim, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func ResourceClaimToEvent(rc *resourcev1beta1.ResourceClaim, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := defaultedNamespace(rc.Namespace)
-	externalID := externalID(EntityKindResourceClaim, namespace, rc.Name)
+	externalID := externalID(clusterID, EntityKindResourceClaim, namespace, rc.Name)
 	uri := resourceURI(clusterName, namespace, EntityKindResourceClaim, rc.Name)
 
-	meta := baseMetadata(clusterName, namespace, EntityKindResourceClaim, rc.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindResourceClaim, rc.Name)
 	meta["device_count"] = strconv.Itoa(deviceCount(rc))
 	meta["phase"] = string(claimPhase(rc))
 
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 	for _, target := range allocatesEdgeTargets(rc) {
 		edges = append(edges, EdgeRef{
 			Kind:             EdgeKindAllocates,
@@ -88,7 +88,7 @@ func ResourceClaimToEvent(rc *resourcev1beta1.ResourceClaim, action Action, work
 		WorkspaceID:   workspaceID,
 		EmittedAt:     now.UTC(),
 		Metadata:      meta,
-		Edges:         ownerEdges(rc.OwnerReferences, namespace, externalID),
+		Edges:         ownerEdges(clusterID, rc.OwnerReferences, namespace, externalID),
 		TopologyEdges: edges,
 	}
 }

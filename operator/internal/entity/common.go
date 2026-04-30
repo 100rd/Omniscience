@@ -57,12 +57,29 @@ type OwnerEdge struct {
 }
 
 // externalID returns the canonical external-id for any K8s resource emitted
-// by the operator: "k8s_resource/{Kind}/{namespace}/{name}".
+// by the operator. As of issue #167 the cluster_id is the second segment so
+// the same Kind+namespace+name in two clusters under one workspace produce
+// DISTINCT external_ids:
+//
+//	"k8s_resource/{cluster_id}/{Kind}/{namespace}/{name}"
 //
 // kind is passed as the K8s API Kind verbatim (mixed case, e.g. "Deployment")
 // to match the Pod controller's existing convention — see entity.go::PodToEvent.
-func externalID(kind, namespace, name string) string {
-	return EntityKindPrefix + "/" + kind + "/" + namespace + "/" + name
+//
+// clusterID is the operator-config UUID; pass uuid.Nil only in unit-test
+// fixtures that don't care about the cluster axis (production callers MUST
+// pass the resolved cfg.ClusterID).
+func externalID(clusterID uuid.UUID, kind, namespace, name string) string {
+	return EntityKindPrefix + "/" + clusterID.String() + "/" + kind + "/" + namespace + "/" + name
+}
+
+// externalIDClusterScoped returns the cluster-scoped external-id for resources
+// without a namespace (Node, Namespace, PersistentVolume, StorageClass,
+// Cluster anchor):
+//
+//	"k8s_resource/{cluster_id}/{Kind}/{name}"
+func externalIDClusterScoped(clusterID uuid.UUID, kind, name string) string {
+	return EntityKindPrefix + "/" + clusterID.String() + "/" + kind + "/" + name
 }
 
 // resourceURI returns the citation URI for any K8s resource:
@@ -94,7 +111,7 @@ func defaultedNamespace(ns string) string {
 // childNamespace is the namespace of the child; ownerReferences point to
 // objects in the SAME namespace per K8s API rules (cross-namespace owner
 // references are rejected by the API server).
-func ownerEdges(refs []metav1.OwnerReference, childNamespace, childExternalID string) []OwnerEdge {
+func ownerEdges(clusterID uuid.UUID, refs []metav1.OwnerReference, childNamespace, childExternalID string) []OwnerEdge {
 	if len(refs) == 0 {
 		return nil
 	}
@@ -107,7 +124,7 @@ func ownerEdges(refs []metav1.OwnerReference, childNamespace, childExternalID st
 		}
 		out = append(out, OwnerEdge{
 			Relation:       EdgeRelationOwns,
-			FromExternalID: externalID(ref.Kind, childNamespace, ref.Name),
+			FromExternalID: externalID(clusterID, ref.Kind, childNamespace, ref.Name),
 			ToExternalID:   childExternalID,
 			FromKind:       ref.Kind,
 			FromUID:        string(ref.UID),
@@ -124,13 +141,17 @@ func ownerEdges(refs []metav1.OwnerReference, childNamespace, childExternalID st
 // supplied labels and annotations are NOT copied through. Kind-specific
 // fields (replicas, available_replicas, …) are added by the per-kind mapper
 // after calling this helper.
-func baseMetadata(clusterName, namespace, kind, name string) map[string]string {
+//
+// Issue #167: cluster_id is included in the allow-list so consumers can
+// filter / group by cluster identity without re-parsing the external_id.
+func baseMetadata(clusterID uuid.UUID, clusterName, namespace, kind, name string) map[string]string {
 	return map[string]string{
-		"cluster":   clusterName,
-		"namespace": namespace,
-		"name":      name,
-		"kind":      kind,
-		"emitter":   EmitterLabel,
+		"cluster":    clusterName,
+		"cluster_id": clusterID.String(),
+		"namespace":  namespace,
+		"name":       name,
+		"kind":       kind,
+		"emitter":    EmitterLabel,
 	}
 }
 
@@ -146,11 +167,12 @@ func newWorkloadEvent(
 	kind, namespace, name string,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
 	ns := defaultedNamespace(namespace)
-	extID := externalID(kind, ns, name)
+	extID := externalID(clusterID, kind, ns, name)
 	return &Event{
 		SourceID:    deriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
@@ -159,7 +181,7 @@ func newWorkloadEvent(
 		Action:      action,
 		WorkspaceID: workspaceID,
 		EmittedAt:   now.UTC(),
-		Metadata:    baseMetadata(clusterName, ns, kind, name),
+		Metadata:    baseMetadata(clusterID, clusterName, ns, kind, name),
 	}
 }
 
@@ -217,10 +239,18 @@ func resolveNamespace(metaNamespace string) string {
 	return defaultedNamespace(metaNamespace)
 }
 
-// externalIDFor returns "k8s_resource/{kind}/{namespace}/{name}". Public
+// externalIDFor returns the multi-cluster-aware external_id for a namespaced
+// resource: "k8s_resource/{cluster_id}/{kind}/{namespace}/{name}". Public
 // alias of externalID for the #158 mapper call sites.
-func externalIDFor(kind, namespace, name string) string {
-	return externalID(kind, namespace, name)
+func externalIDFor(clusterID uuid.UUID, kind, namespace, name string) string {
+	return externalID(clusterID, kind, namespace, name)
+}
+
+// externalIDForClusterScoped returns the multi-cluster-aware external_id for
+// a cluster-scoped resource: "k8s_resource/{cluster_id}/{kind}/{name}".
+// Public alias of externalIDClusterScoped.
+func externalIDForClusterScoped(clusterID uuid.UUID, kind, name string) string {
+	return externalIDClusterScoped(clusterID, kind, name)
 }
 
 // uriFor returns "kube://{cluster}/{namespace}/{kind}/{name}". Public alias

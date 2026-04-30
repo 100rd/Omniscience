@@ -51,9 +51,9 @@ const IndexDataAnnotation = "omniscience.io/index-data"
 // This function is pure and never reads values out of `binaryData`. The
 // `data_values_json` field is only populated when the opt-in annotation is
 // present AND `data` (the textual variant) is non-empty.
-func ConfigMapToEvent(cm *corev1.ConfigMap, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func ConfigMapToEvent(cm *corev1.ConfigMap, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := resolveNamespace(cm.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindConfigMap, cm.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindConfigMap, cm.Name)
 
 	keys := mergedSortedKeys(cm.Data, cm.BinaryData)
 	meta["data_keys"] = strings.Join(keys, ",")
@@ -78,7 +78,7 @@ func ConfigMapToEvent(cm *corev1.ConfigMap, action Action, workspaceID uuid.UUID
 	return &Event{
 		SourceID:    DeriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
-		ExternalID:  externalIDFor(EntityKindConfigMap, namespace, cm.Name),
+		ExternalID:  externalIDFor(clusterID, EntityKindConfigMap, namespace, cm.Name),
 		URI:         uriFor(clusterName, namespace, EntityKindConfigMap, cm.Name),
 		Action:      action,
 		WorkspaceID: workspaceID,

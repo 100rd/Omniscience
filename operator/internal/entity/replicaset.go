@@ -26,17 +26,18 @@ func ReplicaSetToEvent(
 	rs *appsv1.ReplicaSet,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
-	ev := newWorkloadEvent(kindReplicaSet, rs.Namespace, rs.Name, action, workspaceID, clusterName, now)
+	ev := newWorkloadEvent(kindReplicaSet, rs.Namespace, rs.Name, action, workspaceID, clusterID, clusterName, now)
 
 	if rs.Spec.Replicas != nil {
 		ev.Metadata["replicas"] = formatReplicas(*rs.Spec.Replicas)
 	}
 	ev.Metadata["available_replicas"] = formatReplicas(rs.Status.AvailableReplicas)
 
-	ev.Edges = ownerEdges(rs.OwnerReferences, defaultedNamespace(rs.Namespace), ev.ExternalID)
+	ev.Edges = ownerEdges(clusterID, rs.OwnerReferences, defaultedNamespace(rs.Namespace), ev.ExternalID)
 
 	return ev
 }

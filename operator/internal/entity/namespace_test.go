@@ -21,16 +21,16 @@ func TestNamespaceToEvent_HappyPath(t *testing.T) {
 		},
 		Status: corev1.NamespaceStatus{Phase: corev1.NamespaceActive},
 	}
-	ev := entity.NamespaceToEvent(ns, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NamespaceToEvent(ns, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/Namespace/team-a" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Namespace/team-a" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if strings.Contains(ev.ExternalID, "//") {
 		t.Fatalf("external_id contains leading //: %q", ev.ExternalID)
 	}
 	expected := map[string]string{
-		"cluster": "prod-eu",
+		"cluster": "prod-eu", "cluster_id": "99999999-8888-7777-6666-555555555555",
 		"name":    "team-a",
 		"kind":    "Namespace",
 		"phase":   "Active",
@@ -48,22 +48,22 @@ func TestNamespaceToEvent_HappyPath(t *testing.T) {
 
 func TestNamespaceToEvent_NoLabelsStillEmits(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "default"}}
-	ev := entity.NamespaceToEvent(ns, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
-	if ev.ExternalID != "k8s_resource/Namespace/default" {
+	ev := entity.NamespaceToEvent(ns, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Namespace/default" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 }
 
 func TestNamespaceToEvent_EmitsInClusterEdge(t *testing.T) {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "team-a"}}
-	ev := entity.NamespaceToEvent(ns, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NamespaceToEvent(ns, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.TopologyEdges) != 1 {
 		t.Fatalf("expected 1 edge, got %d", len(ev.TopologyEdges))
 	}
 	if ev.TopologyEdges[0].Kind != entity.RelationInCluster {
 		t.Fatalf("relation = %q", ev.TopologyEdges[0].Kind)
 	}
-	if ev.TopologyEdges[0].TargetExternalID != "k8s_resource/Cluster/prod-eu" {
+	if ev.TopologyEdges[0].TargetExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu" {
 		t.Fatalf("target = %q", ev.TopologyEdges[0].TargetExternalID)
 	}
 }

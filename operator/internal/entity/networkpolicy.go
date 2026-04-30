@@ -29,9 +29,9 @@ const EntityKindNetworkPolicy = "NetworkPolicy"
 //   - pod_selector (rendered selector string; empty matches everything in ns)
 //   - ingress_rule_count, egress_rule_count
 //   - policy_types ("Ingress", "Egress", or "Ingress,Egress" sorted)
-func NetworkPolicyToEvent(np *networkingv1.NetworkPolicy, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func NetworkPolicyToEvent(np *networkingv1.NetworkPolicy, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := resolveNamespace(np.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindNetworkPolicy, np.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindNetworkPolicy, np.Name)
 	meta["pod_selector"] = formatLabelSelector(&np.Spec.PodSelector)
 	meta["ingress_rule_count"] = strconv.Itoa(len(np.Spec.Ingress))
 	meta["egress_rule_count"] = strconv.Itoa(len(np.Spec.Egress))
@@ -40,7 +40,7 @@ func NetworkPolicyToEvent(np *networkingv1.NetworkPolicy, action Action, workspa
 	return &Event{
 		SourceID:    DeriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
-		ExternalID:  externalIDFor(EntityKindNetworkPolicy, namespace, np.Name),
+		ExternalID:  externalIDFor(clusterID, EntityKindNetworkPolicy, namespace, np.Name),
 		URI:         uriFor(clusterName, namespace, EntityKindNetworkPolicy, np.Name),
 		Action:      action,
 		WorkspaceID: workspaceID,

@@ -23,12 +23,13 @@ type StatefulSetReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewStatefulSetReconciler validates inputs identically to NewPodReconciler.
-func NewStatefulSetReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*StatefulSetReconciler, error) {
+func NewStatefulSetReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*StatefulSetReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -45,6 +46,7 @@ func NewStatefulSetReconciler(c client.Client, pub publisher.Publisher, workspac
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -61,7 +63,7 @@ func (r *StatefulSetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Client.Get(ctx, req.NamespacedName, &ss)
 	switch {
 	case err == nil:
-		ev := entity.StatefulSetToEvent(&ss, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.StatefulSetToEvent(&ss, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish statefulset event: %w", perr)
@@ -73,7 +75,7 @@ func (r *StatefulSetReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		stub := &appsv1.StatefulSet{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.StatefulSetToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.StatefulSetToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish statefulset deletion: %w", perr)

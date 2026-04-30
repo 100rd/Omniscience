@@ -23,12 +23,13 @@ type NetworkPolicyReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewNetworkPolicyReconciler returns a reconciler with sane defaults.
-func NewNetworkPolicyReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*NetworkPolicyReconciler, error) {
+func NewNetworkPolicyReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*NetworkPolicyReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -45,6 +46,7 @@ func NewNetworkPolicyReconciler(c client.Client, pub publisher.Publisher, worksp
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -61,7 +63,7 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	err := r.Client.Get(ctx, req.NamespacedName, &np)
 	switch {
 	case err == nil:
-		ev := entity.NetworkPolicyToEvent(&np, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.NetworkPolicyToEvent(&np, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish networkpolicy event: %w", perr)
@@ -73,7 +75,7 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		stub := &networkingv1.NetworkPolicy{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.NetworkPolicyToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.NetworkPolicyToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish networkpolicy deletion: %w", perr)

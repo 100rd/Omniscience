@@ -98,10 +98,11 @@ func RolloutToEvent(
 	r *rolloutsv1alpha1.Rollout,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
-	ev := newWorkloadEvent(EntityKindRollout, r.Namespace, r.Name, action, workspaceID, clusterName, now)
+	ev := newWorkloadEvent(EntityKindRollout, r.Namespace, r.Name, action, workspaceID, clusterID, clusterName, now)
 
 	// Strategy detection. spec.strategy is a struct of two pointers; whichever
 	// is non-nil identifies the strategy. If both are nil (malformed input)
@@ -144,10 +145,10 @@ func RolloutToEvent(
 	// OWNS edges from K8s-populated metadata.ownerReferences. A Rollout can
 	// be owned by a higher-level CRD (e.g. Argo Application). Honour the
 	// reference exactly as the control plane wrote it; do not invent.
-	ev.Edges = ownerEdges(r.OwnerReferences, defaultedNamespace(r.Namespace), ev.ExternalID)
+	ev.Edges = ownerEdges(clusterID, r.OwnerReferences, defaultedNamespace(r.Namespace), ev.ExternalID)
 
 	// Topology edges derived from typed status / spec.
-	ev.TopologyEdges = rolloutTopologyEdges(r, strategy, defaultedNamespace(r.Namespace))
+	ev.TopologyEdges = rolloutTopologyEdges(clusterID, r, strategy, defaultedNamespace(r.Namespace))
 
 	return ev
 }
@@ -180,7 +181,7 @@ func detectStrategy(r *rolloutsv1alpha1.Rollout) string {
 //
 // Returns nil for a stub object (deleted reconcile): no spec, no status, no
 // edges. Empty slice and nil are equivalent on the wire (json:omitempty).
-func rolloutTopologyEdges(r *rolloutsv1alpha1.Rollout, strategy, namespace string) []EdgeRef {
+func rolloutTopologyEdges(clusterID uuid.UUID, r *rolloutsv1alpha1.Rollout, strategy, namespace string) []EdgeRef {
 	out := make([]EdgeRef, 0, 4)
 
 	stableHash := r.Status.StableRS
@@ -194,7 +195,7 @@ func rolloutTopologyEdges(r *rolloutsv1alpha1.Rollout, strategy, namespace strin
 		stableRS := replicaSetName(r.Name, stableHash)
 		out = append(out, EdgeRef{
 			Kind:             EdgeRelationOwns,
-			TargetExternalID: externalIDFor(kindReplicaSet, namespace, stableRS),
+			TargetExternalID: externalIDFor(clusterID, kindReplicaSet, namespace, stableRS),
 		})
 	}
 
@@ -206,7 +207,7 @@ func rolloutTopologyEdges(r *rolloutsv1alpha1.Rollout, strategy, namespace strin
 		currentRS := replicaSetName(r.Name, currentHash)
 		out = append(out, EdgeRef{
 			Kind:             EdgeKindCurrentVersion,
-			TargetExternalID: externalIDFor(kindReplicaSet, namespace, currentRS),
+			TargetExternalID: externalIDFor(clusterID, kindReplicaSet, namespace, currentRS),
 		})
 	}
 
@@ -222,7 +223,7 @@ func rolloutTopologyEdges(r *rolloutsv1alpha1.Rollout, strategy, namespace strin
 		// pointed at by currentPodHash" (which is the same RS during a
 		// canary, but the relationship semantics differ for graph queries).
 		canaryRS := replicaSetName(r.Name, currentHash)
-		canaryExternalID := externalIDFor(kindReplicaSet, namespace, canaryRS)
+		canaryExternalID := externalIDFor(clusterID, kindReplicaSet, namespace, canaryRS)
 		out = append(out, EdgeRef{
 			Kind:             EdgeRelationOwns,
 			TargetExternalID: canaryExternalID,
@@ -243,7 +244,7 @@ func rolloutTopologyEdges(r *rolloutsv1alpha1.Rollout, strategy, namespace strin
 		if active := r.Spec.Strategy.BlueGreen.ActiveService; active != "" {
 			out = append(out, EdgeRef{
 				Kind:             EdgeKindBlueGreenActive,
-				TargetExternalID: externalIDFor(EntityKindService, namespace, active),
+				TargetExternalID: externalIDFor(clusterID, EntityKindService, namespace, active),
 			})
 		}
 	}

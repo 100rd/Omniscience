@@ -25,12 +25,13 @@ type StorageClassReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewStorageClassReconciler returns a reconciler with sane defaults.
-func NewStorageClassReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*StorageClassReconciler, error) {
+func NewStorageClassReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*StorageClassReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -47,6 +48,7 @@ func NewStorageClassReconciler(c client.Client, pub publisher.Publisher, workspa
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -63,7 +65,7 @@ func (r *StorageClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	err := r.Client.Get(ctx, req.NamespacedName, &sc)
 	switch {
 	case err == nil:
-		ev := entity.StorageClassToEvent(&sc, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.StorageClassToEvent(&sc, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish storageclass event: %w", perr)
@@ -74,7 +76,7 @@ func (r *StorageClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	case apierrors.IsNotFound(err):
 		stub := &storagev1.StorageClass{}
 		stub.Name = req.Name
-		ev := entity.StorageClassToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.StorageClassToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish storageclass deletion: %w", perr)

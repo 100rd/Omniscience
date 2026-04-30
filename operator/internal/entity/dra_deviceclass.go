@@ -35,7 +35,7 @@ import (
 //
 // DeviceClass is cluster-scoped, so the external_id has no namespace
 // component: k8s_resource/DeviceClass/{name}.
-func DeviceClassToEvent(dc *resourcev1beta1.DeviceClass, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func DeviceClassToEvent(dc *resourcev1beta1.DeviceClass, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	externalID := EntityKindPrefix + "/" + EntityKindDeviceClass + "/" + dc.Name
 	uri := "kube://" + clusterName + "/" + EntityKindDeviceClass + "/" + dc.Name
 
@@ -47,7 +47,7 @@ func DeviceClassToEvent(dc *resourcev1beta1.DeviceClass, action Action, workspac
 		"emitter":        EmitterLabel,
 	}
 
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 
 	return &Event{
 		SourceID:      deriveSourceID(workspaceID, clusterName),

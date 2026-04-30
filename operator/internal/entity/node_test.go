@@ -38,9 +38,9 @@ func newReadyNode(name string) *corev1.Node {
 
 func TestNodeToEvent_HappyPath(t *testing.T) {
 	node := newReadyNode("kind-control-plane")
-	ev := entity.NodeToEvent(node, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NodeToEvent(node, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/Node/kind-control-plane" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Node/kind-control-plane" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if strings.Contains(ev.ExternalID, "//") {
@@ -64,7 +64,7 @@ func TestNodeToEvent_HappyPath(t *testing.T) {
 
 func TestNodeToEvent_NotReadyConditionMissing(t *testing.T) {
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-x"}}
-	ev := entity.NodeToEvent(node, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NodeToEvent(node, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if got := ev.Metadata["ready"]; got != "false" {
 		t.Fatalf("ready = %q, want \"false\" (no Ready condition present)", got)
 	}
@@ -74,8 +74,8 @@ func TestNodeToEvent_NoTaintsNoLabelsStillEmits(t *testing.T) {
 	// Edge case: a Node with literally no taints, labels, or status
 	// fields populated. Must still produce a well-formed event.
 	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "minimal"}}
-	ev := entity.NodeToEvent(node, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
-	if ev.ExternalID != "k8s_resource/Node/minimal" {
+	ev := entity.NodeToEvent(node, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Node/minimal" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if _, ok := ev.Metadata["kubelet_version"]; ok {
@@ -85,7 +85,7 @@ func TestNodeToEvent_NoTaintsNoLabelsStillEmits(t *testing.T) {
 
 func TestNodeToEvent_EmitsInClusterEdge(t *testing.T) {
 	node := newReadyNode("node-a")
-	ev := entity.NodeToEvent(node, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NodeToEvent(node, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.TopologyEdges) != 1 {
 		t.Fatalf("expected 1 edge, got %d: %+v", len(ev.TopologyEdges), ev.TopologyEdges)
 	}
@@ -93,7 +93,7 @@ func TestNodeToEvent_EmitsInClusterEdge(t *testing.T) {
 	if e.Kind != entity.RelationInCluster {
 		t.Fatalf("relation = %q, want %q", e.Kind, entity.RelationInCluster)
 	}
-	if e.TargetExternalID != "k8s_resource/Cluster/prod-eu" {
-		t.Fatalf("target = %q, want %q", e.TargetExternalID, "k8s_resource/Cluster/prod-eu")
+	if e.TargetExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu" {
+		t.Fatalf("target = %q, want %q", e.TargetExternalID, "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu")
 	}
 }

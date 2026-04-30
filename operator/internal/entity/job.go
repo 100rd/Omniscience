@@ -34,17 +34,18 @@ func JobToEvent(
 	j *batchv1.Job,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
-	ev := newWorkloadEvent(kindJob, j.Namespace, j.Name, action, workspaceID, clusterName, now)
+	ev := newWorkloadEvent(kindJob, j.Namespace, j.Name, action, workspaceID, clusterID, clusterName, now)
 
 	if j.Spec.Parallelism != nil {
 		ev.Metadata["replicas"] = formatReplicas(*j.Spec.Parallelism)
 	}
 	ev.Metadata["available_replicas"] = formatReplicas(j.Status.Active)
 
-	ev.Edges = ownerEdges(j.OwnerReferences, defaultedNamespace(j.Namespace), ev.ExternalID)
+	ev.Edges = ownerEdges(clusterID, j.OwnerReferences, defaultedNamespace(j.Namespace), ev.ExternalID)
 
 	return ev
 }

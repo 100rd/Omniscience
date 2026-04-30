@@ -25,6 +25,7 @@ type DeploymentReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
@@ -32,7 +33,7 @@ type DeploymentReconciler struct {
 // NewDeploymentReconciler returns a reconciler with sane defaults and the
 // same precondition checks PodReconciler enforces (non-nil client, non-nil
 // publisher, non-zero workspace, non-empty cluster name).
-func NewDeploymentReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*DeploymentReconciler, error) {
+func NewDeploymentReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*DeploymentReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -49,6 +50,7 @@ func NewDeploymentReconciler(c client.Client, pub publisher.Publisher, workspace
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -65,7 +67,7 @@ func (r *DeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 	err := r.Client.Get(ctx, req.NamespacedName, &d)
 	switch {
 	case err == nil:
-		ev := entity.DeploymentToEvent(&d, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.DeploymentToEvent(&d, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish deployment event: %w", perr)
@@ -77,7 +79,7 @@ func (r *DeploymentReconciler) Reconcile(ctx context.Context, req ctrl.Request) 
 		stub := &appsv1.Deployment{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.DeploymentToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.DeploymentToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish deployment deletion: %w", perr)

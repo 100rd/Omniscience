@@ -27,12 +27,13 @@ type PersistentVolumeReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewPersistentVolumeReconciler returns a reconciler with sane defaults.
-func NewPersistentVolumeReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*PersistentVolumeReconciler, error) {
+func NewPersistentVolumeReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*PersistentVolumeReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -49,6 +50,7 @@ func NewPersistentVolumeReconciler(c client.Client, pub publisher.Publisher, wor
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -65,7 +67,7 @@ func (r *PersistentVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	err := r.Client.Get(ctx, req.NamespacedName, &pv)
 	switch {
 	case err == nil:
-		ev := entity.PersistentVolumeToEvent(&pv, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.PersistentVolumeToEvent(&pv, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish pv event: %w", perr)
@@ -76,7 +78,7 @@ func (r *PersistentVolumeReconciler) Reconcile(ctx context.Context, req ctrl.Req
 	case apierrors.IsNotFound(err):
 		stub := &corev1.PersistentVolume{}
 		stub.Name = req.Name
-		ev := entity.PersistentVolumeToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.PersistentVolumeToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish pv deletion: %w", perr)
