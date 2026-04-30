@@ -17,21 +17,22 @@ import (
 )
 
 // NamespaceToEvent maps a corev1.Namespace into an Event. Pure.
-func NamespaceToEvent(ns *corev1.Namespace, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
-	externalID := EntityKindK8sResource + "/Namespace/" + ns.Name
+func NamespaceToEvent(ns *corev1.Namespace, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
+	externalID := externalIDForClusterScoped(clusterID, "Namespace", ns.Name)
 	uri := "kube://" + clusterName + "/Namespace/" + ns.Name
 
 	meta := map[string]string{
-		"cluster": clusterName,
-		"name":    ns.Name,
-		"kind":    "Namespace",
-		"phase":   string(ns.Status.Phase),
-		"emitter": "k8s-operator",
+		"cluster":    clusterName,
+		"cluster_id": clusterID.String(),
+		"name":       ns.Name,
+		"kind":       "Namespace",
+		"phase":      string(ns.Status.Phase),
+		"emitter":    "k8s-operator",
 	}
 
 	// IN_CLUSTER edge — the inverse-direction CONTAINS view is emitted
 	// from the startup cluster anchor publish.
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 
 	return &Event{
 		SourceID:    deriveSourceID(workspaceID, clusterName),

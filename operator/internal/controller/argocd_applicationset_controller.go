@@ -27,12 +27,13 @@ type ArgoCDApplicationSetReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewArgoCDApplicationSetReconciler returns a reconciler with sane defaults.
-func NewArgoCDApplicationSetReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*ArgoCDApplicationSetReconciler, error) {
+func NewArgoCDApplicationSetReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*ArgoCDApplicationSetReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -49,6 +50,7 @@ func NewArgoCDApplicationSetReconciler(c client.Client, pub publisher.Publisher,
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -70,7 +72,7 @@ func (r *ArgoCDApplicationSetReconciler) Reconcile(ctx context.Context, req ctrl
 			logger.Error(derr, "decode applicationset failed; skipping reconcile")
 			return ctrl.Result{}, nil
 		}
-		ev := entity.ApplicationSetToEvent(appset, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ApplicationSetToEvent(appset, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish applicationset event: %w", perr)
@@ -82,7 +84,7 @@ func (r *ArgoCDApplicationSetReconciler) Reconcile(ctx context.Context, req ctrl
 		stub := &argocd.ApplicationSet{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ApplicationSetToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ApplicationSetToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish applicationset deletion: %w", perr)

@@ -24,12 +24,13 @@ type JobReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewJobReconciler validates inputs identically to NewPodReconciler.
-func NewJobReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*JobReconciler, error) {
+func NewJobReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*JobReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -46,6 +47,7 @@ func NewJobReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -62,7 +64,7 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	err := r.Client.Get(ctx, req.NamespacedName, &j)
 	switch {
 	case err == nil:
-		ev := entity.JobToEvent(&j, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.JobToEvent(&j, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish job event: %w", perr)
@@ -74,7 +76,7 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		stub := &batchv1.Job{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.JobToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.JobToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish job deletion: %w", perr)

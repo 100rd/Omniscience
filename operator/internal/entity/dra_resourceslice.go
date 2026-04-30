@@ -59,7 +59,7 @@ const EdgeKindAdvertisedBy = "ADVERTISED_BY"
 //
 // ResourceSlice is cluster-scoped, so the external_id has no namespace
 // component: k8s_resource/ResourceSlice/{name}.
-func ResourceSliceToEvent(rs *resourcev1beta1.ResourceSlice, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func ResourceSliceToEvent(rs *resourcev1beta1.ResourceSlice, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	externalID := EntityKindPrefix + "/" + EntityKindResourceSlice + "/" + rs.Name
 	uri := "kube://" + clusterName + "/" + EntityKindResourceSlice + "/" + rs.Name
 
@@ -80,7 +80,7 @@ func ResourceSliceToEvent(rs *resourcev1beta1.ResourceSlice, action Action, work
 		meta["node"] = rs.Spec.NodeName
 	}
 
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 	if rs.Spec.NodeName != "" {
 		edges = append(edges, EdgeRef{
 			Kind:             EdgeKindAdvertisedBy,

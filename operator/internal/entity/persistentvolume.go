@@ -24,16 +24,17 @@ import (
 )
 
 // PersistentVolumeToEvent maps a corev1.PersistentVolume into an Event.
-func PersistentVolumeToEvent(pv *corev1.PersistentVolume, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
-	externalID := EntityKindK8sResource + "/PersistentVolume/" + pv.Name
+func PersistentVolumeToEvent(pv *corev1.PersistentVolume, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
+	externalID := externalIDForClusterScoped(clusterID, "PersistentVolume", pv.Name)
 	uri := "kube://" + clusterName + "/PersistentVolume/" + pv.Name
 
 	meta := map[string]string{
-		"cluster": clusterName,
-		"name":    pv.Name,
-		"kind":    "PersistentVolume",
-		"phase":   string(pv.Status.Phase),
-		"emitter": "k8s-operator",
+		"cluster":    clusterName,
+		"cluster_id": clusterID.String(),
+		"name":       pv.Name,
+		"kind":       "PersistentVolume",
+		"phase":      string(pv.Status.Phase),
+		"emitter":    "k8s-operator",
 	}
 
 	// capacity: the canonical value lives under ResourceStorage. Stringify
@@ -65,14 +66,14 @@ func PersistentVolumeToEvent(pv *corev1.PersistentVolume, action Action, workspa
 		meta["storage_class"] = pv.Spec.StorageClassName
 	}
 
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 
 	// OF_CLASS edge — only emitted when storageClassName is set. A blank
 	// string represents the deprecated implicit-default case; we don't
 	// guess the default class here because that's a cluster-state read
 	// and would couple this pure mapper to a live API client.
 	if pv.Spec.StorageClassName != "" {
-		edges = append(edges, EdgeRef{Kind: RelationOfClass, TargetExternalID: EntityKindK8sResource + "/StorageClass/" + pv.Spec.StorageClassName})
+		edges = append(edges, EdgeRef{Kind: RelationOfClass, TargetExternalID: externalIDForClusterScoped(clusterID, "StorageClass", pv.Spec.StorageClassName)})
 	}
 
 	return &Event{

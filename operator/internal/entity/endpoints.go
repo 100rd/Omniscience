@@ -31,18 +31,18 @@ const EntityKindEndpoints = "Endpoints"
 //     each Pod referenced by subsets[].addresses[].targetRef where targetRef
 //     .kind == "Pod". This is the topology truth — derived from K8s-native
 //     pointers, never re-inferred.
-func EndpointsToEvent(ep *corev1.Endpoints, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func EndpointsToEvent(ep *corev1.Endpoints, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := resolveNamespace(ep.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindEndpoints, ep.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindEndpoints, ep.Name)
 	meta["subset_count"] = strconv.Itoa(len(ep.Subsets))
 	meta["address_count"] = strconv.Itoa(countEndpointAddresses(ep))
 
-	edges := buildSelectsEdges(ep, namespace)
+	edges := buildSelectsEdges(clusterID, ep, namespace)
 
 	return &Event{
 		SourceID:    DeriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
-		ExternalID:  externalIDFor(EntityKindEndpoints, namespace, ep.Name),
+		ExternalID:  externalIDFor(clusterID, EntityKindEndpoints, namespace, ep.Name),
 		URI:         uriFor(clusterName, namespace, EntityKindEndpoints, ep.Name),
 		Action:      action,
 		WorkspaceID: workspaceID,
@@ -74,11 +74,11 @@ func countEndpointAddresses(ep *corev1.Endpoints) int {
 // Endpoints document records the membership decision at this point in time;
 // readiness is a separate dimension and changes more frequently than the
 // selector match.
-func buildSelectsEdges(ep *corev1.Endpoints, namespace string) []EdgeRef {
+func buildSelectsEdges(clusterID uuid.UUID, ep *corev1.Endpoints, namespace string) []EdgeRef {
 	var edges []EdgeRef
 	for _, sub := range ep.Subsets {
-		edges = appendPodEdges(edges, sub.Addresses, namespace)
-		edges = appendPodEdges(edges, sub.NotReadyAddresses, namespace)
+		edges = appendPodEdges(clusterID, edges, sub.Addresses, namespace)
+		edges = appendPodEdges(clusterID, edges, sub.NotReadyAddresses, namespace)
 	}
 	return edges
 }
@@ -87,7 +87,7 @@ func buildSelectsEdges(ep *corev1.Endpoints, namespace string) []EdgeRef {
 // points to a Pod. Other targetRef kinds (rare; e.g. legacy clusters that
 // reference Services directly) are skipped — we only emit edges we can
 // confidently express as `k8s_resource/Pod/{namespace}/{name}`.
-func appendPodEdges(edges []EdgeRef, addrs []corev1.EndpointAddress, fallbackNamespace string) []EdgeRef {
+func appendPodEdges(clusterID uuid.UUID, edges []EdgeRef, addrs []corev1.EndpointAddress, fallbackNamespace string) []EdgeRef {
 	for i := range addrs {
 		ref := addrs[i].TargetRef
 		if ref == nil || ref.Kind != "Pod" || ref.Name == "" {
@@ -99,7 +99,7 @@ func appendPodEdges(edges []EdgeRef, addrs []corev1.EndpointAddress, fallbackNam
 		}
 		edges = append(edges, EdgeRef{
 			Kind:             EdgeKindSelects,
-			TargetExternalID: externalIDFor("Pod", ns, ref.Name),
+			TargetExternalID: externalIDFor(clusterID, "Pod", ns, ref.Name),
 		})
 	}
 	return edges

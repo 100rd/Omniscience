@@ -30,16 +30,16 @@ func newPV(name, storageClass string) *corev1.PersistentVolume {
 
 func TestPersistentVolumeToEvent_HappyPath(t *testing.T) {
 	pv := newPV("pv-001", "gp3")
-	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/PersistentVolume/pv-001" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/PersistentVolume/pv-001" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if strings.Contains(ev.ExternalID, "//") {
 		t.Fatalf("external_id contains leading //: %q", ev.ExternalID)
 	}
 	expected := map[string]string{
-		"cluster":        "prod-eu",
+		"cluster":        "prod-eu", "cluster_id": "99999999-8888-7777-6666-555555555555",
 		"name":           "pv-001",
 		"kind":           "PersistentVolume",
 		"capacity":       "10Gi",
@@ -63,7 +63,7 @@ func TestPersistentVolumeToEvent_AccessModesSorted(t *testing.T) {
 		corev1.ReadOnlyMany,
 		corev1.ReadWriteOnce,
 	}
-	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if got := ev.Metadata["access_modes"]; got != "ReadOnlyMany,ReadWriteMany,ReadWriteOnce" {
 		t.Fatalf("access_modes = %q, want sorted", got)
 	}
@@ -75,7 +75,7 @@ func TestPersistentVolumeToEvent_NoStorageClassName_NoOfClassEdge(t *testing.T) 
 	// string — that would create a phantom StorageClass entity on the
 	// consumer side.
 	pv := newPV("pv-legacy", "")
-	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if _, ok := ev.Metadata["storage_class"]; ok {
 		t.Fatalf("storage_class metadata should be absent for empty storageClassName")
@@ -89,19 +89,19 @@ func TestPersistentVolumeToEvent_NoStorageClassName_NoOfClassEdge(t *testing.T) 
 
 func TestPersistentVolumeToEvent_EmitsInClusterAndOfClassEdges(t *testing.T) {
 	pv := newPV("pv-001", "gp3")
-	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PersistentVolumeToEvent(pv, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	var sawInCluster, sawOfClass bool
 	for _, e := range ev.TopologyEdges {
 		switch e.Kind {
 		case entity.RelationInCluster:
 			sawInCluster = true
-			if e.TargetExternalID != "k8s_resource/Cluster/prod-eu" {
+			if e.TargetExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu" {
 				t.Fatalf("in_cluster target = %q", e.TargetExternalID)
 			}
 		case entity.RelationOfClass:
 			sawOfClass = true
-			if e.TargetExternalID != "k8s_resource/StorageClass/gp3" {
+			if e.TargetExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/StorageClass/gp3" {
 				t.Fatalf("of_class target = %q", e.TargetExternalID)
 			}
 		}

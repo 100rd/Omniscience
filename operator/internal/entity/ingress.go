@@ -27,19 +27,19 @@ const EntityKindIngress = "Ingress"
 // Edges: one ROUTES_TO edge per distinct Service named in the spec. We
 // deduplicate so a multi-path ingress that fans out to the same service
 // produces a single edge.
-func IngressToEvent(ing *networkingv1.Ingress, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func IngressToEvent(ing *networkingv1.Ingress, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := resolveNamespace(ing.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindIngress, ing.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindIngress, ing.Name)
 	meta["ingress_class"] = derefString(ing.Spec.IngressClassName)
 	meta["rule_count"] = strconv.Itoa(len(ing.Spec.Rules))
 	meta["tls_count"] = strconv.Itoa(len(ing.Spec.TLS))
 
-	edges := buildRoutesToEdges(ing, namespace)
+	edges := buildRoutesToEdges(clusterID, ing, namespace)
 
 	return &Event{
 		SourceID:    DeriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
-		ExternalID:  externalIDFor(EntityKindIngress, namespace, ing.Name),
+		ExternalID:  externalIDFor(clusterID, EntityKindIngress, namespace, ing.Name),
 		URI:         uriFor(clusterName, namespace, EntityKindIngress, ing.Name),
 		Action:      action,
 		WorkspaceID: workspaceID,
@@ -63,14 +63,14 @@ func derefString(p *string) string {
 // External Name backends (backend.resource pointing at a CRD) are not Service
 // references; we skip them. Same-named services in the same namespace are
 // deduplicated.
-func buildRoutesToEdges(ing *networkingv1.Ingress, namespace string) []EdgeRef {
+func buildRoutesToEdges(clusterID uuid.UUID, ing *networkingv1.Ingress, namespace string) []EdgeRef {
 	seen := map[string]struct{}{}
 	var edges []EdgeRef
 	add := func(serviceName string) {
 		if serviceName == "" {
 			return
 		}
-		ext := externalIDFor(EntityKindService, namespace, serviceName)
+		ext := externalIDFor(clusterID, EntityKindService, namespace, serviceName)
 		if _, ok := seen[ext]; ok {
 			return
 		}

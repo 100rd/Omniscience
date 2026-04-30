@@ -29,9 +29,9 @@ func newStatefulSet(namespace, name string, replicas, available int32, owners []
 
 func TestStatefulSetToEvent_FieldsAreCorrect(t *testing.T) {
 	ss := newStatefulSet("team-a", "kafka", 5, 4, nil)
-	ev := entity.StatefulSetToEvent(ss, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.StatefulSetToEvent(ss, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if want := "k8s_resource/StatefulSet/team-a/kafka"; ev.ExternalID != want {
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/StatefulSet/team-a/kafka"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 	if got := ev.Metadata["kind"]; got != "StatefulSet" {
@@ -50,7 +50,7 @@ func TestStatefulSetToEvent_OwnerEdgesFromOwnerReferences(t *testing.T) {
 		{Kind: "Application", Name: "kafka-app", UID: "app-uid"},
 	}
 	ss := newStatefulSet("team-a", "kafka", 1, 1, owners)
-	ev := entity.StatefulSetToEvent(ss, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.StatefulSetToEvent(ss, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.Edges) != 1 || ev.Edges[0].FromKind != "Application" {
 		t.Fatalf("edges = %#v, want 1 Application edge", ev.Edges)
 	}
@@ -58,10 +58,10 @@ func TestStatefulSetToEvent_OwnerEdgesFromOwnerReferences(t *testing.T) {
 
 func TestStatefulSetToEvent_NoLabelLeakage(t *testing.T) {
 	ss := newStatefulSet("team-a", "kafka", 1, 1, nil)
-	ev := entity.StatefulSetToEvent(ss, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.StatefulSetToEvent(ss, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	for k := range ev.Metadata {
 		switch k {
-		case "cluster", "namespace", "name", "kind", "emitter", "replicas", "available_replicas":
+		case "cluster", "cluster_id", "namespace", "name", "kind", "emitter", "replicas", "available_replicas":
 		default:
 			t.Fatalf("leaked metadata key %q", k)
 		}

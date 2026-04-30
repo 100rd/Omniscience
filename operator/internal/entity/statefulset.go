@@ -24,17 +24,18 @@ func StatefulSetToEvent(
 	ss *appsv1.StatefulSet,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
-	ev := newWorkloadEvent(kindStatefulSet, ss.Namespace, ss.Name, action, workspaceID, clusterName, now)
+	ev := newWorkloadEvent(kindStatefulSet, ss.Namespace, ss.Name, action, workspaceID, clusterID, clusterName, now)
 
 	if ss.Spec.Replicas != nil {
 		ev.Metadata["replicas"] = formatReplicas(*ss.Spec.Replicas)
 	}
 	ev.Metadata["available_replicas"] = formatReplicas(ss.Status.AvailableReplicas)
 
-	ev.Edges = ownerEdges(ss.OwnerReferences, defaultedNamespace(ss.Namespace), ev.ExternalID)
+	ev.Edges = ownerEdges(clusterID, ss.OwnerReferences, defaultedNamespace(ss.Namespace), ev.ExternalID)
 
 	return ev
 }

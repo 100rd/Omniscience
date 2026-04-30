@@ -53,9 +53,9 @@ const EntityKindSecret = "Secret"
 // in-depth design: even if a future contributor added a leaky line, the
 // closed allow-list of metadata makes the regression visible to the
 // structural test in secret_test.go.
-func SecretToEvent(s *corev1.Secret, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func SecretToEvent(s *corev1.Secret, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := resolveNamespace(s.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindSecret, s.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindSecret, s.Name)
 	meta["secret_type"] = string(s.Type)
 
 	// Union of the keys in Data and StringData (k8s permits both). Sorted so
@@ -67,7 +67,7 @@ func SecretToEvent(s *corev1.Secret, action Action, workspaceID uuid.UUID, clust
 	return &Event{
 		SourceID:    DeriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
-		ExternalID:  externalIDFor(EntityKindSecret, namespace, s.Name),
+		ExternalID:  externalIDFor(clusterID, EntityKindSecret, namespace, s.Name),
 		URI:         uriFor(clusterName, namespace, EntityKindSecret, s.Name),
 		Action:      action,
 		WorkspaceID: workspaceID,

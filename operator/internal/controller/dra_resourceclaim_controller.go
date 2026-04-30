@@ -33,13 +33,14 @@ type ResourceClaimReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewResourceClaimReconciler returns a reconciler with sane defaults.
 // Validation matches every other reconciler in this package.
-func NewResourceClaimReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*ResourceClaimReconciler, error) {
+func NewResourceClaimReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*ResourceClaimReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -56,6 +57,7 @@ func NewResourceClaimReconciler(c client.Client, pub publisher.Publisher, worksp
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -74,7 +76,7 @@ func (r *ResourceClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	err := r.Client.Get(ctx, req.NamespacedName, &rc)
 	switch {
 	case err == nil:
-		ev := entity.ResourceClaimToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ResourceClaimToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceclaim event: %w", perr)
@@ -86,7 +88,7 @@ func (r *ResourceClaimReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		stub := &resourcev1beta1.ResourceClaim{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ResourceClaimToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ResourceClaimToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceclaim deletion: %w", perr)

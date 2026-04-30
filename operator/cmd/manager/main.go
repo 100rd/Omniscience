@@ -110,7 +110,7 @@ func run() error {
 		return fmt.Errorf("manager init: %w", err)
 	}
 
-	rec, err := controller.NewPodReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	rec, err := controller.NewPodReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("pod reconciler init: %w", err)
 	}
@@ -124,7 +124,7 @@ func run() error {
 	// order (Deployment → ReplicaSet → StatefulSet → DaemonSet → Job) but
 	// the manager itself runs them concurrently — order here only affects
 	// startup logging, not runtime semantics.
-	depRec, err := controller.NewDeploymentReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	depRec, err := controller.NewDeploymentReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("deployment reconciler init: %w", err)
 	}
@@ -132,7 +132,7 @@ func run() error {
 		return fmt.Errorf("deployment reconciler setup: %w", err)
 	}
 
-	rsRec, err := controller.NewReplicaSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	rsRec, err := controller.NewReplicaSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("replicaset reconciler init: %w", err)
 	}
@@ -140,7 +140,7 @@ func run() error {
 		return fmt.Errorf("replicaset reconciler setup: %w", err)
 	}
 
-	ssRec, err := controller.NewStatefulSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	ssRec, err := controller.NewStatefulSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("statefulset reconciler init: %w", err)
 	}
@@ -148,7 +148,7 @@ func run() error {
 		return fmt.Errorf("statefulset reconciler setup: %w", err)
 	}
 
-	dsRec, err := controller.NewDaemonSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	dsRec, err := controller.NewDaemonSetReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("daemonset reconciler init: %w", err)
 	}
@@ -156,7 +156,7 @@ func run() error {
 		return fmt.Errorf("daemonset reconciler setup: %w", err)
 	}
 
-	jobRec, err := controller.NewJobReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	jobRec, err := controller.NewJobReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("job reconciler init: %w", err)
 	}
@@ -170,7 +170,7 @@ func run() error {
 	// runtime resolves dependencies at start time. Each Setup* call returns
 	// a wrapped error so a single line in kubectl logs identifies which
 	// kind failed to register.
-	if err := setupNetworkingAndConfigWatchers(mgr, pub, cfg.WorkspaceID, cfg.ClusterName); err != nil {
+	if err := setupNetworkingAndConfigWatchers(mgr, pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName); err != nil {
 		return err
 	}
 	// ── end #158 ──────────────────────────────────────────────────────────
@@ -180,7 +180,7 @@ func run() error {
 	// CRD is not installed we log INFO and skip registration. A truly
 	// transient discovery failure (5xx, connection refused) is propagated so
 	// startup does not silently disable the watcher on a flaky API server.
-	if err := setupArgoRolloutsWatcher(mgr, pub, cfg.WorkspaceID, cfg.ClusterName, logger); err != nil {
+	if err := setupArgoRolloutsWatcher(mgr, pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName, logger); err != nil {
 		return err
 	}
 	// ── end #161 ──────────────────────────────────────────────────────────
@@ -190,7 +190,7 @@ func run() error {
 	// PersistentVolume, StorageClass). Each follows the same constructor /
 	// SetupWithManager shape as the Pod reconciler above; failure on any of
 	// them is a hard startup error so the operator never runs partial.
-	nodeRec, err := controller.NewNodeReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	nodeRec, err := controller.NewNodeReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("node reconciler init: %w", err)
 	}
@@ -198,7 +198,7 @@ func run() error {
 		return fmt.Errorf("node reconciler setup: %w", err)
 	}
 
-	nsRec, err := controller.NewNamespaceReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	nsRec, err := controller.NewNamespaceReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("namespace reconciler init: %w", err)
 	}
@@ -206,7 +206,7 @@ func run() error {
 		return fmt.Errorf("namespace reconciler setup: %w", err)
 	}
 
-	pvRec, err := controller.NewPersistentVolumeReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	pvRec, err := controller.NewPersistentVolumeReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("persistentvolume reconciler init: %w", err)
 	}
@@ -214,7 +214,7 @@ func run() error {
 		return fmt.Errorf("persistentvolume reconciler setup: %w", err)
 	}
 
-	scRec, err := controller.NewStorageClassReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterName)
+	scRec, err := controller.NewStorageClassReconciler(mgr.GetClient(), pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName)
 	if err != nil {
 		return fmt.Errorf("storageclass reconciler init: %w", err)
 	}
@@ -236,7 +236,7 @@ func run() error {
 	argoPresence, argoErr := argocd.DiscoverFromRESTConfig(ctrl.GetConfigOrDie())
 	if argoErr != nil {
 		logger.Error(argoErr, "argocd discovery failed; continuing without ArgoCD watchers")
-	} else if err := controller.SetupArgoCDWatchers(mgr, logger, argoPresence, pub, cfg.WorkspaceID, cfg.ClusterName); err != nil {
+	} else if err := controller.SetupArgoCDWatchers(mgr, logger, argoPresence, pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName); err != nil {
 		return fmt.Errorf("argocd watchers setup: %w", err)
 	}
 	// ─── END issue #160 ───────────────────────────────────────────────────
@@ -258,7 +258,7 @@ func run() error {
 	// in a follow-up that reads from the rest config + a Node sample once
 	// the manager cache is warm. The empty-string strategy keeps this
 	// change small and pure-stamping.
-	anchorPub, err := controller.NewClusterAnchorPublisher(pub, cfg.WorkspaceID, cfg.ClusterName, "", "")
+	anchorPub, err := controller.NewClusterAnchorPublisher(pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName, "", "")
 	if err != nil {
 		return fmt.Errorf("cluster anchor init: %w", err)
 	}
@@ -303,34 +303,35 @@ func setupNetworkingAndConfigWatchers(
 	mgr ctrl.Manager,
 	pub publisher.Publisher,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 ) error {
-	if svc, err := controller.NewServiceReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+	if svc, err := controller.NewServiceReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
 		return fmt.Errorf("service reconciler init: %w", err)
 	} else if err := svc.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("service reconciler setup: %w", err)
 	}
-	if ep, err := controller.NewEndpointsReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+	if ep, err := controller.NewEndpointsReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
 		return fmt.Errorf("endpoints reconciler init: %w", err)
 	} else if err := ep.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("endpoints reconciler setup: %w", err)
 	}
-	if ing, err := controller.NewIngressReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+	if ing, err := controller.NewIngressReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
 		return fmt.Errorf("ingress reconciler init: %w", err)
 	} else if err := ing.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("ingress reconciler setup: %w", err)
 	}
-	if np, err := controller.NewNetworkPolicyReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+	if np, err := controller.NewNetworkPolicyReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
 		return fmt.Errorf("networkpolicy reconciler init: %w", err)
 	} else if err := np.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("networkpolicy reconciler setup: %w", err)
 	}
-	if cm, err := controller.NewConfigMapReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+	if cm, err := controller.NewConfigMapReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
 		return fmt.Errorf("configmap reconciler init: %w", err)
 	} else if err := cm.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("configmap reconciler setup: %w", err)
 	}
-	if sec, err := controller.NewSecretReconciler(mgr.GetClient(), pub, workspaceID, clusterName); err != nil {
+	if sec, err := controller.NewSecretReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
 		return fmt.Errorf("secret reconciler init: %w", err)
 	} else if err := sec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("secret reconciler setup: %w", err)
@@ -361,6 +362,7 @@ func setupArgoRolloutsWatcher(
 	mgr ctrl.Manager,
 	pub publisher.Publisher,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	logger interface {
 		Info(msg string, keysAndValues ...interface{})
@@ -390,7 +392,7 @@ func setupArgoRolloutsWatcher(
 		return fmt.Errorf("argo-rollouts: add to scheme: %w", err)
 	}
 
-	rec, err := controller.NewArgoRolloutReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	rec, err := controller.NewArgoRolloutReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName)
 	if err != nil {
 		return fmt.Errorf("argo-rollouts: reconciler init: %w", err)
 	}

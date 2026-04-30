@@ -31,9 +31,9 @@ const EntityKindService = "Service"
 //
 // Notably absent: spec.externalIPs, spec.loadBalancerIP, status.loadBalancer
 // .ingress[].ip — all settable by tenant code paths and out of v0.2 scope.
-func ServiceToEvent(svc *corev1.Service, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func ServiceToEvent(svc *corev1.Service, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := resolveNamespace(svc.Namespace)
-	meta := baseMetadata(clusterName, namespace, EntityKindService, svc.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindService, svc.Name)
 	meta["service_type"] = string(svc.Spec.Type)
 	meta["cluster_ip"] = svc.Spec.ClusterIP
 	meta["selector"] = renderStringMapSorted(svc.Spec.Selector)
@@ -42,7 +42,7 @@ func ServiceToEvent(svc *corev1.Service, action Action, workspaceID uuid.UUID, c
 	return &Event{
 		SourceID:    DeriveSourceID(workspaceID, clusterName),
 		SourceType:  SourceType,
-		ExternalID:  externalIDFor(EntityKindService, namespace, svc.Name),
+		ExternalID:  externalIDFor(clusterID, EntityKindService, namespace, svc.Name),
 		URI:         uriFor(clusterName, namespace, EntityKindService, svc.Name),
 		Action:      action,
 		WorkspaceID: workspaceID,

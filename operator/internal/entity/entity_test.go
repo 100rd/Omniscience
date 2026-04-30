@@ -20,6 +20,10 @@ var fixedNow = time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 // sourceID derivations are reproducible.
 var fixedWorkspace = uuid.MustParse("11111111-2222-3333-4444-555555555555")
 
+// fixedClusterID is a deterministic UUID used by every mapper test so the
+// re-keyed external_ids (issue #167) are reproducible across runs.
+var fixedClusterID = uuid.MustParse("99999999-8888-7777-6666-555555555555")
+
 func newPod(namespace, name string) *corev1.Pod {
 	return &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -41,7 +45,7 @@ func newPod(namespace, name string) *corev1.Pod {
 
 func TestPodToEvent_FieldsAreCorrectAndStamped(t *testing.T) {
 	pod := newPod("team-a", "checkout-7d9f")
-	ev := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev.SourceType != entity.SourceType {
 		t.Fatalf("source_type = %q, want %q", ev.SourceType, entity.SourceType)
@@ -52,7 +56,7 @@ func TestPodToEvent_FieldsAreCorrectAndStamped(t *testing.T) {
 	if ev.Action != entity.ActionCreated {
 		t.Fatalf("action = %q, want %q", ev.Action, entity.ActionCreated)
 	}
-	wantExternal := "k8s_resource/Pod/team-a/checkout-7d9f"
+	wantExternal := "k8s_resource/99999999-8888-7777-6666-555555555555/Pod/team-a/checkout-7d9f"
 	if ev.ExternalID != wantExternal {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, wantExternal)
 	}
@@ -70,7 +74,7 @@ func TestPodToEvent_DoesNotLeakUserLabels(t *testing.T) {
 	// metadata. ADR-0007 §ACL is explicit on this point — labels are
 	// tenant-writable state and a workspace-leaking attack surface.
 	pod := newPod("team-a", "checkout-7d9f")
-	ev := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	for k, v := range ev.Metadata {
 		if k == "app" || k == "adversarial.example.com/spy" {
@@ -79,7 +83,7 @@ func TestPodToEvent_DoesNotLeakUserLabels(t *testing.T) {
 	}
 	// Spot-check the fields that ARE expected — the closed allow-list.
 	expected := map[string]string{
-		"cluster":   "prod-eu",
+		"cluster":   "prod-eu", "cluster_id": "99999999-8888-7777-6666-555555555555",
 		"namespace": "team-a",
 		"name":      "checkout-7d9f",
 		"kind":      "Pod",
@@ -105,8 +109,8 @@ func TestPodToEvent_SourceIDIsDeterministicAcrossCalls(t *testing.T) {
 	pod1 := newPod("team-a", "checkout-7d9f")
 	pod2 := newPod("team-b", "billing-aa11")
 
-	ev1 := entity.PodToEvent(pod1, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
-	ev2 := entity.PodToEvent(pod2, entity.ActionDeleted, fixedWorkspace, "prod-eu", fixedNow)
+	ev1 := entity.PodToEvent(pod1, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	ev2 := entity.PodToEvent(pod2, entity.ActionDeleted, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev1.SourceID != ev2.SourceID {
 		t.Fatalf("source_id should be stable across pods within (workspace, cluster); got %s vs %s",
@@ -118,8 +122,8 @@ func TestPodToEvent_SourceIDChangesWithCluster(t *testing.T) {
 	// Different clusters under the same workspace must produce DIFFERENT
 	// source_ids — otherwise per-cluster scoping on the server side breaks.
 	pod := newPod("team-a", "checkout-7d9f")
-	a := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow).SourceID
-	b := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, "prod-us", fixedNow).SourceID
+	a := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow).SourceID
+	b := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-us", fixedNow).SourceID
 	if a == b {
 		t.Fatalf("source_id should differ across clusters; got %s == %s", a, b)
 	}
@@ -127,8 +131,8 @@ func TestPodToEvent_SourceIDChangesWithCluster(t *testing.T) {
 
 func TestPodToEvent_NamespacelessPodFallsBackSafely(t *testing.T) {
 	pod := newPod("", "rogue-pod")
-	ev := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
-	want := "k8s_resource/Pod/default/rogue-pod"
+	ev := entity.PodToEvent(pod, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	want := "k8s_resource/99999999-8888-7777-6666-555555555555/Pod/default/rogue-pod"
 	if ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q (defaulted namespace)", ev.ExternalID, want)
 	}
@@ -138,7 +142,7 @@ func TestPodToEvent_JSONShapeIsStableForConsumer(t *testing.T) {
 	// The Pydantic consumer side validates against snake_case fields. This
 	// test is a contract guard against accidental rename / casing drift.
 	pod := newPod("team-a", "checkout-7d9f")
-	ev := entity.PodToEvent(pod, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.PodToEvent(pod, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	raw, err := json.Marshal(ev)
 	if err != nil {

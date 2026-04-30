@@ -31,6 +31,7 @@ type PodReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	// Now is the clock function used for event timestamps. Injectable so
 	// tests can pin time deterministically.
@@ -38,7 +39,7 @@ type PodReconciler struct {
 }
 
 // NewPodReconciler returns a reconciler with sane defaults.
-func NewPodReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*PodReconciler, error) {
+func NewPodReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*PodReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -55,6 +56,7 @@ func NewPodReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -83,7 +85,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// external_id), so emitting "updated" for both create and update
 		// is correct. A more precise mapping requires a finalizer or an
 		// in-memory cache and is deferred to a follow-up issue.
-		ev := entity.PodToEvent(&pod, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.PodToEvent(&pod, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish pod event: %w", perr)
@@ -100,7 +102,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		stub := &corev1.Pod{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.PodToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.PodToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish pod deletion: %w", perr)

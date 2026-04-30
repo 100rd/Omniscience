@@ -28,12 +28,13 @@ type ServiceReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewServiceReconciler returns a reconciler with sane defaults.
-func NewServiceReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*ServiceReconciler, error) {
+func NewServiceReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*ServiceReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -50,6 +51,7 @@ func NewServiceReconciler(c client.Client, pub publisher.Publisher, workspaceID 
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -66,7 +68,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	err := r.Client.Get(ctx, req.NamespacedName, &svc)
 	switch {
 	case err == nil:
-		ev := entity.ServiceToEvent(&svc, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ServiceToEvent(&svc, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish service event: %w", perr)
@@ -78,7 +80,7 @@ func (r *ServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		stub := &corev1.Service{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ServiceToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ServiceToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish service deletion: %w", perr)

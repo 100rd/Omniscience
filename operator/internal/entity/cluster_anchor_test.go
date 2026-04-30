@@ -16,14 +16,14 @@ import (
 // server relies on, the (workspace_id, external_id) composite must be
 // stable across restarts.
 func TestClusterToEvent_IdempotentExternalID(t *testing.T) {
-	a := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, "prod-eu", "v1.31.1", "https://api:6443", fixedNow)
-	b := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, "prod-eu", "v1.31.1", "https://api:6443", fixedNow)
+	a := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", "v1.31.1", "https://api:6443", fixedNow)
+	b := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", "v1.31.1", "https://api:6443", fixedNow)
 
 	if a.ExternalID != b.ExternalID {
 		t.Fatalf("external_id differs across calls: %q vs %q", a.ExternalID, b.ExternalID)
 	}
-	if a.ExternalID != "k8s_resource/Cluster/prod-eu" {
-		t.Fatalf("external_id = %q, want %q", a.ExternalID, "k8s_resource/Cluster/prod-eu")
+	if a.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu" {
+		t.Fatalf("external_id = %q, want %q", a.ExternalID, "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu")
 	}
 	if a.Metadata["cluster_id"] != b.Metadata["cluster_id"] {
 		t.Fatalf("cluster_id differs across calls: %q vs %q", a.Metadata["cluster_id"], b.Metadata["cluster_id"])
@@ -68,9 +68,9 @@ func TestDeriveClusterID_DiffersAcrossClusters(t *testing.T) {
 }
 
 func TestClusterToEvent_MetadataIsClosedAllowList(t *testing.T) {
-	ev := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, "prod-eu", "v1.31.1", "https://api:6443", fixedNow)
+	ev := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", "v1.31.1", "https://api:6443", fixedNow)
 	want := map[string]string{
-		"cluster":            "prod-eu",
+		"cluster":            "prod-eu", "cluster_id": "99999999-8888-7777-6666-555555555555",
 		"name":               "prod-eu",
 		"kind":               "Cluster",
 		"emitter":            "k8s-operator",
@@ -93,7 +93,7 @@ func TestClusterToEvent_DropsEmptyOptionalFields(t *testing.T) {
 	// is unknown. The mapper must drop the key entirely rather than emit
 	// "kubernetes_version": "" — the consumer can distinguish absent from
 	// empty cleanly.
-	ev := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, "prod-eu", "", "", fixedNow)
+	ev := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", "", "", fixedNow)
 	if _, ok := ev.Metadata["kubernetes_version"]; ok {
 		t.Fatalf("kubernetes_version key present despite empty input")
 	}
@@ -103,7 +103,7 @@ func TestClusterToEvent_DropsEmptyOptionalFields(t *testing.T) {
 }
 
 func TestClusterToEvent_StableJSONShape(t *testing.T) {
-	ev := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, "prod-eu", "v1.31.1", "", fixedNow)
+	ev := entity.ClusterToEvent(entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", "v1.31.1", "", fixedNow)
 	raw, err := json.Marshal(ev)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -126,8 +126,11 @@ func TestClusterToEvent_StableJSONShape(t *testing.T) {
 
 func TestClusterExternalID_DeterministicForm(t *testing.T) {
 	// The external_id is the contract that lets #167 detect cluster
-	// identity collisions — pin the format byte-for-byte.
-	if got := entity.ClusterExternalID("prod-eu"); got != "k8s_resource/Cluster/prod-eu" {
-		t.Fatalf("got %q", got)
+	// identity collisions — pin the format byte-for-byte. Per #167, the
+	// canonical form includes the cluster_id UUID.
+	got := entity.ClusterExternalID(fixedClusterID, "prod-eu")
+	want := "k8s_resource/" + fixedClusterID.String() + "/Cluster/prod-eu"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

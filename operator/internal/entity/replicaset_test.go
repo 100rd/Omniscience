@@ -29,9 +29,9 @@ func newReplicaSet(namespace, name string, replicas, available int32, owners []m
 
 func TestReplicaSetToEvent_FieldsAreCorrect(t *testing.T) {
 	rs := newReplicaSet("team-a", "checkout-7d9f", 4, 4, nil)
-	ev := entity.ReplicaSetToEvent(rs, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.ReplicaSetToEvent(rs, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if want := "k8s_resource/ReplicaSet/team-a/checkout-7d9f"; ev.ExternalID != want {
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/ReplicaSet/team-a/checkout-7d9f"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 	if want := "kube://prod-eu/team-a/ReplicaSet/checkout-7d9f"; ev.URI != want {
@@ -61,12 +61,12 @@ func TestReplicaSetToEvent_OwnerEdgeFromDeployment(t *testing.T) {
 		},
 	}
 	rs := newReplicaSet("team-a", "checkout-7d9f", 4, 4, owners)
-	ev := entity.ReplicaSetToEvent(rs, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.ReplicaSetToEvent(rs, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if len(ev.Edges) != 1 {
 		t.Fatalf("edges count = %d, want 1; %#v", len(ev.Edges), ev.Edges)
 	}
-	if got := ev.Edges[0].FromExternalID; got != "k8s_resource/Deployment/team-a/checkout" {
+	if got := ev.Edges[0].FromExternalID; got != "k8s_resource/99999999-8888-7777-6666-555555555555/Deployment/team-a/checkout" {
 		t.Fatalf("edge from_external_id = %q", got)
 	}
 	if got := ev.Edges[0].ToExternalID; got != ev.ExternalID {
@@ -82,13 +82,13 @@ func TestReplicaSetToEvent_OwnerEdgeFromDeployment(t *testing.T) {
 
 func TestReplicaSetToEvent_AdversarialLabelDoesNotChangeWorkspace(t *testing.T) {
 	rs := newReplicaSet("team-a", "checkout-7d9f", 1, 1, nil)
-	ev := entity.ReplicaSetToEvent(rs, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.ReplicaSetToEvent(rs, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if ev.WorkspaceID != fixedWorkspace {
 		t.Fatalf("workspace_id = %s, want %s", ev.WorkspaceID, fixedWorkspace)
 	}
 	for k := range ev.Metadata {
 		switch k {
-		case "cluster", "namespace", "name", "kind", "emitter", "replicas", "available_replicas":
+		case "cluster", "cluster_id", "namespace", "name", "kind", "emitter", "replicas", "available_replicas":
 			// allowed
 		default:
 			t.Fatalf("metadata leaked unauthorised key %q (full map: %v)", k, ev.Metadata)

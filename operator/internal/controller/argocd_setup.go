@@ -34,6 +34,7 @@ func SetupArgoCDWatchers(
 	presence argocd.PresenceCheck,
 	pub publisher.Publisher,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 ) error {
 	if !presence.AnyPresent() {
@@ -44,7 +45,7 @@ func SetupArgoCDWatchers(
 	}
 
 	if presence.ApplicationsPresent {
-		appRec, err := NewArgoCDApplicationReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+		appRec, err := NewArgoCDApplicationReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName)
 		if err != nil {
 			return fmt.Errorf("argocd application reconciler init: %w", err)
 		}
@@ -57,7 +58,7 @@ func SetupArgoCDWatchers(
 	}
 
 	if presence.ApplicationSetsPresent {
-		setRec, err := NewArgoCDApplicationSetReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+		setRec, err := NewArgoCDApplicationSetReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName)
 		if err != nil {
 			return fmt.Errorf("argocd applicationset reconciler init: %w", err)
 		}

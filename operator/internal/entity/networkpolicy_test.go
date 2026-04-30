@@ -21,9 +21,9 @@ func TestNetworkPolicyToEvent_RendersSelectorAndPolicyTypes(t *testing.T) {
 			PolicyTypes: []networkingv1.PolicyType{networkingv1.PolicyTypeEgress, networkingv1.PolicyTypeIngress},
 		},
 	}
-	ev := entity.NetworkPolicyToEvent(np, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NetworkPolicyToEvent(np, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/NetworkPolicy/team-a/deny-all" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/NetworkPolicy/team-a/deny-all" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if ev.Metadata["pod_selector"] != "app=checkout,tier=frontend" {
@@ -46,7 +46,7 @@ func TestNetworkPolicyToEvent_EmptySelectorRendersEmpty(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "deny-everything"},
 		Spec:       networkingv1.NetworkPolicySpec{},
 	}
-	ev := entity.NetworkPolicyToEvent(np, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.NetworkPolicyToEvent(np, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if ev.Metadata["pod_selector"] != "" {
 		t.Fatalf("empty selector should render as \"\"; got %q", ev.Metadata["pod_selector"])
 	}

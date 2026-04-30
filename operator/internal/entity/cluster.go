@@ -31,20 +31,20 @@ import (
 func ClusterToEvent(
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	kubernetesVersion string,
 	clusterEndpoint string,
 	now time.Time,
 ) *Event {
-	externalID := ClusterExternalID(clusterName)
+	externalID := ClusterExternalID(clusterID, clusterName)
 	uri := "kube://" + clusterName
 
-	clusterID := DeriveClusterID(workspaceID, clusterName)
-
 	// ACL invariant: cluster_name is operator config (Helm value), not
-	// cluster-side state. cluster_id is derived deterministically from
-	// (workspace_id, cluster_name); two workspaces sharing a cluster_name
-	// emit two distinct cluster_ids. See ADR-0007 §ACL.
+	// cluster-side state. cluster_id is operator config (Secret-mounted
+	// OMNISCIENCE_CLUSTER_ID per issue #167) — when unset the operator's
+	// config layer derives the deterministic uuid5(workspace_id,
+	// cluster_name) default for back-compat. See ADR-0007 §ACL.
 	meta := map[string]string{
 		"cluster":    clusterName,
 		"name":       clusterName,
@@ -74,6 +74,10 @@ func ClusterToEvent(
 // inClusterEdge returns the single IN_CLUSTER edge every cluster-scoped or
 // namespaced resource carries to the per-cluster anchor. Built once and
 // reused by every mapper to avoid allocation churn during a Pod storm.
-func inClusterEdge(clusterName string) EdgeRef {
-	return EdgeRef{Kind: RelationInCluster, TargetExternalID: ClusterExternalID(clusterName)}
+//
+// Issue #167: clusterID is the operator-config UUID stamped into the anchor's
+// external_id; two clusters under the same workspace point at distinct
+// anchor entities and never share an IN_CLUSTER edge target.
+func inClusterEdge(clusterID uuid.UUID, clusterName string) EdgeRef {
+	return EdgeRef{Kind: RelationInCluster, TargetExternalID: ClusterExternalID(clusterID, clusterName)}
 }

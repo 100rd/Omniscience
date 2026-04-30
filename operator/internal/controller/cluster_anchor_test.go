@@ -39,6 +39,7 @@ func (f *anchorFakePublisher) snapshot() []*entity.Event {
 
 var (
 	fixedWorkspace = uuid.MustParse("11111111-2222-3333-4444-555555555555")
+	fixedClusterID = uuid.MustParse("99999999-8888-7777-6666-555555555555")
 	fixedNow       = time.Date(2026, 4, 24, 12, 0, 0, 0, time.UTC)
 )
 
@@ -49,7 +50,7 @@ var (
 // produce events with the same external_id, cluster_id, and source_id.
 func TestClusterAnchorPublisher_PublishOnceIsIdempotent(t *testing.T) {
 	pub1 := &anchorFakePublisher{}
-	p1, err := controller.NewClusterAnchorPublisher(pub1, fixedWorkspace, "prod-eu", "v1.31.1", "https://api:6443")
+	p1, err := controller.NewClusterAnchorPublisher(pub1, fixedWorkspace, fixedClusterID, "prod-eu", "v1.31.1", "https://api:6443")
 	if err != nil {
 		t.Fatalf("new pub1: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestClusterAnchorPublisher_PublishOnceIsIdempotent(t *testing.T) {
 
 	// Second "restart": fresh publisher instance, same config.
 	pub2 := &anchorFakePublisher{}
-	p2, err := controller.NewClusterAnchorPublisher(pub2, fixedWorkspace, "prod-eu", "v1.31.1", "https://api:6443")
+	p2, err := controller.NewClusterAnchorPublisher(pub2, fixedWorkspace, fixedClusterID, "prod-eu", "v1.31.1", "https://api:6443")
 	if err != nil {
 		t.Fatalf("new pub2: %v", err)
 	}
@@ -81,7 +82,7 @@ func TestClusterAnchorPublisher_PublishOnceIsIdempotent(t *testing.T) {
 	if a.ExternalID != b.ExternalID {
 		t.Fatalf("external_id drift: %q vs %q", a.ExternalID, b.ExternalID)
 	}
-	if a.ExternalID != "k8s_resource/Cluster/prod-eu" {
+	if a.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/prod-eu" {
 		t.Fatalf("external_id = %q", a.ExternalID)
 	}
 	if a.SourceID != b.SourceID {
@@ -100,17 +101,17 @@ func TestClusterAnchorPublisher_PublishOnceIsIdempotent(t *testing.T) {
 // workspace UUID would publish an event the publisher then rejects. Fail
 // closed at construction time so the operator surfaces the misconfiguration.
 func TestClusterAnchorPublisher_RejectsZeroWorkspace(t *testing.T) {
-	_, err := controller.NewClusterAnchorPublisher(&anchorFakePublisher{}, uuid.Nil, "prod-eu", "", "")
+	_, err := controller.NewClusterAnchorPublisher(&anchorFakePublisher{}, uuid.Nil, fixedClusterID, "prod-eu", "", "")
 	if err == nil {
 		t.Fatalf("expected error for zero workspace UUID")
 	}
 }
 
 // TestClusterAnchorPublisher_RejectsEmptyClusterName — ensures we never
-// publish an anchor with external_id "k8s_resource/Cluster/" (trailing
+// publish an anchor with external_id "k8s_resource/99999999-8888-7777-6666-555555555555/Cluster/" (trailing
 // slash) which would collide trivially across workspaces.
 func TestClusterAnchorPublisher_RejectsEmptyClusterName(t *testing.T) {
-	_, err := controller.NewClusterAnchorPublisher(&anchorFakePublisher{}, fixedWorkspace, "", "", "")
+	_, err := controller.NewClusterAnchorPublisher(&anchorFakePublisher{}, fixedWorkspace, fixedClusterID, "", "", "")
 	if err == nil {
 		t.Fatalf("expected error for empty clusterName")
 	}
@@ -118,7 +119,7 @@ func TestClusterAnchorPublisher_RejectsEmptyClusterName(t *testing.T) {
 
 // TestClusterAnchorPublisher_RejectsNilPublisher — defence-in-depth.
 func TestClusterAnchorPublisher_RejectsNilPublisher(t *testing.T) {
-	_, err := controller.NewClusterAnchorPublisher(nil, fixedWorkspace, "prod-eu", "", "")
+	_, err := controller.NewClusterAnchorPublisher(nil, fixedWorkspace, fixedClusterID, "prod-eu", "", "")
 	if err == nil {
 		t.Fatalf("expected error for nil publisher")
 	}

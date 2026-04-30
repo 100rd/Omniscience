@@ -27,12 +27,13 @@ type ConfigMapReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewConfigMapReconciler returns a reconciler with sane defaults.
-func NewConfigMapReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*ConfigMapReconciler, error) {
+func NewConfigMapReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*ConfigMapReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -49,6 +50,7 @@ func NewConfigMapReconciler(c client.Client, pub publisher.Publisher, workspaceI
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -65,7 +67,7 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	err := r.Client.Get(ctx, req.NamespacedName, &cm)
 	switch {
 	case err == nil:
-		ev := entity.ConfigMapToEvent(&cm, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ConfigMapToEvent(&cm, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish configmap event: %w", perr)
@@ -77,7 +79,7 @@ func (r *ConfigMapReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 		stub := &corev1.ConfigMap{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ConfigMapToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ConfigMapToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish configmap deletion: %w", perr)

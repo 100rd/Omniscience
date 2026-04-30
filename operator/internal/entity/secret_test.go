@@ -43,7 +43,7 @@ func hostileSecret() *corev1.Secret {
 // would take in encoding/json).
 func TestSecretToEvent_NeverLeaksValues(t *testing.T) {
 	s := hostileSecret()
-	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	raw, err := json.Marshal(ev)
 	if err != nil {
@@ -74,7 +74,7 @@ func TestSecretToEvent_OptInAnnotationIsIgnored(t *testing.T) {
 	// The Secret mapper has NO opt-in. Even with the same annotation
 	// ConfigMap honours, Secret values stay dropped.
 	s := hostileSecret()
-	ev := entity.SecretToEvent(s, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.SecretToEvent(s, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if _, ok := ev.Metadata["data_values_json"]; ok {
 		t.Fatalf("Secret must NOT honour the index-data annotation: data_values_json is present")
 	}
@@ -85,10 +85,10 @@ func TestSecretToEvent_OptInAnnotationIsIgnored(t *testing.T) {
 
 func TestSecretToEvent_AllowListIsClosed(t *testing.T) {
 	s := hostileSecret()
-	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	allowed := map[string]struct{}{
-		"cluster": {}, "namespace": {}, "name": {}, "kind": {}, "emitter": {},
+		"cluster": {}, "cluster_id": {}, "namespace": {}, "name": {}, "kind": {}, "emitter": {},
 		"secret_type": {}, "data_keys": {}, "data_count": {},
 	}
 	for k := range ev.Metadata {
@@ -120,7 +120,7 @@ func TestSecretToEvent_TLSTypeMetadata(t *testing.T) {
 			corev1.TLSPrivateKeyKey: []byte("CANARY-KEY-PEM"),
 		},
 	}
-	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if ev.Metadata["secret_type"] != "kubernetes.io/tls" {
 		t.Fatalf("secret_type = %q", ev.Metadata["secret_type"])
 	}
@@ -148,8 +148,8 @@ func TestSecretToEvent_NamespacelessFallsBack(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "rogue"},
 		Type:       corev1.SecretTypeOpaque,
 	}
-	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
-	if ev.ExternalID != "k8s_resource/Secret/default/rogue" {
+	ev := entity.SecretToEvent(s, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Secret/default/rogue" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 }

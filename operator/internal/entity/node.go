@@ -18,16 +18,17 @@ import (
 )
 
 // NodeToEvent maps a corev1.Node into an Event. Pure; takes no clients.
-func NodeToEvent(node *corev1.Node, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
-	externalID := EntityKindK8sResource + "/Node/" + node.Name
+func NodeToEvent(node *corev1.Node, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
+	externalID := externalIDForClusterScoped(clusterID, "Node", node.Name)
 	uri := "kube://" + clusterName + "/Node/" + node.Name
 
 	meta := map[string]string{
-		"cluster": clusterName,
-		"name":    node.Name,
-		"kind":    "Node",
-		"ready":   strconv.FormatBool(nodeIsReady(node)),
-		"emitter": "k8s-operator",
+		"cluster":    clusterName,
+		"cluster_id": clusterID.String(),
+		"name":       node.Name,
+		"kind":       "Node",
+		"ready":      strconv.FormatBool(nodeIsReady(node)),
+		"emitter":    "k8s-operator",
 	}
 	// Optional fields: only emitted when the API server has populated them.
 	// Missing keys are clearer to the consumer than empty-string keys.
@@ -45,7 +46,7 @@ func NodeToEvent(node *corev1.Node, action Action, workspaceID uuid.UUID, cluste
 	// is the inverse-direction CONTAINS view — emitted from the startup
 	// hook for Lead-side bookkeeping; the per-Node IN_CLUSTER edge is
 	// what the consumer actually walks.
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 
 	return &Event{
 		SourceID:    deriveSourceID(workspaceID, clusterName),

@@ -114,7 +114,11 @@ type Event struct {
 // PodToEvent maps a corev1.Pod plus an action into an Event. Pure function
 // — takes no clients, no clock injection beyond `now`. The `now` argument is
 // taken explicitly so unit tests can pin a deterministic timestamp.
-func PodToEvent(pod *corev1.Pod, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+//
+// Issue #167: clusterID is the operator-config UUID stamped into external_id
+// and metadata so the same Pod name in two clusters under one workspace
+// produces DISTINCT entities.
+func PodToEvent(pod *corev1.Pod, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := pod.Namespace
 	if namespace == "" {
 		// Cluster-scoped Pod is malformed — but be defensive rather than
@@ -123,7 +127,7 @@ func PodToEvent(pod *corev1.Pod, action Action, workspaceID uuid.UUID, clusterNa
 		namespace = "default"
 	}
 
-	externalID := EntityKindPod + "/Pod/" + namespace + "/" + pod.Name
+	externalID := EntityKindPod + "/" + clusterID.String() + "/Pod/" + namespace + "/" + pod.Name
 	uri := "kube://" + clusterName + "/" + namespace + "/Pod/" + pod.Name
 
 	// SourceID is deterministic per (workspace, cluster) so retries and
@@ -133,13 +137,14 @@ func PodToEvent(pod *corev1.Pod, action Action, workspaceID uuid.UUID, clusterNa
 	sourceID := deriveSourceID(workspaceID, clusterName)
 
 	meta := map[string]string{
-		"cluster":   clusterName,
-		"namespace": namespace,
-		"name":      pod.Name,
-		"kind":      "Pod",
-		"node":      pod.Spec.NodeName,
-		"phase":     string(pod.Status.Phase),
-		"emitter":   "k8s-operator",
+		"cluster":    clusterName,
+		"cluster_id": clusterID.String(),
+		"namespace":  namespace,
+		"name":       pod.Name,
+		"kind":       "Pod",
+		"node":       pod.Spec.NodeName,
+		"phase":      string(pod.Status.Phase),
+		"emitter":    "k8s-operator",
 	}
 	// Intentionally do NOT copy arbitrary user labels into metadata. Doing
 	// so risks logging or storing tenant-supplied PII, and labels can carry
@@ -189,14 +194,15 @@ func DeriveClusterID(workspaceID uuid.UUID, clusterName string) uuid.UUID {
 }
 
 // ClusterExternalID returns the canonical external_id for the per-cluster
-// anchor entity. The format matches the issue body verbatim:
+// anchor entity. As of issue #167 the format includes cluster_id so two
+// clusters under one workspace produce DISTINCT anchor entities:
 //
-//	k8s_resource/Cluster/{cluster_name}
+//	k8s_resource/{cluster_id}/Cluster/{cluster_name}
 //
-// The form deliberately omits the workspace_id — server-side uniqueness is
-// the (workspace_id, external_id) composite, so two workspaces that share a
-// cluster_name produce two distinct rows. #167 will flip a same-workspace
-// collision into a structured error.
-func ClusterExternalID(clusterName string) string {
-	return EntityKindK8sResource + "/Cluster/" + clusterName
+// Server-side uniqueness is the (workspace_id, external_id) composite; with
+// cluster_id in the path two operators in the same workspace cannot collide
+// on the anchor unless they were misconfigured with the same UUID — that
+// case is detected server-side (collision warning + counter).
+func ClusterExternalID(clusterID uuid.UUID, clusterName string) string {
+	return EntityKindK8sResource + "/" + clusterID.String() + "/Cluster/" + clusterName
 }

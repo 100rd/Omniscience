@@ -30,12 +30,13 @@ type SecretReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewSecretReconciler returns a reconciler with sane defaults.
-func NewSecretReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*SecretReconciler, error) {
+func NewSecretReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*SecretReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -52,6 +53,7 @@ func NewSecretReconciler(c client.Client, pub publisher.Publisher, workspaceID u
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -68,7 +70,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	err := r.Client.Get(ctx, req.NamespacedName, &s)
 	switch {
 	case err == nil:
-		ev := entity.SecretToEvent(&s, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.SecretToEvent(&s, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish secret event: %w", perr)
@@ -84,7 +86,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 		stub := &corev1.Secret{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.SecretToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.SecretToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish secret deletion: %w", perr)

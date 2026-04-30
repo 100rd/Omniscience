@@ -84,12 +84,12 @@ func TestRolloutToEvent_CanaryHealthySteadyState(t *testing.T) {
 		nil,
 	)
 
-	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev.WorkspaceID != fixedWorkspace {
 		t.Fatalf("workspace_id = %s, want %s — adversarial label honoured!", ev.WorkspaceID, fixedWorkspace)
 	}
-	if want := "k8s_resource/Rollout/team-a/checkout"; ev.ExternalID != want {
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/Rollout/team-a/checkout"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 	if got := ev.Metadata["strategy"]; got != "canary" {
@@ -118,7 +118,7 @@ func TestRolloutToEvent_CanaryHealthySteadyState(t *testing.T) {
 		t.Fatalf("edge counts owns=%d cur=%d can=%d bg=%d, want 1/1/0/0; edges=%#v",
 			owns, cur, can, bg, ev.TopologyEdges)
 	}
-	wantTarget := "k8s_resource/ReplicaSet/team-a/checkout-abc123"
+	wantTarget := "k8s_resource/99999999-8888-7777-6666-555555555555/ReplicaSet/team-a/checkout-abc123"
 	if e := findEdge(ev.TopologyEdges, "OWNS"); e == nil || e.TargetExternalID != wantTarget {
 		t.Fatalf("OWNS edge target = %v, want %q", e, wantTarget)
 	}
@@ -171,7 +171,7 @@ func TestRolloutToEvent_CanaryMidFlight(t *testing.T) {
 		nil,
 	)
 
-	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if got := ev.Metadata["strategy"]; got != "canary" {
 		t.Fatalf("metadata[strategy] = %q, want %q", got, "canary")
@@ -187,8 +187,8 @@ func TestRolloutToEvent_CanaryMidFlight(t *testing.T) {
 	if got := countEdges(ev.TopologyEdges, "OWNS"); got != 2 {
 		t.Fatalf("OWNS edge count = %d, want 2; edges=%#v", got, ev.TopologyEdges)
 	}
-	wantStable := "k8s_resource/ReplicaSet/team-a/checkout-abc123"
-	wantCandidate := "k8s_resource/ReplicaSet/team-a/checkout-def456"
+	wantStable := "k8s_resource/99999999-8888-7777-6666-555555555555/ReplicaSet/team-a/checkout-abc123"
+	wantCandidate := "k8s_resource/99999999-8888-7777-6666-555555555555/ReplicaSet/team-a/checkout-def456"
 
 	// Confirm both stable + candidate appear among OWNS targets.
 	seen := map[string]bool{}
@@ -238,7 +238,7 @@ func TestRolloutToEvent_CanaryPaused(t *testing.T) {
 		nil,
 	)
 
-	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if got := ev.Metadata["phase"]; got != "Paused" {
 		t.Fatalf("metadata[phase] = %q, want %q", got, "Paused")
@@ -277,7 +277,7 @@ func TestRolloutToEvent_CanaryDegraded(t *testing.T) {
 		nil,
 	)
 
-	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if got := ev.Metadata["phase"]; got != "Degraded" {
 		t.Fatalf("metadata[phase] = %q, want %q", got, "Degraded")
@@ -322,7 +322,7 @@ func TestRolloutToEvent_BlueGreenMidFlight(t *testing.T) {
 		nil,
 	)
 
-	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if got := ev.Metadata["strategy"]; got != "blueGreen" {
 		t.Fatalf("metadata[strategy] = %q, want %q", got, "blueGreen")
@@ -337,13 +337,13 @@ func TestRolloutToEvent_BlueGreenMidFlight(t *testing.T) {
 	if bg == nil {
 		t.Fatalf("BLUEGREEN_ACTIVE missing; edges=%#v", ev.TopologyEdges)
 	}
-	want := "k8s_resource/Service/team-a/checkout-active"
+	want := "k8s_resource/99999999-8888-7777-6666-555555555555/Service/team-a/checkout-active"
 	if bg.TargetExternalID != want {
 		t.Fatalf("BLUEGREEN_ACTIVE target = %q, want %q", bg.TargetExternalID, want)
 	}
 	// CURRENT_VERSION points at the current RS.
 	cur := findEdge(ev.TopologyEdges, "CURRENT_VERSION")
-	if cur == nil || cur.TargetExternalID != "k8s_resource/ReplicaSet/team-a/checkout-green2" {
+	if cur == nil || cur.TargetExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/ReplicaSet/team-a/checkout-green2" {
 		t.Fatalf("CURRENT_VERSION target = %v, want checkout-green2", cur)
 	}
 }
@@ -356,12 +356,12 @@ func TestRolloutToEvent_DeletionStubProducesWellFormedEvent(t *testing.T) {
 	stub := &rolloutsv1alpha1.Rollout{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout"},
 	}
-	ev := entity.RolloutToEvent(stub, entity.ActionDeleted, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(stub, entity.ActionDeleted, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev.Action != entity.ActionDeleted {
 		t.Fatalf("action = %q, want %q", ev.Action, entity.ActionDeleted)
 	}
-	if want := "k8s_resource/Rollout/team-a/checkout"; ev.ExternalID != want {
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/Rollout/team-a/checkout"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 	// No status fields → no edges.
@@ -390,7 +390,7 @@ func TestRolloutToEvent_AdversarialWorkspaceLabelIgnored(t *testing.T) {
 		rolloutsv1alpha1.RolloutStatus{Phase: rolloutsv1alpha1.RolloutPhaseHealthy},
 		nil,
 	)
-	ev := entity.RolloutToEvent(r, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if ev.WorkspaceID != fixedWorkspace {
 		t.Fatalf("workspace_id = %s, want %s — adversarial label honoured!", ev.WorkspaceID, fixedWorkspace)
 	}
@@ -408,14 +408,14 @@ func TestRolloutToEvent_OwnerEdgesFromOwnerReferences(t *testing.T) {
 		rolloutsv1alpha1.RolloutStatus{Phase: rolloutsv1alpha1.RolloutPhaseHealthy},
 		owners,
 	)
-	ev := entity.RolloutToEvent(r, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.Edges) != 1 {
 		t.Fatalf("ownerReferences edge count = %d, want 1; got %#v", len(ev.Edges), ev.Edges)
 	}
 	if got := ev.Edges[0].FromKind; got != "Application" {
 		t.Fatalf("owner edge from_kind = %q, want %q", got, "Application")
 	}
-	if got := ev.Edges[0].FromExternalID; got != "k8s_resource/Application/team-a/checkout-app" {
+	if got := ev.Edges[0].FromExternalID; got != "k8s_resource/99999999-8888-7777-6666-555555555555/Application/team-a/checkout-app" {
 		t.Fatalf("owner edge from_external_id = %q, want k8s_resource/Application/team-a/checkout-app", got)
 	}
 }
@@ -424,7 +424,7 @@ func TestRolloutToEvent_NoStrategyOmitsStrategyMetadata(t *testing.T) {
 	// Empty spec.strategy (both pointers nil) — defensive path. We omit
 	// metadata[strategy] rather than guessing.
 	r := rolloutFixture("team-a", "checkout", nil, rolloutsv1alpha1.RolloutStatus{}, nil)
-	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.RolloutToEvent(r, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if _, ok := ev.Metadata["strategy"]; ok {
 		t.Fatalf("metadata[strategy] should be absent when both sub-strategies are nil")
 	}

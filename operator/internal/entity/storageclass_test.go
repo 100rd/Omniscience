@@ -29,16 +29,16 @@ func TestStorageClassToEvent_HappyPath(t *testing.T) {
 		},
 		ReclaimPolicy: &retain,
 	}
-	ev := entity.StorageClassToEvent(sc, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.StorageClassToEvent(sc, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
-	if ev.ExternalID != "k8s_resource/StorageClass/gp3" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/StorageClass/gp3" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if strings.Contains(ev.ExternalID, "//") {
 		t.Fatalf("external_id contains leading //: %q", ev.ExternalID)
 	}
 	expected := map[string]string{
-		"cluster":        "prod-eu",
+		"cluster":        "prod-eu", "cluster_id": "99999999-8888-7777-6666-555555555555",
 		"name":           "gp3",
 		"kind":           "StorageClass",
 		"provisioner":    "ebs.csi.aws.com",
@@ -70,7 +70,7 @@ func TestStorageClassToEvent_NoParametersNoReclaimPolicy(t *testing.T) {
 		ObjectMeta:  metav1.ObjectMeta{Name: "minimal"},
 		Provisioner: "kubernetes.io/no-provisioner",
 	}
-	ev := entity.StorageClassToEvent(sc, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.StorageClassToEvent(sc, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if _, ok := ev.Metadata["reclaim_policy"]; ok {
 		t.Fatalf("reclaim_policy must be absent when ReclaimPolicy is nil")
 	}
@@ -84,7 +84,7 @@ func TestStorageClassToEvent_EmitsInClusterEdge(t *testing.T) {
 		ObjectMeta:  metav1.ObjectMeta{Name: "gp3"},
 		Provisioner: "ebs.csi.aws.com",
 	}
-	ev := entity.StorageClassToEvent(sc, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.StorageClassToEvent(sc, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.TopologyEdges) != 1 {
 		t.Fatalf("expected 1 edge, got %d", len(ev.TopologyEdges))
 	}

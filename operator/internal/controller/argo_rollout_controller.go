@@ -46,13 +46,14 @@ type ArgoRolloutReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewArgoRolloutReconciler returns a reconciler with sane defaults and the
 // same precondition checks the other reconcilers enforce.
-func NewArgoRolloutReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*ArgoRolloutReconciler, error) {
+func NewArgoRolloutReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*ArgoRolloutReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -69,6 +70,7 @@ func NewArgoRolloutReconciler(c client.Client, pub publisher.Publisher, workspac
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -85,7 +87,7 @@ func (r *ArgoRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Client.Get(ctx, req.NamespacedName, &ro)
 	switch {
 	case err == nil:
-		ev := entity.RolloutToEvent(&ro, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.RolloutToEvent(&ro, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish rollout event: %w", perr)
@@ -97,7 +99,7 @@ func (r *ArgoRolloutReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		stub := &rolloutsv1alpha1.Rollout{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.RolloutToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.RolloutToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish rollout deletion: %w", perr)

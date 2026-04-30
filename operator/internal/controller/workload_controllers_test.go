@@ -91,7 +91,7 @@ func req(namespace, name string) ctrl.Request {
 func TestNewDeploymentReconciler_RejectsZeroWorkspace(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
-	if _, err := controller.NewDeploymentReconciler(c, &fakePublisher{}, uuid.UUID{}, "x"); err == nil {
+	if _, err := controller.NewDeploymentReconciler(c, &fakePublisher{}, uuid.UUID{}, fixedClusterID, "x"); err == nil {
 		t.Fatalf("expected error on zero workspace UUID")
 	}
 }
@@ -99,7 +99,7 @@ func TestNewDeploymentReconciler_RejectsZeroWorkspace(t *testing.T) {
 func TestNewReplicaSetReconciler_RejectsEmptyCluster(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
-	if _, err := controller.NewReplicaSetReconciler(c, &fakePublisher{}, tcWorkspace, ""); err == nil {
+	if _, err := controller.NewReplicaSetReconciler(c, &fakePublisher{}, tcWorkspace, fixedClusterID, ""); err == nil {
 		t.Fatalf("expected error on empty cluster name")
 	}
 }
@@ -107,13 +107,13 @@ func TestNewReplicaSetReconciler_RejectsEmptyCluster(t *testing.T) {
 func TestNewStatefulSetReconciler_RejectsNilPublisher(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
-	if _, err := controller.NewStatefulSetReconciler(c, nil, tcWorkspace, "x"); err == nil {
+	if _, err := controller.NewStatefulSetReconciler(c, nil, tcWorkspace, fixedClusterID, "x"); err == nil {
 		t.Fatalf("expected error on nil publisher")
 	}
 }
 
 func TestNewDaemonSetReconciler_RejectsNilClient(t *testing.T) {
-	if _, err := controller.NewDaemonSetReconciler(nil, &fakePublisher{}, tcWorkspace, "x"); err == nil {
+	if _, err := controller.NewDaemonSetReconciler(nil, &fakePublisher{}, tcWorkspace, fixedClusterID, "x"); err == nil {
 		t.Fatalf("expected error on nil client")
 	}
 }
@@ -121,7 +121,7 @@ func TestNewDaemonSetReconciler_RejectsNilClient(t *testing.T) {
 func TestNewJobReconciler_OK(t *testing.T) {
 	s := newScheme(t)
 	c := fake.NewClientBuilder().WithScheme(s).Build()
-	if _, err := controller.NewJobReconciler(c, &fakePublisher{}, tcWorkspace, "x"); err != nil {
+	if _, err := controller.NewJobReconciler(c, &fakePublisher{}, tcWorkspace, fixedClusterID, "x"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -144,7 +144,7 @@ func TestDeploymentReconciler_ReconcileEmitsUpdatedWithWorkspaceStamp(t *testing
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(d).Build()
 	pub := &fakePublisher{}
 
-	r, err := controller.NewDeploymentReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewDeploymentReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestDeploymentReconciler_ReconcileEmitsUpdatedWithWorkspaceStamp(t *testing
 	if ev.Action != entity.ActionUpdated {
 		t.Fatalf("action = %q, want %q", ev.Action, entity.ActionUpdated)
 	}
-	if ev.ExternalID != "k8s_resource/Deployment/team-a/checkout" {
+	if ev.ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Deployment/team-a/checkout" {
 		t.Fatalf("external_id = %q", ev.ExternalID)
 	}
 	if !ev.EmittedAt.Equal(tcFixedTime) {
@@ -188,7 +188,7 @@ func TestReplicaSetReconciler_ReconcileEmitsOwnsEdge(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(rs).Build()
 	pub := &fakePublisher{}
 
-	r, err := controller.NewReplicaSetReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewReplicaSetReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestStatefulSetReconciler_ReconcileEmitsUpsert(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ss).Build()
 	pub := &fakePublisher{}
 
-	r, err := controller.NewStatefulSetReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewStatefulSetReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestStatefulSetReconciler_ReconcileEmitsUpsert(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	got := pub.snapshot()
-	if len(got) != 1 || got[0].ExternalID != "k8s_resource/StatefulSet/team-a/kafka" {
+	if len(got) != 1 || got[0].ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/StatefulSet/team-a/kafka" {
 		t.Fatalf("got %#v", got)
 	}
 }
@@ -239,7 +239,7 @@ func TestDaemonSetReconciler_ReconcileEmitsUpsertWithStatusReplicas(t *testing.T
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(ds).Build()
 	pub := &fakePublisher{}
 
-	r, err := controller.NewDaemonSetReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewDaemonSetReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestJobReconciler_ReconcileEmitsUpsert(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(j).Build()
 	pub := &fakePublisher{}
 
-	r, err := controller.NewJobReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewJobReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}
@@ -274,7 +274,7 @@ func TestJobReconciler_ReconcileEmitsUpsert(t *testing.T) {
 		t.Fatalf("reconcile: %v", err)
 	}
 	got := pub.snapshot()
-	if len(got) != 1 || got[0].ExternalID != "k8s_resource/Job/team-a/nightly" {
+	if len(got) != 1 || got[0].ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Job/team-a/nightly" {
 		t.Fatalf("got %#v", got)
 	}
 	if got[0].Metadata["replicas"] != "2" || got[0].Metadata["available_replicas"] != "1" {
@@ -290,7 +290,7 @@ func TestDeploymentReconciler_NotFoundEmitsDeleted(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).Build()
 	pub := &fakePublisher{}
 
-	r, err := controller.NewDeploymentReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewDeploymentReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}
@@ -301,7 +301,7 @@ func TestDeploymentReconciler_NotFoundEmitsDeleted(t *testing.T) {
 	if len(got) != 1 || got[0].Action != entity.ActionDeleted {
 		t.Fatalf("got %#v, want one deleted event", got)
 	}
-	if got[0].ExternalID != "k8s_resource/Deployment/team-a/checkout" {
+	if got[0].ExternalID != "k8s_resource/99999999-8888-7777-6666-555555555555/Deployment/team-a/checkout" {
 		t.Fatalf("external_id = %q", got[0].ExternalID)
 	}
 }
@@ -318,7 +318,7 @@ func TestJobReconciler_PublishErrorIsReturned(t *testing.T) {
 	c := fake.NewClientBuilder().WithScheme(s).WithObjects(j).Build()
 	pub := &fakePublisher{errOnPublish: errors.New("nats down")}
 
-	r, err := controller.NewJobReconciler(c, pub, tcWorkspace, tcClusterName)
+	r, err := controller.NewJobReconciler(c, pub, tcWorkspace, fixedClusterID, tcClusterName)
 	if err != nil {
 		t.Fatalf("new reconciler: %v", err)
 	}

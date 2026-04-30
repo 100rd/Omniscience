@@ -27,12 +27,13 @@ type NamespaceReconciler struct {
 	Client      client.Client
 	Publisher   publisher.Publisher
 	WorkspaceID uuid.UUID
+	ClusterID   uuid.UUID
 	ClusterName string
 	Now         func() time.Time
 }
 
 // NewNamespaceReconciler returns a reconciler with sane defaults.
-func NewNamespaceReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterName string) (*NamespaceReconciler, error) {
+func NewNamespaceReconciler(c client.Client, pub publisher.Publisher, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string) (*NamespaceReconciler, error) {
 	if c == nil {
 		return nil, errors.New("controller: client must not be nil")
 	}
@@ -49,6 +50,7 @@ func NewNamespaceReconciler(c client.Client, pub publisher.Publisher, workspaceI
 		Client:      c,
 		Publisher:   pub,
 		WorkspaceID: workspaceID,
+		ClusterID:   clusterID,
 		ClusterName: clusterName,
 		Now:         time.Now,
 	}, nil
@@ -65,7 +67,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	err := r.Client.Get(ctx, req.NamespacedName, &ns)
 	switch {
 	case err == nil:
-		ev := entity.NamespaceToEvent(&ns, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.NamespaceToEvent(&ns, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish namespace event: %w", perr)
@@ -76,7 +78,7 @@ func (r *NamespaceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	case apierrors.IsNotFound(err):
 		stub := &corev1.Namespace{}
 		stub.Name = req.Name
-		ev := entity.NamespaceToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.NamespaceToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish namespace deletion: %w", perr)

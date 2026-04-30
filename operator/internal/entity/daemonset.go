@@ -31,15 +31,16 @@ func DaemonSetToEvent(
 	ds *appsv1.DaemonSet,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
-	ev := newWorkloadEvent(kindDaemonSet, ds.Namespace, ds.Name, action, workspaceID, clusterName, now)
+	ev := newWorkloadEvent(kindDaemonSet, ds.Namespace, ds.Name, action, workspaceID, clusterID, clusterName, now)
 
 	ev.Metadata["replicas"] = formatReplicas(ds.Status.DesiredNumberScheduled)
 	ev.Metadata["available_replicas"] = formatReplicas(ds.Status.NumberAvailable)
 
-	ev.Edges = ownerEdges(ds.OwnerReferences, defaultedNamespace(ds.Namespace), ev.ExternalID)
+	ev.Edges = ownerEdges(clusterID, ds.OwnerReferences, defaultedNamespace(ds.Namespace), ev.ExternalID)
 
 	return ev
 }

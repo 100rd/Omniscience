@@ -35,10 +35,11 @@ func DeploymentToEvent(
 	d *appsv1.Deployment,
 	action Action,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	now time.Time,
 ) *Event {
-	ev := newWorkloadEvent(kindDeployment, d.Namespace, d.Name, action, workspaceID, clusterName, now)
+	ev := newWorkloadEvent(kindDeployment, d.Namespace, d.Name, action, workspaceID, clusterID, clusterName, now)
 
 	// Replicas counts are status fields populated by the K8s control plane,
 	// not user input — safe to copy. spec.replicas is *int32 (nil → server
@@ -52,7 +53,7 @@ func DeploymentToEvent(
 	// (no owner) — but it CAN be owned by e.g. a Helm-managed CRD or by
 	// a higher-level operator (ArgoCD Application). Honour whatever K8s
 	// populates; do not invent.
-	ev.Edges = ownerEdges(d.OwnerReferences, defaultedNamespace(d.Namespace), ev.ExternalID)
+	ev.Edges = ownerEdges(clusterID, d.OwnerReferences, defaultedNamespace(d.Namespace), ev.ExternalID)
 
 	return ev
 }

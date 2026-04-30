@@ -49,7 +49,7 @@ func newDeployment(namespace, name string, replicas, available int32, owners []m
 
 func TestDeploymentToEvent_FieldsAreCorrect(t *testing.T) {
 	d := newDeployment("team-a", "checkout", 3, 2, nil)
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev.SourceType != entity.SourceType {
 		t.Fatalf("source_type = %q, want %q", ev.SourceType, entity.SourceType)
@@ -60,7 +60,7 @@ func TestDeploymentToEvent_FieldsAreCorrect(t *testing.T) {
 	if ev.Action != entity.ActionCreated {
 		t.Fatalf("action = %q, want %q", ev.Action, entity.ActionCreated)
 	}
-	if want := "k8s_resource/Deployment/team-a/checkout"; ev.ExternalID != want {
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/Deployment/team-a/checkout"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 	if want := "kube://prod-eu/team-a/Deployment/checkout"; ev.URI != want {
@@ -79,10 +79,10 @@ func TestDeploymentToEvent_FieldsAreCorrect(t *testing.T) {
 
 func TestDeploymentToEvent_DoesNotLeakUserLabelsOrAnnotations(t *testing.T) {
 	d := newDeployment("team-a", "checkout", 3, 2, nil)
-	ev := entity.DeploymentToEvent(d, entity.ActionUpdated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionUpdated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	expected := map[string]string{
-		"cluster":            "prod-eu",
+		"cluster":            "prod-eu", "cluster_id": "99999999-8888-7777-6666-555555555555",
 		"namespace":          "team-a",
 		"name":               "checkout",
 		"kind":               "Deployment",
@@ -106,7 +106,7 @@ func TestDeploymentToEvent_AdversarialWorkspaceLabelIgnored(t *testing.T) {
 	// workspace_id. The mapper takes the tenant boundary as a parameter
 	// (operator config) and never reads it from the resource.
 	d := newDeployment("team-a", "checkout", 1, 1, nil)
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev.WorkspaceID != fixedWorkspace {
 		t.Fatalf("workspace_id = %s, want %s — adversarial label was honoured!", ev.WorkspaceID, fixedWorkspace)
@@ -126,7 +126,7 @@ func TestDeploymentToEvent_OwnerEdgesFromOwnerReferences(t *testing.T) {
 		},
 	}
 	d := newDeployment("team-a", "checkout", 3, 3, owners)
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if len(ev.Edges) != 1 {
 		t.Fatalf("edges count = %d, want 1; edges = %#v", len(ev.Edges), ev.Edges)
@@ -138,7 +138,7 @@ func TestDeploymentToEvent_OwnerEdgesFromOwnerReferences(t *testing.T) {
 	if got.FromKind != "Application" {
 		t.Fatalf("edge from_kind = %q, want %q", got.FromKind, "Application")
 	}
-	wantFrom := "k8s_resource/Application/team-a/checkout-app"
+	wantFrom := "k8s_resource/99999999-8888-7777-6666-555555555555/Application/team-a/checkout-app"
 	if got.FromExternalID != wantFrom {
 		t.Fatalf("edge from_external_id = %q, want %q", got.FromExternalID, wantFrom)
 	}
@@ -152,7 +152,7 @@ func TestDeploymentToEvent_OwnerEdgesFromOwnerReferences(t *testing.T) {
 
 func TestDeploymentToEvent_NoOwnerReferencesEmitsNoEdges(t *testing.T) {
 	d := newDeployment("team-a", "checkout", 3, 3, nil)
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.Edges) != 0 {
 		t.Fatalf("edges = %#v, want empty (no ownerReferences)", ev.Edges)
 	}
@@ -166,7 +166,7 @@ func TestDeploymentToEvent_MultipleOwnerReferences(t *testing.T) {
 		{Kind: "HelmRelease", Name: "rel1", UID: "u2"},
 	}
 	d := newDeployment("team-a", "checkout", 1, 1, owners)
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.Edges) != 2 {
 		t.Fatalf("edges count = %d, want 2; got %#v", len(ev.Edges), ev.Edges)
 	}
@@ -181,12 +181,12 @@ func TestDeploymentToEvent_DeletionStubEmitsCorrectExternalID(t *testing.T) {
 			Name:      "checkout",
 		},
 	}
-	ev := entity.DeploymentToEvent(stub, entity.ActionDeleted, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(stub, entity.ActionDeleted, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 
 	if ev.Action != entity.ActionDeleted {
 		t.Fatalf("action = %q, want %q", ev.Action, entity.ActionDeleted)
 	}
-	if want := "k8s_resource/Deployment/team-a/checkout"; ev.ExternalID != want {
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/Deployment/team-a/checkout"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 	if _, hasReplicas := ev.Metadata["replicas"]; hasReplicas {
@@ -198,8 +198,8 @@ func TestDeploymentToEvent_NamespacelessFallsBackSafely(t *testing.T) {
 	stub := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: "rogue"},
 	}
-	ev := entity.DeploymentToEvent(stub, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
-	if want := "k8s_resource/Deployment/default/rogue"; ev.ExternalID != want {
+	ev := entity.DeploymentToEvent(stub, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
+	if want := "k8s_resource/99999999-8888-7777-6666-555555555555/Deployment/default/rogue"; ev.ExternalID != want {
 		t.Fatalf("external_id = %q, want %q", ev.ExternalID, want)
 	}
 }
@@ -214,7 +214,7 @@ func TestDeploymentToEvent_MalformedOwnerReferenceSkipped(t *testing.T) {
 		{Kind: "Application", Name: "ok", UID: "u3"},
 	}
 	d := newDeployment("team-a", "checkout", 1, 1, owners)
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if len(ev.Edges) != 1 {
 		t.Fatalf("edges count = %d, want 1 (malformed entries skipped); got %#v", len(ev.Edges), ev.Edges)
 	}
@@ -230,7 +230,7 @@ func TestDeploymentToEvent_NilSpecReplicasOmittedFromMetadata(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "checkout"},
 		Status:     appsv1.DeploymentStatus{AvailableReplicas: 0},
 	}
-	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, "prod-eu", fixedNow)
+	ev := entity.DeploymentToEvent(d, entity.ActionCreated, fixedWorkspace, fixedClusterID, "prod-eu", fixedNow)
 	if _, ok := ev.Metadata["replicas"]; ok {
 		t.Fatalf("metadata[replicas] should be absent when spec.replicas is nil; got %q", ev.Metadata["replicas"])
 	}

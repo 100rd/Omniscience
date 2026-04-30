@@ -34,14 +34,14 @@ const EntityKindResourceClaimTemplate = "ResourceClaimTemplate"
 
 // ResourceClaimTemplateToEvent maps a v1beta1.ResourceClaimTemplate into an
 // Event. Pure function — no client, no clock injection beyond `now`.
-func ResourceClaimTemplateToEvent(tpl *resourcev1beta1.ResourceClaimTemplate, action Action, workspaceID uuid.UUID, clusterName string, now time.Time) *Event {
+func ResourceClaimTemplateToEvent(tpl *resourcev1beta1.ResourceClaimTemplate, action Action, workspaceID uuid.UUID, clusterID uuid.UUID, clusterName string, now time.Time) *Event {
 	namespace := defaultedNamespace(tpl.Namespace)
-	externalID := externalID(EntityKindResourceClaimTemplate, namespace, tpl.Name)
+	externalID := externalID(clusterID, EntityKindResourceClaimTemplate, namespace, tpl.Name)
 	uri := resourceURI(clusterName, namespace, EntityKindResourceClaimTemplate, tpl.Name)
 
-	meta := baseMetadata(clusterName, namespace, EntityKindResourceClaimTemplate, tpl.Name)
+	meta := baseMetadata(clusterID, clusterName, namespace, EntityKindResourceClaimTemplate, tpl.Name)
 
-	edges := []EdgeRef{inClusterEdge(clusterName)}
+	edges := []EdgeRef{inClusterEdge(clusterID, clusterName)}
 	for _, target := range templateAllocatesEdgeTargets(tpl) {
 		edges = append(edges, EdgeRef{
 			Kind:             EdgeKindAllocates,
@@ -58,7 +58,7 @@ func ResourceClaimTemplateToEvent(tpl *resourcev1beta1.ResourceClaimTemplate, ac
 		WorkspaceID:   workspaceID,
 		EmittedAt:     now.UTC(),
 		Metadata:      meta,
-		Edges:         ownerEdges(tpl.OwnerReferences, namespace, externalID),
+		Edges:         ownerEdges(clusterID, tpl.OwnerReferences, namespace, externalID),
 		TopologyEdges: edges,
 	}
 }
