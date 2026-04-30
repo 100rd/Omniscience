@@ -23,6 +23,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
+	"github.com/100rd/omniscience/operator/internal/argocd"
 	"github.com/100rd/omniscience/operator/internal/config"
 	"github.com/100rd/omniscience/operator/internal/controller"
 	"github.com/100rd/omniscience/operator/internal/publisher"
@@ -209,6 +210,24 @@ func run() error {
 		return fmt.Errorf("storageclass reconciler setup: %w", err)
 	}
 	// --- END issue #159 ---
+
+	// ─── BEGIN issue #160: ArgoCD CRD coverage (discovery-gated) ──────────
+	// Discovery-based opt-in: probe the API server for ArgoCD CRDs and
+	// register controllers only for the ones that are present. When the
+	// CRDs are absent we log INFO "argocd.crd.absent" and continue — the
+	// operator MUST NOT fail-close on a missing optional CRD (issue #160 §A).
+	//
+	// A discovery error that is NOT "group not found" is logged but does
+	// not crash the operator — degrading gracefully to "no ArgoCD watchers"
+	// is preferable to wedging the entire watch set on a transient API
+	// server hiccup at startup.
+	argoPresence, argoErr := argocd.DiscoverFromRESTConfig(ctrl.GetConfigOrDie())
+	if argoErr != nil {
+		logger.Error(argoErr, "argocd discovery failed; continuing without ArgoCD watchers")
+	} else if err := controller.SetupArgoCDWatchers(mgr, logger, argoPresence, pub, cfg.WorkspaceID, cfg.ClusterName); err != nil {
+		return fmt.Errorf("argocd watchers setup: %w", err)
+	}
+	// ─── END issue #160 ───────────────────────────────────────────────────
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
