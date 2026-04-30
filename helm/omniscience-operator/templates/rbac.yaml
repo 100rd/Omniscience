@@ -57,6 +57,18 @@ rules:
     resources: ["applications", "applicationsets"]
     verbs: ["get", "list", "watch"]
   # ── end #160 ──────────────────────────────────────────────────────────
+  # ── #161 Argo Rollouts CRD coverage ───────────────────────────────────
+  # Read-only verbs on the Rollout CRD. Discovery is fail-open at the
+  # operator side: if the CRD is not installed the watcher is never
+  # registered, but the rule is harmless — RBAC permissions on a non-
+  # existent resource are inert. Only `rollouts` is granted in this issue;
+  # AnalysisRun / AnalysisTemplate / Experiment are NOT pre-granted (they
+  # land with their own controllers in follow-up issues so RBAC always
+  # mirrors the watcher set exactly).
+  - apiGroups: ["argoproj.io"]
+    resources: ["rollouts"]
+    verbs: ["get", "list", "watch"]
+  # ── end #161 ──────────────────────────────────────────────────────────
   # Leader election lease — namespaced; gated to the operator's own namespace
   # below.
   {{- if .Values.leaderElection.enabled }}
