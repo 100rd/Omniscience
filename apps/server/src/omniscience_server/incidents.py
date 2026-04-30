@@ -75,6 +75,13 @@ from omniscience_server.as_of import (
     record_request_duration,
     resolve_effective_as_of,
 )
+from omniscience_server.incidents_scoring import (
+    DEFAULT_CONFIDENCE_THRESHOLD,
+    IncidentScoringConfig,
+    apply_weights,
+    compute_components,
+    load_workspace_config,
+)
 
 # ---------------------------------------------------------------------------
 # Module constants — no magic numbers in the algorithm body
@@ -315,15 +322,20 @@ async def mcp_resolve_incident(
                 raise
 
         classified = _classify_neighbours(graph_result)
-        confidence = _compute_confidence(
+        scoring_config = await _load_scoring_config(app, workspace_id)
+        confidence = _score_incident(
             alert=seed,
             classified=classified,
+            max_depth=clamped_depth,
+            config=scoring_config,
         )
+        meta = _build_meta(confidence=confidence, config=scoring_config)
         return _build_response(
             alert=seed,
             classified=classified,
             confidence=confidence,
             as_of=normalised_as_of,
+            meta=meta,
         ).model_dump(mode="json")
 
 
@@ -508,6 +520,7 @@ def _build_response(
     classified: _Classified,
     confidence: float,
     as_of: datetime | None,
+    meta: dict[str, Any] | None = None,
 ) -> ResolveIncidentResponse:
     """Produce the bounded :class:`ResolveIncidentResponse` payload."""
     return ResolveIncidentResponse(
@@ -523,8 +536,84 @@ def _build_response(
         slack_threads=[_summarise_thread(t) for t in classified.slack_threads],
         confidence_score=confidence,
         effective_as_of=resolve_effective_as_of(as_of),
-        meta=None,
+        meta=meta,
     )
+
+
+# ---------------------------------------------------------------------------
+# Calibrated scoring + threshold flag (issue #155)
+# ---------------------------------------------------------------------------
+
+
+async def _load_scoring_config(
+    app: FastAPI, workspace_id: uuid.UUID
+) -> IncidentScoringConfig | None:
+    """Look up the per-tenant scoring config; return ``None`` to use v0.1.
+
+    Tolerates a missing or unwired ``db_session_factory`` so unit tests
+    that only stub the graph store keep passing — the tests in
+    :mod:`tests.test_mcp_resolve_incident` plant an :class:`AsyncMock`
+    factory, but legacy fixtures may not.
+    """
+    factory = getattr(app.state, "db_session_factory", None)
+    if factory is None:
+        return None
+    try:
+        async with factory() as session:
+            return await load_workspace_config(session, workspace_id)
+    except Exception:
+        # A misconfigured DB session must NEVER break live incident
+        # resolution; fall back to v0.1 silently.  Telemetry is wired
+        # at the request-duration histogram layer.
+        return None
+
+
+def _score_incident(
+    *,
+    alert: EntityNodeView,
+    classified: _Classified,
+    max_depth: int,
+    config: IncidentScoringConfig | None,
+) -> float:
+    """Pick the calibrated path or fall back to the v0.1 ladder.
+
+    The legacy ladder is preserved verbatim when the workspace has no
+    configured weights — the #184 contract tests assert the four
+    boundary values (0.9 / 0.6 / 0.4 / 0.1) and must keep passing.
+    """
+    if config is None or config.weights is None:
+        return _compute_confidence(alert=alert, classified=classified)
+    components = compute_components(
+        alert_valid_from=alert.valid_from,
+        pr_valid_from=(
+            classified.responsible_pr.valid_from if classified.responsible_pr is not None else None
+        ),
+        has_pr=classified.responsible_pr is not None,
+        has_resource=classified.target_resource is not None,
+        resource_depth=(
+            classified.target_resource.depth if classified.target_resource is not None else 0
+        ),
+        thread_count=len(classified.slack_threads),
+        max_depth=max_depth,
+        pr_recency_window_seconds=PR_RECENCY_WINDOW_SECONDS,
+    )
+    return apply_weights(components, config.weights)
+
+
+def _build_meta(
+    *,
+    confidence: float,
+    config: IncidentScoringConfig | None,
+) -> dict[str, Any] | None:
+    """Populate ``meta.below_trust_threshold`` when the score is below threshold.
+
+    Returns ``None`` when the score clears the threshold so the response
+    shape stays close to v0.1 for high-confidence calls.
+    """
+    threshold = config.confidence_threshold if config is not None else DEFAULT_CONFIDENCE_THRESHOLD
+    if confidence < threshold:
+        return {"below_trust_threshold": True, "confidence_threshold": threshold}
+    return None
 
 
 def _summarise_resource(node: EntityNodeView | None) -> ResourceSummary | None:
