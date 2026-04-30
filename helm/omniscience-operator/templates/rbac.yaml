@@ -48,6 +48,15 @@ rules:
     resources: ["storageclasses"]
     verbs: ["get", "list", "watch"]
   # --- END issue #159 ---
+  # ── #160 ArgoCD CRDs (discovery-skip if absent) ────────────────────────
+  # The controllers register only when the CRDs are present (see
+  # argocd_setup.go::DiscoverArgoCD). RBAC is granted unconditionally —
+  # rules on non-existent resources are inert. Application is namespaced;
+  # ApplicationSet is also namespaced (typically argocd namespace).
+  - apiGroups: ["argoproj.io"]
+    resources: ["applications", "applicationsets"]
+    verbs: ["get", "list", "watch"]
+  # ── end #160 ──────────────────────────────────────────────────────────
   # Leader election lease — namespaced; gated to the operator's own namespace
   # below.
   {{- if .Values.leaderElection.enabled }}
