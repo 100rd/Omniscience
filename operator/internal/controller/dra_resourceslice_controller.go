@@ -74,7 +74,8 @@ func (r *ResourceSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	err := r.Client.Get(ctx, req.NamespacedName, &rc)
 	switch {
 	case err == nil:
-		ev := entity.ResourceSliceToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		// Derived cluster_id (issue #167); see dra_deviceclass_controller.go.
+		ev := entity.ResourceSliceToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceslice event: %w", perr)
@@ -86,7 +87,7 @@ func (r *ResourceSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		stub := &resourcev1beta1.ResourceSlice{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ResourceSliceToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ResourceSliceToEvent(stub, entity.ActionDeleted, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceslice deletion: %w", perr)

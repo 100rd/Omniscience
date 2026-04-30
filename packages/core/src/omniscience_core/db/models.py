@@ -53,6 +53,11 @@ class SourceType(enum.StrEnum):
     aws = "aws"
     alerts = "alerts"
     otel = "otel"
+    # k8s_operator — in-cluster operator emitter (ADR-0007). Distinct from
+    # the agentic ``k8s`` connector during the parallel-deprecation window
+    # (epic #98); allows server-side dedup (#164) and the operator-scoped
+    # read endpoint (#163) to disambiguate.
+    k8s_operator = "k8s_operator"
 
 
 class SourceStatus(enum.StrEnum):

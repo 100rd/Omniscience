@@ -30,6 +30,7 @@ import (
 	"github.com/100rd/omniscience/operator/internal/config"
 	"github.com/100rd/omniscience/operator/internal/controller"
 	"github.com/100rd/omniscience/operator/internal/publisher"
+	"github.com/100rd/omniscience/operator/internal/reconciler"
 )
 
 // scheme is the runtime scheme used by the manager's client and cache.
@@ -189,7 +190,7 @@ func run() error {
 	// ── #190 DRA resource handles — discovery-gated registration ──────────
 	// Probe the API server for resource.k8s.io/v1beta1; absent → log INFO
 	// and skip all 4 DRA controllers. Same fail-open posture as #161.
-	if err := setupDRAWatchers(mgr, pub, cfg.WorkspaceID, cfg.ClusterName, logger); err != nil {
+	if err := setupDRAWatchers(mgr, pub, cfg.WorkspaceID, cfg.ClusterID, cfg.ClusterName, logger); err != nil {
 		return err
 	}
 	// ── end #190 ──────────────────────────────────────────────────────────
@@ -249,6 +250,56 @@ func run() error {
 		return fmt.Errorf("argocd watchers setup: %w", err)
 	}
 	// ─── END issue #160 ───────────────────────────────────────────────────
+
+	// ── #163 reconciliation worker ────────────────────────────────────────
+	// Drift detector that periodically compares cluster state against the
+	// graph slice for (workspace_id, cluster_id) and emits corrective
+	// events. Implements manager.LeaderElectionRunnable, so the manager
+	// only ticks the worker on the leader replica when LeaderElect=true.
+	//
+	// Config knobs (all with safe defaults; see internal/config):
+	//   OMNISCIENCE_RECONCILE_INTERVAL  — default 15m
+	//   OMNISCIENCE_RECONCILE_DRY_RUN   — default false
+	//   OMNISCIENCE_API_BASE_URL        — required to enable
+	//   OMNISCIENCE_API_BEARER_TOKEN    — required to enable (Secret-mounted)
+	//
+	// Empty API URL disables the worker entirely — the rest of the
+	// operator continues to start normally. This preserves the watch path
+	// as the single source of truth in deployments that have not yet
+	// rolled out the read API endpoint server-side.
+	if cfg.APIBaseURL == "" {
+		logger.Info("reconciler.disabled — OMNISCIENCE_API_BASE_URL is empty",
+			"event", "reconciler.disabled",
+		)
+	} else {
+		apiClient, ierr := reconciler.NewHTTPEntitiesClient(cfg.APIBaseURL, cfg.APIBearerToken)
+		if ierr != nil {
+			return fmt.Errorf("reconciler: api client init: %w", ierr)
+		}
+		worker, ierr := reconciler.New(reconciler.Options{
+			K8sClient:   mgr.GetClient(),
+			APIClient:   apiClient,
+			Publisher:   pub,
+			WorkspaceID: cfg.WorkspaceID,
+			ClusterID:   cfg.ClusterID,
+			ClusterName: cfg.ClusterName,
+			Interval:    cfg.ReconcileInterval,
+			DryRun:      cfg.ReconcileDryRun,
+		})
+		if ierr != nil {
+			return fmt.Errorf("reconciler: worker init: %w", ierr)
+		}
+		if ierr := mgr.Add(worker); ierr != nil {
+			return fmt.Errorf("reconciler: mgr.Add: %w", ierr)
+		}
+		logger.Info("reconciler.enabled",
+			"event", "reconciler.enabled",
+			"interval", cfg.ReconcileInterval.String(),
+			"dry_run", cfg.ReconcileDryRun,
+			"api_base_url", cfg.APIBaseURL,
+		)
+	}
+	// ── end #163 ──────────────────────────────────────────────────────────
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		return fmt.Errorf("add healthz: %w", err)
@@ -434,6 +485,7 @@ func setupDRAWatchers(
 	mgr ctrl.Manager,
 	pub publisher.Publisher,
 	workspaceID uuid.UUID,
+	clusterID uuid.UUID,
 	clusterName string,
 	logger interface {
 		Info(msg string, keysAndValues ...interface{})
@@ -461,7 +513,7 @@ func setupDRAWatchers(
 		return fmt.Errorf("dra: add to scheme: %w", err)
 	}
 
-	rcRec, err := controller.NewResourceClaimReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	rcRec, err := controller.NewResourceClaimReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName)
 	if err != nil {
 		return fmt.Errorf("dra: resourceclaim reconciler init: %w", err)
 	}

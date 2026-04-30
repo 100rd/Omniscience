@@ -112,6 +112,31 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# ── Reconciliation worker (#163) ──────────────────────────────────────────────
+# Drift detector that periodically compares cluster state against the
+# Omniscience graph slice for (workspaceId, clusterId) and emits corrective
+# events. See operator/internal/reconciler for the implementation.
+reconciler:
+  # Period between reconcile cycles. 15 minutes is the issue #163 default —
+  # balances drift recovery latency against read-API + cluster-list cost.
+  # Format is any time.ParseDuration value (e.g. "15m", "30m", "1h").
+  interval: 15m
+  # Dry-run mode: log diff and increment metrics, emit ZERO events. Used
+  # for first-time-on-customer-cluster validation before flipping to live.
+  dryRun: false
+
+# Omniscience server read API. The reconciler queries this surface to learn
+# which entities the graph believes exist for (workspaceId, clusterId).
+api:
+  # Absolute base URL of the Omniscience server. Empty disables the
+  # reconciler entirely; the rest of the operator continues to start.
+  baseUrl: ""
+  # Bearer token authenticating the operator to the read API. MUST come
+  # from a Secret-mounted file. The server gates the workspaceId query
+  # parameter against the token's workspace and 403s on mismatch — this
+  # is the load-bearing ACL gate (ADR-0007 §ACL, issue #163).
+  bearerToken: ""
+
 # ── Annotations / labels ──────────────────────────────────────────────────────
 podAnnotations: {}
 podLabels: {}
