@@ -1,0 +1,50 @@
+{
+  "_comment": "Workspace_b parallel dataset. Names overlap with workspace_a deliberately to harden the workspace boundary contract (#117 / ADR-0005). None of these may appear in workspace_a's resolve_incident response.",
+  "workspace_id": "bbbbbbbb-1111-2222-3333-4444bb000154",
+  "alert": {
+    "name": "alert://pagerduty/INC-2026-04-12-002",
+    "kind": "alert",
+    "source": "src-alerts-ws-b",
+    "chunk_text": "PagerDuty (workspace_b): unrelated incident on a foreign tenant",
+    "depth": 0,
+    "edge_type": null,
+    "valid_from": "2026-04-12T20:00:00+00:00"
+  },
+  "neighbours": [
+    {
+      "_role": "colliding_pod_name",
+      "name": "pod/api-7f9b9d4c-xj4kp",
+      "kind": "k8s_pod",
+      "source": "src-alerts-ws-b",
+      "chunk_text": null,
+      "depth": 1,
+      "edge_type": "FIRES_AGAINST",
+      "valid_from": "2026-04-12T19:00:00+00:00"
+    },
+    {
+      "_role": "colliding_pr_url_form",
+      "name": "https://github.com/acme/api/pull/9999",
+      "kind": "pull_request",
+      "source": "src-github-ws-b",
+      "chunk_text": "PR #9999: workspace_b's parallel-tenant PR",
+      "depth": 2,
+      "edge_type": "DEPLOYED_BY",
+      "valid_from": "2026-04-12T17:00:00+00:00"
+    },
+    {
+      "_role": "slack_thread_mentioning_ws_a_pod_name",
+      "name": "slack://channel/C0BFOREIGN/thread/1744500000.000900",
+      "kind": "slack_thread",
+      "source": "src-slack-ws-b",
+      "chunk_text": "carol (workspace_b): mentions pod/api-7f9b9d4c-xj4kp by name — must not surface in ws_a",
+      "depth": 2,
+      "edge_type": "DISCUSSED_IN",
+      "valid_from": "2026-04-12T20:05:00+00:00"
+    }
+  ],
+  "edges": [
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-002", "to_entity": "pod/api-7f9b9d4c-xj4kp", "edge_type": "FIRES_AGAINST"},
+    {"from_entity": "pod/api-7f9b9d4c-xj4kp", "to_entity": "https://github.com/acme/api/pull/9999", "edge_type": "DEPLOYED_BY"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-002", "to_entity": "slack://channel/C0BFOREIGN/thread/1744500000.000900", "edge_type": "DISCUSSED_IN"}
+  ]
+}
