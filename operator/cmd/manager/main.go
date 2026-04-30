@@ -378,8 +378,8 @@ func setupArgoRolloutsWatcher(
 	if !present {
 		// Documented INFO log key so dashboards / log queries can detect the
 		// no-Rollouts state without scraping for a free-form message.
-		logger.Info("argo_rollouts.crd.absent — Argo Rollouts CRD not installed; skipping watcher registration",
-			"event", "argo_rollouts.crd.absent",
+		logger.Info(controller.ArgoRolloutsCRDAbsentLogKey+" — Argo Rollouts CRD not installed; skipping watcher registration",
+			"event", controller.ArgoRolloutsCRDAbsentLogKey,
 			"group_version", controller.ArgoRolloutsGroupVersion,
 		)
 		return nil

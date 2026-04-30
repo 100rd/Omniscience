@@ -35,10 +35,10 @@ import (
 // is the stable contract.
 const ArgoRolloutsGroupVersion = "argoproj.io/v1alpha1"
 
-// argoRolloutsCRDAbsentLogKey is the structured log key emitted at INFO
+// ArgoRolloutsCRDAbsentLogKey is the structured log key emitted at INFO
 // when the Rollouts CRD is not installed. Tools that grep `kubectl logs`
 // for "argo_rollouts.crd.absent" rely on this exact spelling.
-const argoRolloutsCRDAbsentLogKey = "argo_rollouts.crd.absent"
+const ArgoRolloutsCRDAbsentLogKey = "argo_rollouts.crd.absent"
 
 // ArgoRolloutReconciler watches argoproj.io/v1alpha1.Rollout objects and
 // publishes change events. Mirrors DeploymentReconciler exactly.
