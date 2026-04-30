@@ -14,6 +14,7 @@ import (
 	rolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/google/uuid"
 	networkingv1 "k8s.io/api/networking/v1"
+	resourcev1beta1 "k8s.io/api/resource/v1beta1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -184,6 +185,14 @@ func run() error {
 		return err
 	}
 	// ── end #161 ──────────────────────────────────────────────────────────
+
+	// ── #190 DRA resource handles — discovery-gated registration ──────────
+	// Probe the API server for resource.k8s.io/v1beta1; absent → log INFO
+	// and skip all 4 DRA controllers. Same fail-open posture as #161.
+	if err := setupDRAWatchers(mgr, pub, cfg.WorkspaceID, cfg.ClusterName, logger); err != nil {
+		return err
+	}
+	// ── end #190 ──────────────────────────────────────────────────────────
 
 	// --- BEGIN issue #159: cluster-scoped watcher registration ---
 	// Register the four cluster-scoped reconcilers (Node, Namespace,
@@ -407,3 +416,88 @@ func setupArgoRolloutsWatcher(
 }
 
 // ── end #161 ───────────────────────────────────────────────────────────────
+
+// ── #190 DRA resource handles — registration helper ───────────────────────
+//
+// setupDRAWatchers probes the API server for resource.k8s.io/v1beta1 via
+// client-go's discovery interface. Three outcomes:
+//
+//  1. API present → register the v1beta1 type with the manager scheme and
+//     wire all four DRA reconcilers (ResourceClaim, ResourceClaimTemplate,
+//     ResourceSlice, DeviceClass).
+//  2. API absent  → INFO-log "dra.api.absent" and return nil. The rest of
+//     the operator continues to start normally on K8s 1.30 or older.
+//  3. Discovery error → return the error so manager startup fails loudly.
+//     Silently disabling the watchers on a flaky API server would leave
+//     GPU-cluster operators running blind.
+func setupDRAWatchers(
+	mgr ctrl.Manager,
+	pub publisher.Publisher,
+	workspaceID uuid.UUID,
+	clusterName string,
+	logger interface {
+		Info(msg string, keysAndValues ...interface{})
+	},
+) error {
+	disc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("dra: discovery client init: %w", err)
+	}
+
+	present, perr := controller.IsDRAAPIInstalled(disc)
+	if perr != nil {
+		return fmt.Errorf("dra: discovery probe: %w", perr)
+	}
+	if !present {
+		logger.Info(controller.DRAAPIAbsentLogKey+" — DRA API not served; skipping watcher registration",
+			"event", controller.DRAAPIAbsentLogKey,
+			"group_version", controller.DRAGroupVersion,
+		)
+		return nil
+	}
+
+	// API is present — register the typed scheme and wire all 4 reconcilers.
+	if err := resourcev1beta1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("dra: add to scheme: %w", err)
+	}
+
+	rcRec, err := controller.NewResourceClaimReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	if err != nil {
+		return fmt.Errorf("dra: resourceclaim reconciler init: %w", err)
+	}
+	if err := rcRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("dra: resourceclaim reconciler setup: %w", err)
+	}
+
+	rctRec, err := controller.NewResourceClaimTemplateReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	if err != nil {
+		return fmt.Errorf("dra: resourceclaimtemplate reconciler init: %w", err)
+	}
+	if err := rctRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("dra: resourceclaimtemplate reconciler setup: %w", err)
+	}
+
+	rsRec, err := controller.NewResourceSliceReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	if err != nil {
+		return fmt.Errorf("dra: resourceslice reconciler init: %w", err)
+	}
+	if err := rsRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("dra: resourceslice reconciler setup: %w", err)
+	}
+
+	dcRec, err := controller.NewDeviceClassReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	if err != nil {
+		return fmt.Errorf("dra: deviceclass reconciler init: %w", err)
+	}
+	if err := dcRec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("dra: deviceclass reconciler setup: %w", err)
+	}
+
+	logger.Info("dra.api.present — DRA watchers registered",
+		"event", "dra.api.present",
+		"group_version", controller.DRAGroupVersion,
+	)
+	return nil
+}
+
+// ── end #190 ──────────────────────────────────────────────────────────────
