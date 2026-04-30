@@ -11,11 +11,13 @@ import (
 	"fmt"
 	"os"
 
+	rolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/google/uuid"
 	networkingv1 "k8s.io/api/networking/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -173,6 +175,16 @@ func run() error {
 	}
 	// ── end #158 ──────────────────────────────────────────────────────────
 
+	// ── #161 Argo Rollouts CRD coverage — discovery-gated registration ────
+	// Discovery probe is fail-open per ADR-0007 §A and issue #161: when the
+	// CRD is not installed we log INFO and skip registration. A truly
+	// transient discovery failure (5xx, connection refused) is propagated so
+	// startup does not silently disable the watcher on a flaky API server.
+	if err := setupArgoRolloutsWatcher(mgr, pub, cfg.WorkspaceID, cfg.ClusterName, logger); err != nil {
+		return err
+	}
+	// ── end #161 ──────────────────────────────────────────────────────────
+
 	// --- BEGIN issue #159: cluster-scoped watcher registration ---
 	// Register the four cluster-scoped reconcilers (Node, Namespace,
 	// PersistentVolume, StorageClass). Each follows the same constructor /
@@ -327,3 +339,69 @@ func setupNetworkingAndConfigWatchers(
 }
 
 // ── end #158 ────────────────────────────────────────────────────────────────
+
+// ── #161 Argo Rollouts CRD coverage — registration helper ──────────────────
+//
+// setupArgoRolloutsWatcher probes the API server for the Rollouts CRD via
+// client-go's discovery interface. Three outcomes:
+//
+//  1. CRD present  → register the v1alpha1 type with the manager scheme and
+//     wire the ArgoRolloutReconciler.
+//  2. CRD absent   → INFO-log "argo_rollouts.crd.absent" and return nil. The
+//     rest of the operator continues to start normally.
+//  3. Discovery error (transient API-server failure) → return the error so
+//     manager startup fails loudly. Silently disabling the watcher on a
+//     flaky API server would leave the operator running blind without any
+//     signal that progressive-delivery coverage was lost.
+//
+// AddToScheme is called only on the present-path so a stale go-module pin
+// of argo-rollouts cannot accidentally extend the manager cache contract on
+// clusters that don't have the CRD installed.
+func setupArgoRolloutsWatcher(
+	mgr ctrl.Manager,
+	pub publisher.Publisher,
+	workspaceID uuid.UUID,
+	clusterName string,
+	logger interface {
+		Info(msg string, keysAndValues ...interface{})
+	},
+) error {
+	disc, err := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if err != nil {
+		return fmt.Errorf("argo-rollouts: discovery client init: %w", err)
+	}
+
+	present, perr := controller.IsArgoRolloutsCRDInstalled(disc)
+	if perr != nil {
+		return fmt.Errorf("argo-rollouts: discovery probe: %w", perr)
+	}
+	if !present {
+		// Documented INFO log key so dashboards / log queries can detect the
+		// no-Rollouts state without scraping for a free-form message.
+		logger.Info("argo_rollouts.crd.absent — Argo Rollouts CRD not installed; skipping watcher registration",
+			"event", "argo_rollouts.crd.absent",
+			"group_version", controller.ArgoRolloutsGroupVersion,
+		)
+		return nil
+	}
+
+	// CRD is present — register the typed scheme and wire the reconciler.
+	if err := rolloutsv1alpha1.AddToScheme(mgr.GetScheme()); err != nil {
+		return fmt.Errorf("argo-rollouts: add to scheme: %w", err)
+	}
+
+	rec, err := controller.NewArgoRolloutReconciler(mgr.GetClient(), pub, workspaceID, clusterName)
+	if err != nil {
+		return fmt.Errorf("argo-rollouts: reconciler init: %w", err)
+	}
+	if err := rec.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("argo-rollouts: reconciler setup: %w", err)
+	}
+	logger.Info("argo_rollouts.crd.present — Rollout watcher registered",
+		"event", "argo_rollouts.crd.present",
+		"group_version", controller.ArgoRolloutsGroupVersion,
+	)
+	return nil
+}
+
+// ── end #161 ───────────────────────────────────────────────────────────────
