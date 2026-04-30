@@ -48,6 +48,11 @@ spec:
             - name: OMNISCIENCE_NATS_CREDS_FILE
               value: /etc/nats/creds/nats.creds
             {{- end }}
+            # ── #163 reconciliation worker ────────────────────────────────
+            - name: OMNISCIENCE_RECONCILE_INTERVAL
+              value: {{ .Values.reconciler.interval | quote }}
+            - name: OMNISCIENCE_RECONCILE_DRY_RUN
+              value: {{ .Values.reconciler.dryRun | quote }}
           envFrom:
             - secretRef:
                 name: {{ include "omniscience-operator.fullname" . }}-config

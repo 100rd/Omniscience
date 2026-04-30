@@ -14,6 +14,14 @@ class Scope(enum.StrEnum):
     stats_read = "stats:read"
     otel_write = "otel:write"
     incidents_write = "incidents:write"
+    # operator:read — read-only access to operator-emitted entities for the
+    # in-cluster reconciliation worker (issue #163). Distinct from
+    # ``sources:read`` because the operator endpoint is workspace-scoped at
+    # the protocol level (token's workspace_id MUST match query param) and
+    # filters server-side to ``emitter=k8s-operator``. Granting
+    # ``sources:read`` on its own would expose entities from every connector
+    # — narrower scope is the principle-of-least-privilege fix.
+    operator_read = "operator:read"
     admin = "admin"
 
 
@@ -26,6 +34,7 @@ SCOPE_HIERARCHY: dict[Scope, set[Scope]] = {
         Scope.stats_read,
         Scope.otel_write,
         Scope.incidents_write,
+        Scope.operator_read,
         Scope.admin,
     },
     Scope.sources_write: {Scope.sources_write},
@@ -33,6 +42,7 @@ SCOPE_HIERARCHY: dict[Scope, set[Scope]] = {
     Scope.stats_read: {Scope.stats_read},
     Scope.otel_write: {Scope.otel_write},
     Scope.incidents_write: {Scope.incidents_write},
+    Scope.operator_read: {Scope.operator_read},
     Scope.search: {Scope.search},
 }
 

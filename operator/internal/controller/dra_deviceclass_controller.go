@@ -74,7 +74,13 @@ func (r *DeviceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	err := r.Client.Get(ctx, req.NamespacedName, &rc)
 	switch {
 	case err == nil:
-		ev := entity.DeviceClassToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		// Derived cluster_id (issue #167); the DRA reconciler does not yet
+		// carry a ClusterID field — the v0.2 deterministic uuid5 derivation
+		// gives the same value the operator config would compute, keeping
+		// the watch path's external_ids stable for single-cluster deployments.
+		// Multi-cluster DRA coverage requires a follow-up that plumbs
+		// cfg.ClusterID through this constructor.
+		ev := entity.DeviceClassToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish deviceclass event: %w", perr)
@@ -86,7 +92,7 @@ func (r *DeviceClassReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		stub := &resourcev1beta1.DeviceClass{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.DeviceClassToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.DeviceClassToEvent(stub, entity.ActionDeleted, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish deviceclass deletion: %w", perr)

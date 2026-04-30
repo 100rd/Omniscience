@@ -125,6 +125,9 @@ class TestSourceModel:
             "aws",
             "alerts",
             "otel",
+            # Issue #163 — operator emitter, distinct from agentic ``k8s``
+            # for the parallel-deprecation window (epic #98).
+            "k8s_operator",
         }
         assert {t.value for t in SourceType} == expected
 

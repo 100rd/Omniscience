@@ -74,7 +74,9 @@ func (r *ResourceClaimTemplateReconciler) Reconcile(ctx context.Context, req ctr
 	err := r.Client.Get(ctx, req.NamespacedName, &rc)
 	switch {
 	case err == nil:
-		ev := entity.ResourceClaimTemplateToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, r.ClusterName, r.Now())
+		// Derived cluster_id (issue #167); see dra_deviceclass_controller.go
+		// for the rationale. Follow-up plumbs cfg.ClusterID through.
+		ev := entity.ResourceClaimTemplateToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceclaimtemplate event: %w", perr)
@@ -86,7 +88,7 @@ func (r *ResourceClaimTemplateReconciler) Reconcile(ctx context.Context, req ctr
 		stub := &resourcev1beta1.ResourceClaimTemplate{}
 		stub.Namespace = req.Namespace
 		stub.Name = req.Name
-		ev := entity.ResourceClaimTemplateToEvent(stub, entity.ActionDeleted, r.WorkspaceID, r.ClusterName, r.Now())
+		ev := entity.ResourceClaimTemplateToEvent(stub, entity.ActionDeleted, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish deletion failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceclaimtemplate deletion: %w", perr)

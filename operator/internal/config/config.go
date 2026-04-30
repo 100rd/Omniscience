@@ -41,6 +41,26 @@ const (
 	envMetricsAddr = "OMNISCIENCE_METRICS_ADDR"
 	envProbeAddr   = "OMNISCIENCE_PROBE_ADDR"
 	envLeaderElect = "OMNISCIENCE_LEADER_ELECT"
+
+	// ── #163 reconciliation worker ───────────────────────────────────────
+	// envReconcileInterval is the period between reconcile cycles. Default
+	// 15m (issue #163 §Goal). Format is any time.ParseDuration value.
+	envReconcileInterval = "OMNISCIENCE_RECONCILE_INTERVAL"
+	// envReconcileDryRun, when "true", suppresses event emission. Used for
+	// first-time-on-customer-cluster validation per issue #163 §Scope.
+	envReconcileDryRun = "OMNISCIENCE_RECONCILE_DRY_RUN"
+	// envAPIBaseURL is the absolute URL of the Omniscience server, e.g.
+	// "https://omniscience.example". The read API endpoint
+	// "/api/v1/operator/entities" is appended at request time.
+	envAPIBaseURL = "OMNISCIENCE_API_BASE_URL"
+	// envAPIBearerToken is the operator's bearer token for the read API.
+	// MUST come from a Secret-mounted file (see ADR-0007 §ACL); the
+	// server gates the workspace_id query param against the token's
+	// workspace and 403s on mismatch — this is the load-bearing ACL gate.
+	// The #nosec annotation suppresses gosec G101 on the literal substring
+	// "TOKEN" (which it flags as a potential hardcoded credential).
+	envAPIBearerToken = "OMNISCIENCE_API_BEARER_TOKEN" //nolint:gosec // env var name, not a secret
+	// ── end #163 ──────────────────────────────────────────────────────────
 )
 
 // Defaults chosen for v0.2 single-replica operator. Each is named in the
@@ -63,6 +83,12 @@ const (
 
 	// defaultProbeAddr is the health/readiness probe bind address.
 	defaultProbeAddr = ":8081"
+
+	// defaultReconcileInterval is the default period between reconciliation
+	// worker cycles (issue #163 §Goal). 15 minutes is a balance between
+	// drift recovery latency and read-API + cluster-list cost on large
+	// clusters. Tunable via OMNISCIENCE_RECONCILE_INTERVAL.
+	defaultReconcileInterval = 15 * time.Minute
 )
 
 // Config is the resolved operator configuration. All fields are immutable
@@ -104,6 +130,25 @@ type Config struct {
 	MetricsAddr  string
 	ProbeAddr    string
 	LeaderElect  bool
+
+	// ── #163 reconciliation worker ───────────────────────────────────────
+	// ReconcileInterval is the period between reconcile cycles. 15m default.
+	ReconcileInterval time.Duration
+
+	// ReconcileDryRun, when true, suppresses event emission from the
+	// reconciler. Watch-path emission is unaffected.
+	ReconcileDryRun bool
+
+	// APIBaseURL is the absolute URL of the Omniscience read API. Empty
+	// disables the reconciler entirely (the worker is a no-op).
+	APIBaseURL string
+
+	// APIBearerToken authenticates the operator to the read API. MUST come
+	// from a Secret-mounted file (ADR-0007 §ACL). Empty disables the
+	// reconciler when APIBaseURL is also empty; an empty token with a
+	// non-empty URL is a misconfiguration and Load returns an error.
+	APIBearerToken string
+	// ── end #163 ──────────────────────────────────────────────────────────
 }
 
 // Load reads the operator configuration from process environment.
@@ -169,6 +214,30 @@ func Load() (*Config, error) {
 		}
 		cfg.ResyncPeriod = secs
 	}
+
+	// ── #163 reconciliation worker config ────────────────────────────────
+	cfg.ReconcileInterval = defaultReconcileInterval
+	if raw := os.Getenv(envReconcileInterval); raw != "" {
+		d, perr := time.ParseDuration(raw)
+		if perr != nil {
+			return nil, fmt.Errorf("config: %s is not a valid duration: %w", envReconcileInterval, perr)
+		}
+		if d <= 0 {
+			return nil, fmt.Errorf("config: %s must be positive", envReconcileInterval)
+		}
+		cfg.ReconcileInterval = d
+	}
+	cfg.ReconcileDryRun = os.Getenv(envReconcileDryRun) == "true"
+	cfg.APIBaseURL = os.Getenv(envAPIBaseURL)
+	cfg.APIBearerToken = os.Getenv(envAPIBearerToken)
+	// Fail-closed misconfiguration check: a base URL without a token is
+	// always wrong. The reverse (token without URL) is also wrong but
+	// rejecting only the URL+no-token combination is enough — an empty
+	// URL disables the reconciler entirely (worker startup logs that).
+	if cfg.APIBaseURL != "" && cfg.APIBearerToken == "" {
+		return nil, fmt.Errorf("config: %s set but %s is empty (reconciler requires both)", envAPIBaseURL, envAPIBearerToken)
+	}
+	// ── end #163 ──────────────────────────────────────────────────────────
 
 	return cfg, nil
 }
