@@ -84,6 +84,9 @@ ignore = [
 "benchmarks/*" = [
     "S101",  # assert is the standard pytest assertion mechanism
 ]
+"scripts/*" = [
+    "T201",  # print is the standard CLI output mechanism for one-shot scripts
+]
 
 [tool.mypy]
 python_version = "3.12"
