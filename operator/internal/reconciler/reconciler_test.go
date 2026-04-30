@@ -208,7 +208,7 @@ func TestWorker_DryRun_EmitsZeroEventsButObservesDiff(t *testing.T) {
 		Interval:    1 * time.Hour,
 		DryRun:      true,
 		Kinds:       []reconciler.KindHandler{podOnlyKind(t)},
-		Now:         func() time.Time { return time.Now() },
+		Now:         time.Now,
 	})
 	if err != nil {
 		t.Fatalf("worker: %v", err)

@@ -133,7 +133,7 @@ func TestCrossWorkspaceIsolation_NoCrossTalk(t *testing.T) {
 		ClusterName: "cluster-a",
 		Interval:    1 * time.Hour,
 		Kinds:       []reconciler.KindHandler{podOnlyKind(t)},
-		Now:         func() time.Time { return time.Now() },
+		Now:         time.Now,
 	})
 	if err != nil {
 		t.Fatalf("workerA: %v", err)
@@ -147,7 +147,7 @@ func TestCrossWorkspaceIsolation_NoCrossTalk(t *testing.T) {
 		ClusterName: "cluster-b",
 		Interval:    1 * time.Hour,
 		Kinds:       []reconciler.KindHandler{podOnlyKind(t)},
-		Now:         func() time.Time { return time.Now() },
+		Now:         time.Now,
 	})
 	if err != nil {
 		t.Fatalf("workerB: %v", err)
@@ -241,7 +241,7 @@ func TestCrossWorkspaceIsolation_ServerRejectsMismatchedWorkspace(t *testing.T) 
 		ClusterName: "cluster",
 		Interval:    1 * time.Hour,
 		Kinds:       []reconciler.KindHandler{podOnlyKind(t)},
-		Now:         func() time.Time { return time.Now() },
+		Now:         time.Now,
 	})
 	if err != nil {
 		t.Fatalf("worker: %v", err)
