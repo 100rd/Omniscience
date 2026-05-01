@@ -462,6 +462,57 @@ class Edge(Base):
     __table_args__ = (Index("ix_edges_edge_type", "edge_type"),)
 
 
+# ---------------------------------------------------------------------------
+# Entity emitter (server-side dedup state — issue #164)
+# ---------------------------------------------------------------------------
+
+
+class EntityEmitter(Base):
+    """Tracks the authoritative emitter for a ``(workspace_id, external_id)`` pair.
+
+    Used by the ingestion-worker dedup module
+    (:mod:`omniscience_server.ingestion.dedup`) to decide whether an
+    incoming event from the agentic ``k8s`` connector should be accepted
+    or dropped because the in-cluster operator (#163) is already
+    authoritative for that resource.
+
+    The composite primary key ``(workspace_id, external_id)`` is the
+    *only* index touched on the hot path.  Each event triggers a single
+    PK lookup; concurrency is handled via ``INSERT ... ON CONFLICT
+    DO UPDATE`` with a guarded ``WHERE`` clause so the state-machine
+    transitions are atomic.
+
+    ACL invariant — ``workspace_id`` is the first column of the PK and
+    every read scopes by it.  No cross-workspace lookup is structurally
+    possible (see ADR-0007 §ACL).
+    """
+
+    __tablename__ = "entity_emitter"
+
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        nullable=False,
+    )
+    external_id: Mapped[str] = mapped_column(
+        Text,
+        primary_key=True,
+        nullable=False,
+    )
+    authority_emitter: Mapped[str] = mapped_column(Text, nullable=False)
+    last_emit_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    authority_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    __table_args__ = (Index("ix_entity_emitter_authority", "authority_emitter"),)
+
+
 __all__ = [
     "ApiToken",
     "Base",
@@ -469,6 +520,7 @@ __all__ = [
     "Document",
     "Edge",
     "Entity",
+    "EntityEmitter",
     "IngestionRun",
     "IngestionRunStatus",
     "Source",

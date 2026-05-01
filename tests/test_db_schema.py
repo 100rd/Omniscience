@@ -26,6 +26,7 @@ from omniscience_core.db.models import (
     ApiToken,
     Chunk,
     Document,
+    EntityEmitter,
     IngestionRun,
     IngestionRunStatus,
     Source,
@@ -591,3 +592,35 @@ class TestChunkModel:
 class TestIngestionRunStatus:
     def test_all_statuses_present(self) -> None:
         assert {s.value for s in IngestionRunStatus} == {"running", "ok", "partial", "error"}
+
+
+# ---------------------------------------------------------------------------
+# EntityEmitter (issue #164 — server-side dedup)
+# ---------------------------------------------------------------------------
+
+
+class TestEntityEmitterModel:
+    def test_construct_with_explicit_values(self) -> None:
+        ws = uuid.uuid4()
+        row = EntityEmitter(
+            workspace_id=ws,
+            external_id="k8s_resource/abc/Pod/default/web-1",
+            authority_emitter="k8s-operator",
+            last_emit_at=_NOW,
+            authority_changed_at=None,
+        )
+        assert row.workspace_id == ws
+        assert row.external_id == "k8s_resource/abc/Pod/default/web-1"
+        assert row.authority_emitter == "k8s-operator"
+        assert row.last_emit_at == _NOW
+        assert row.authority_changed_at is None
+
+    def test_authority_changed_at_can_be_set(self) -> None:
+        row = EntityEmitter(
+            workspace_id=uuid.uuid4(),
+            external_id="x",
+            authority_emitter="k8s-agentic",
+            last_emit_at=_NOW,
+            authority_changed_at=_NOW,
+        )
+        assert row.authority_changed_at == _NOW
