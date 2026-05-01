@@ -17,14 +17,13 @@ Runner: pytest helm/omniscience-operator/tests/assertions/
 Requires:  pyyaml  (already a project dep through the operator/CI tooling)
            helm    (CI: azure/setup-helm@v4)
 """
+
 from __future__ import annotations
 
-import os
 import shutil
 import subprocess
 from pathlib import Path
 
-import pytest
 import yaml
 
 CHART_PATH = Path(__file__).resolve().parents[2]  # helm/omniscience-operator
@@ -109,7 +108,9 @@ def test_networkpolicy_default_enabled_and_default_deny():
 
 
 def test_networkpolicy_ingress_metrics_namespaceselector():
-    docs = _render({"networkPolicy.metricsAllowedNamespaceSelector.matchLabels.team": "monitoring"})
+    docs = _render(
+        {"networkPolicy.metricsAllowedNamespaceSelector.matchLabels.team": "monitoring"}
+    )
     np = _by_kind(docs, "NetworkPolicy")[0]
     metrics_rules = [
         r for r in np["spec"]["ingress"] if any(p["port"] == 8080 for p in r.get("ports", []))
@@ -122,7 +123,11 @@ def test_networkpolicy_egress_includes_dns_apiserver_nats():
     docs = _render({"omniscience.serverUrl": "https://api.omniscience.example.com:443"})
     np = _by_kind(docs, "NetworkPolicy")[0]
     egress_ports = sorted(
-        {(p["port"], p.get("protocol", "TCP")) for r in np["spec"]["egress"] for p in r.get("ports", [])}
+        {
+            (p["port"], p.get("protocol", "TCP"))
+            for r in np["spec"]["egress"]
+            for p in r.get("ports", [])
+        }
     )
     assert (53, "UDP") in egress_ports, "DNS UDP missing"
     assert (53, "TCP") in egress_ports, "DNS TCP missing"
@@ -177,7 +182,9 @@ def test_leader_election_role_is_namespaced_and_scoped_to_leases():
     roles = _by_kind(docs, "Role", name_suffix="-leader")
     assert len(roles) == 1
     role = roles[0]
-    assert role["metadata"].get("namespace") == "default", "leader-election Role must be namespaced"
+    assert role["metadata"].get("namespace") == "default", (
+        "leader-election Role must be namespaced"
+    )
     rules = role["rules"]
     assert len(rules) == 1
     rule = rules[0]
@@ -189,10 +196,11 @@ def test_no_role_outside_leader_election():
     """Only the leader-election Role may exist; the rest is ClusterRole-bound."""
     docs = _render({"leaderElection.enabled": "true"})
     non_leader_roles = [
-        r for r in _by_kind(docs, "Role")
-        if not r["metadata"]["name"].endswith("-leader")
+        r for r in _by_kind(docs, "Role") if not r["metadata"]["name"].endswith("-leader")
     ]
-    assert non_leader_roles == [], f"unexpected Roles: {[r['metadata']['name'] for r in non_leader_roles]}"
+    assert non_leader_roles == [], (
+        f"unexpected Roles: {[r['metadata']['name'] for r in non_leader_roles]}"
+    )
 
 
 # ── Image / resource / topology ──────────────────────────────────────────────
