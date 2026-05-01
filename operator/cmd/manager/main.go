@@ -29,9 +29,16 @@ import (
 	"github.com/100rd/omniscience/operator/internal/argocd"
 	"github.com/100rd/omniscience/operator/internal/config"
 	"github.com/100rd/omniscience/operator/internal/controller"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 	"github.com/100rd/omniscience/operator/internal/reconciler"
 )
+
+// operatorVersion is the build-stamped version. Overridable via -ldflags
+// "-X main.operatorVersion=<sha>" at build time. Default tracks the chart
+// appVersion in helm/omniscience-operator/Chart.yaml so a developer running
+// the binary directly sees a sensible value.
+var operatorVersion = "0.2.0"
 
 // scheme is the runtime scheme used by the manager's client and cache.
 // clientgoscheme registers the standard core / apps / batch / etc. API
@@ -84,6 +91,20 @@ func run() error {
 		"subject_prefix", cfg.SubjectPrefix,
 		"resync_period", cfg.ResyncPeriod.String(),
 	)
+
+	// ── #165 metrics surface registration ─────────────────────────────────
+	// Register every operator metric with the controller-runtime registry
+	// before the manager starts so the first emit lands on a registered
+	// series. The workspace_id_info gauge carries cluster_name +
+	// operator_version (NEVER the workspace UUID — see ADR-0007 §ACL and
+	// operator/internal/metrics/metrics.go for the cardinality matrix).
+	opmetrics.MustRegister()
+	opmetrics.SetWorkspaceIDInfo(cfg.ClusterName, operatorVersion)
+	logger.Info("metrics registered",
+		"endpoint", cfg.MetricsAddr,
+		"operator_version", operatorVersion,
+	)
+	// ── end #165 ──────────────────────────────────────────────────────────
 
 	pub, err := publisher.New(cfg.NATSURL, cfg.NATSCredsFile, cfg.SubjectPrefix)
 	if err != nil {

@@ -1,0 +1,51 @@
+{{/*
+ServiceMonitor for the Omniscience operator metrics endpoint (#165).
+
+Gated by:
+  1. .Values.serviceMonitor.enabled — explicit opt-in.
+  2. .Values.service.enabled — the metrics Service must exist for a
+     ServiceMonitor to target it.
+  3. .Capabilities.APIVersions.Has — render a no-op (rather than fail) if
+     monitoring.coreos.com/v1 is not installed. This matches the
+     CRD-absent posture from #160 / #161 and avoids chart-install failure
+     on clusters without Prometheus Operator.
+
+ACL invariant (ADR-0007 §ACL, issue #165): no relabel rule below adds a
+workspace_id label to the scraped metrics. The operator's metrics endpoint
+deliberately omits workspace_id from every series; re-introducing it here
+would be a tenancy regression.
+*/}}
+{{- if and .Values.serviceMonitor.enabled .Values.service.enabled }}
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+    {{- with .Values.serviceMonitor.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "omniscience-operator.selectorLabels" . | nindent 6 }}
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: metrics
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | default "30s" }}
+      scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | default "10s" }}
+      {{- with .Values.serviceMonitor.relabelings }}
+      relabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.serviceMonitor.metricRelabelings }}
+      metricRelabelings:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}
+{{- end }}
