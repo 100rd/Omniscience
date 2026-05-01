@@ -1,0 +1,32 @@
+# Kyverno baseline: require non-root (#166).
+#
+# Containers must runAsNonRoot=true and either declare a non-zero runAsUser
+# or inherit one from the pod-level securityContext. The operator pins both.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-run-as-non-root
+  annotations:
+    policies.kyverno.io/title: Require runAsNonRoot
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: containers-non-root
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Containers MUST set securityContext.runAsNonRoot=true.
+        pattern:
+          spec:
+            =(securityContext):
+              =(runAsNonRoot): "true"
+            containers:
+              - securityContext:
+                  runAsNonRoot: "true"

@@ -27,6 +27,12 @@ image:
   pullPolicy: IfNotPresent
   # Overridden by CI: --set image.tag=$GIT_SHA
   tag: "0.2.0"
+  # Production-recommended (#166): pin by digest for reproducibility and
+  # cosign-verified provenance. When set (sha256:...), the manifest renders
+  # `repository@digest` and the `tag` value is ignored at runtime. Empty by
+  # default; CI emits a digest-pinned values overlay alongside the tag-pinned
+  # default for customers who want immutable references.
+  digest: ""
 
 imagePullSecrets: []
 
@@ -54,13 +60,18 @@ leaderElection:
   enabled: false
 
 # ── Resources ─────────────────────────────────────────────────────────────────
+# Empirical envelope from #157-#162: single-digit MB idle, ~100 MiB peak under
+# heavy churn at ~10k watched objects. The defaults here match issue #166 and
+# leave headroom; tune for your cluster size.
 resources:
   requests:
-    cpu: 50m
-    memory: 64Mi
+    cpu: 100m
+    memory: 128Mi
+    ephemeral-storage: 64Mi
   limits:
-    cpu: 250m
-    memory: 256Mi
+    cpu: 500m
+    memory: 512Mi
+    ephemeral-storage: 256Mi
 
 # ── ServiceAccount ────────────────────────────────────────────────────────────
 serviceAccount:
@@ -112,6 +123,18 @@ nodeSelector: {}
 tolerations: []
 affinity: {}
 
+# Topology-spread for HA (#166). Effective only when replicaCount >= 2 AND
+# leaderElection.enabled=true. Default constraint distributes replicas across
+# zones (`topology.kubernetes.io/zone`), `ScheduleAnyway` so single-zone
+# clusters still schedule. Customers running on a hostname-only spread (e.g.
+# bare-metal) override `topologyKey: kubernetes.io/hostname`.
+topologySpreadConstraints:
+  - maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: ScheduleAnyway
+    labelSelector:
+      matchLabels: {}  # rendered to selectorLabels by the deployment template
+
 # ── Reconciliation worker (#163) ──────────────────────────────────────────────
 # Drift detector that periodically compares cluster state against the
 # Omniscience graph slice for (workspaceId, clusterId) and emits corrective
@@ -136,6 +159,18 @@ api:
   # parameter against the token's workspace and 403s on mismatch — this
   # is the load-bearing ACL gate (ADR-0007 §ACL, issue #163).
   bearerToken: ""
+
+# ── Omniscience server URL for NetworkPolicy egress allow-list (#166) ────────
+# Distinct from `api.baseUrl` only because the NetworkPolicy template needs
+# host:port at render time even when the reconciler is running in dry-run or
+# disabled mode (some customers want the policy in place ahead of the worker
+# being enabled). When `omniscience.serverUrl` is empty AND `api.baseUrl` is
+# set, the chart falls back to `api.baseUrl` for the egress rule.
+#
+# Format: `https://api.omniscience.example.com:443` or `http://omniscience-server:8000`
+# The chart parses host + port at template time and emits an explicit egress rule.
+omniscience:
+  serverUrl: ""
 
 # ── Annotations / labels ──────────────────────────────────────────────────────
 podAnnotations: {}
@@ -220,3 +255,70 @@ dashboards:
   # Annotations passed through to the ConfigMap. Useful for sidecar folder
   # routing, e.g. {grafana_folder: Omniscience}.
   annotations: {}
+
+# ── Pod Security Admission (#166) ─────────────────────────────────────────────
+# Apply Pod Security Standards `restricted` labels to the operator's namespace.
+# This is the chart's per-namespace enforcement; cluster-wide PSA rollout is
+# the customer's platform-team responsibility.
+#
+# When enabled (default), the chart renders a Namespace manifest that adds:
+#   pod-security.kubernetes.io/enforce: restricted
+#   pod-security.kubernetes.io/audit:   restricted
+#   pod-security.kubernetes.io/warn:    restricted
+#
+# IMPORTANT: rendering a Namespace manifest implies the chart "owns" the
+# namespace. If the customer pre-creates the namespace (the typical
+# enterprise workflow), set `podSecurity.manageNamespace: false` and
+# label the namespace out-of-band. The pod spec is `restricted`-compliant
+# regardless of this toggle.
+podSecurity:
+  enforce: true
+  manageNamespace: false   # set true if you want Helm to render the Namespace
+  level: restricted
+  version: latest
+
+# ── NetworkPolicy (#166) ──────────────────────────────────────────────────────
+# Default-deny ingress + egress with a documented allow-list. The fourth layer
+# of operator defence-in-depth (ADR-0007 §ACL) — bounds the operator's blast
+# radius even if the binary is compromised.
+#
+# CNI assumptions: standard NetworkPolicy v1 semantics (Calico, Cilium,
+# kube-router, AWS VPC CNI w/ policy enforcement). Network plugins that do
+# NOT honour egress rules (older Flannel, Weave-Net without npc) reduce this
+# to ingress-only enforcement; the chart cannot detect this — document the
+# CNI requirement at install time.
+networkPolicy:
+  enabled: true
+
+  # Namespace selector for Prometheus scraping the metrics endpoint.
+  # Defaults to a label customers commonly attach to their monitoring
+  # namespace. Override to match your kube-prometheus-stack install.
+  metricsAllowedNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: monitoring
+
+  # Probe-port (8081) ingress allow-list. Kubelet sources from node IPs
+  # which do not carry namespace labels, so the policy needs an empty
+  # `from:` (allows from anywhere on that port). Enterprise deployments
+  # may pin to the cluster CIDR; we expose `probePortAllowedFrom` for
+  # that override.
+  probePortAllowedFrom: []  # empty = allow from anywhere (kubelet-friendly)
+
+  # DNS allow-list — the kube-system namespace by default. Customers running
+  # CoreDNS in another namespace override this.
+  dnsNamespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: kube-system
+
+  # API-server allow-list. The Kubernetes API server is reached via the
+  # well-known `kubernetes.default.svc` ClusterIP. The standard idiom is
+  # to allow egress to TCP/443 on a label selector that matches kube-apiserver
+  # endpoints, OR — when CNI supports CIDR rules and the API is exposed on a
+  # stable VIP — pin by CIDR. We default to a port-only egress rule (no peer
+  # selector); this is the broadest practical match short of CNI-specific
+  # FQDN policies.
+  apiServerPort: 443
+  # When set, restrict apiserver egress to a specific CIDR (typical for
+  # managed clusters where the apiserver lives outside the pod network).
+  # Empty = no CIDR restriction (port-only).
+  apiServerCIDR: ""

@@ -1,0 +1,35 @@
+# Kyverno baseline: disallow host namespaces (#166).
+#
+# Mirrors the PSA `restricted` requirement that pods MUST NOT share host
+# network, IPC, or PID namespaces. Applied to the operator's namespace at
+# install time; the chart's manifests must NOT trip this policy.
+#
+# Tested by: helm template ... | kyverno apply
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: disallow-host-namespaces
+  annotations:
+    policies.kyverno.io/title: Disallow Host Namespaces
+    policies.kyverno.io/category: Pod Security Standards (Baseline)
+    policies.kyverno.io/severity: high
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: host-namespaces
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Sharing the host namespaces is forbidden (PSA restricted).
+          The fields spec.hostNetwork, spec.hostIPC, and spec.hostPID
+          must be unset or false.
+        pattern:
+          spec:
+            =(hostPID): "false"
+            =(hostIPC): "false"
+            =(hostNetwork): "false"

@@ -1,0 +1,32 @@
+# Kyverno baseline: drop ALL capabilities (#166).
+#
+# Containers must drop ALL Linux capabilities; PSA restricted permits adding
+# back ONLY NET_BIND_SERVICE, but the operator does not need it.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: drop-all-capabilities
+  annotations:
+    policies.kyverno.io/title: Drop ALL Capabilities
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: drop-all
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Containers must drop ALL Linux capabilities.
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  capabilities:
+                    drop:
+                      - ALL

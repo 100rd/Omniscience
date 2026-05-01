@@ -1,0 +1,29 @@
+# kube-score baseline for omniscience-operator (#166).
+#
+# Pinned configuration so CI's kube-score result is reproducible across
+# tool versions. CI fails if rendered manifests trip any check below
+# that is not explicitly ignored.
+#
+# Format (see https://github.com/zegl/kube-score):
+#   ignore-tests:  list of check IDs that are accepted as N/A
+#
+# We aim for an empty ignore list — every check should pass. Document
+# each ignored test inline so future contributors can see why it was
+# waived.
+
+ignore-tests:
+  # The operator's metrics Service exposes a single port and is consumed
+  # only via the rendered ServiceMonitor (#165). The default kube-score
+  # rule "service-targets-pod" is satisfied; nothing to ignore here.
+
+  # PodDisruptionBudget is intentionally NOT shipped: the operator runs
+  # with replicas=1 by default, single-leader semantics, and a transient
+  # restart causes only event-emit lag (informer cache rebuilds in seconds).
+  # Customers running replicas>=2 with leader-election own their own PDB.
+  - pod-disruption-budget
+
+  # ImagePullPolicy is set to IfNotPresent (operational, reproducibility-
+  # positive). kube-score warns if it is not Always for non-pinned tags;
+  # we pin by digest in production overlays — IfNotPresent is correct
+  # there. Customers running tag-pinned images can override.
+  - container-image-pull-policy

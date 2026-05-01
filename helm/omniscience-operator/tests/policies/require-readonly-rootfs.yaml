@@ -1,0 +1,30 @@
+# Kyverno baseline: read-only root filesystem (#166).
+#
+# Mirrors PSA restricted's preference for an immutable rootfs. The operator
+# binary runs from /manager on a distroless static base; no writes anywhere.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-readonly-rootfs
+  annotations:
+    policies.kyverno.io/title: Require Read-only Root Filesystem
+    policies.kyverno.io/category: Pod Security Standards (Restricted)
+    policies.kyverno.io/severity: medium
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: readonly-rootfs
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+      validate:
+        message: >-
+          Containers MUST set securityContext.readOnlyRootFilesystem=true.
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  readOnlyRootFilesystem: "true"

@@ -87,6 +87,11 @@ ignore = [
 "scripts/*" = [
     "T201",  # print is the standard CLI output mechanism for one-shot scripts
 ]
+"helm/**/tests/**" = [
+    "S101",  # assert is the standard pytest assertion mechanism
+    "S603",  # subprocess call — helm template invocations in controlled CI
+    "S607",  # Partial executable path — controlled CI environment
+]
 
 [tool.mypy]
 python_version = "3.12"
