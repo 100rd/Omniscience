@@ -3,6 +3,26 @@ name = "omniscience-connectors"
 version = "0.2.0"
 description = "Source connector framework and built-in connectors for Omniscience"
 requires-python = ">=3.12"
+# ──────────────────────────────────────────────────────────────────────────────
+# Deprecation schedule — k8s-agentic connector (issue #168, ADR-0011)
+# ──────────────────────────────────────────────────────────────────────────────
+# v0.3  (current line):  k8s-agentic remains in-tree and shipped as part of
+#                        this package; importing it raises a DeprecationWarning.
+#                        Both the agentic connector and the in-cluster
+#                        omniscience-operator emit events; server-side dedup
+#                        (#164 / ADR-0010) makes the operator authoritative.
+# v0.4  (next minor):    k8s-agentic moves to an opt-in extra
+#                        ``omniscience-connectors[k8s-agentic]``.  The default
+#                        install no longer pulls the connector module surface;
+#                        existing customers must explicitly opt in.  A new
+#                        server-side feature flag
+#                        ``OMNISCIENCE_K8S_AGENTIC_ALLOWED`` (default ``true`` in
+#                        v0.3, default ``false`` in v0.4) enforces the
+#                        deprecation at ingest time.
+# v0.5  (removal):       agentic/k8s.py and its tests / fixtures / Helm
+#                        references are deleted.  Tracked as a separate
+#                        follow-up issue at the time of #168 close.
+# ──────────────────────────────────────────────────────────────────────────────
 dependencies = [
     "omniscience-core",
     "pydantic>=2.7.0",
@@ -15,6 +35,19 @@ dependencies = [
     # of opentelemetry-exporter-otlp pulled in via omniscience-core.
     "opentelemetry-proto>=1.20",
 ]
+
+[project.optional-dependencies]
+# ── DEPRECATED extra (issue #168, ADR-0011) ─────────────────────────────────
+# In v0.3 this extra is a no-op marker: the k8s-agentic module is included in
+# the base install for backward compatibility, and pip/uv install of
+# ``omniscience-connectors[k8s-agentic]`` resolves to the same module set.
+#
+# In v0.4 the agentic/k8s.py module will move OUT of the base package and
+# only be installed when this extra is requested explicitly.  The empty list
+# here is a v0.3-line stable slot — adding deps to it before v0.4 would
+# silently change the install closure for customers who haven't yet opted
+# in.  See docs/decisions/0011-k8s-agentic-deprecation-schedule.md.
+k8s-agentic = []
 
 [tool.uv.sources]
 omniscience-core = { workspace = true }
