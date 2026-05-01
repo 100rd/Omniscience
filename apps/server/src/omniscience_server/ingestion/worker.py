@@ -36,6 +36,7 @@ Design decisions:
 
 from __future__ import annotations
 
+import os
 import uuid
 
 import structlog
@@ -50,10 +51,28 @@ from omniscience_index.workspace import MissingWorkspaceError, resolve_source_wo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from omniscience_server.ingestion.dedup import (
+    DedupAction,
+    DedupConfig,
+    DedupGate,
+    config_from_env,
+)
 from omniscience_server.ingestion.events import DocumentChangeEvent, ProcessResult
 from omniscience_server.ingestion.metrics import INGESTION_DOCUMENTS_PROCESSED_TOTAL
 from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.run_tracker import RunTracker
+
+# Environment variables that drive the dedup gate. Read once at worker
+# construction; not re-read per event.  See ``ingestion/dedup.py`` for
+# the full semantics.
+_DEDUP_ENABLED_ENV: str = "OMNISCIENCE_DEDUP_ENABLED"
+_DEDUP_TTL_HOURS_ENV: str = "OMNISCIENCE_INGEST_DEDUP_TTL_HOURS"
+
+# Action label emitted when the dedup gate drops an event.  Distinct
+# from the standard pipeline outcomes so dashboards can chart "events
+# accepted by ingestion but dropped by dedup" without confusion with
+# "no content change".
+_DEDUP_DROP_ACTION: str = "dedup_dropped"
 
 log = structlog.get_logger(__name__)
 
@@ -85,6 +104,7 @@ class IngestionWorker:
         vector_store: VectorStore,
         session_factory: async_sessionmaker[AsyncSession],
         secrets_resolver: SecretsResolver | None = None,
+        dedup_gate: DedupGate | None = None,
     ) -> None:
         self._consumer = queue_consumer
         self._connector_registry = connector_registry
@@ -97,6 +117,22 @@ class IngestionWorker:
         self._secrets_resolver = secrets_resolver or SecretsResolver()
         self._run_id: uuid.UUID | None = None
         self._error_count = 0
+
+        # Dedup gate: env-driven by default, injectable for tests.  The
+        # gate is intentionally constructed up front rather than lazily
+        # so a misconfigured env var fails fast at worker startup
+        # instead of on the first message.
+        if dedup_gate is None:
+            config: DedupConfig = config_from_env(
+                enabled_env=os.environ.get(_DEDUP_ENABLED_ENV),
+                ttl_hours_env=os.environ.get(_DEDUP_TTL_HOURS_ENV),
+            )
+            self._dedup_gate: DedupGate = DedupGate(
+                session_factory=session_factory,
+                config=config,
+            )
+        else:
+            self._dedup_gate = dedup_gate
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -170,6 +206,39 @@ class IngestionWorker:
                 duration_ms=0.0,
                 error=str(exc),
             )
+
+        # Dedup gate (issue #164) — runs BEFORE the per-document pipeline so
+        # rejected events never touch the index/vector/graph adapters.
+        # ``workspace_id`` was just resolved from ``Source.tenant_id`` —
+        # it is server-derived, never event-payload-derived (ACL invariant).
+        # Delete events are exempt: tombstoning is idempotent on the
+        # adapter side and does not write new content into the graph;
+        # blocking deletes by emitter would otherwise leave orphaned
+        # rows when the operator's coverage shrinks.
+        if event.action != "deleted":
+            decision = await self._dedup_gate.evaluate(
+                workspace_id=workspace_id,
+                event=event,
+            )
+            if decision.action == DedupAction.drop:
+                log.debug(
+                    "ingestion_event_dropped_by_dedup",
+                    source_id=str(event.source_id),
+                    external_id=event.external_id,
+                    source_type=event.source_type,
+                    authority_emitter=decision.authority_emitter,
+                    reason=decision.reason,
+                )
+                INGESTION_DOCUMENTS_PROCESSED_TOTAL.labels(
+                    source_type=event.source_type,
+                    action=_DEDUP_DROP_ACTION,
+                ).inc()
+                return ProcessResult(
+                    source_id=event.source_id,
+                    external_id=event.external_id,
+                    action=_DEDUP_DROP_ACTION,
+                    duration_ms=0.0,
+                )
 
         connector = self._connector_registry.get(event.source_type)
 
@@ -264,6 +333,10 @@ class IngestionWorker:
             self._error_count += 1
             error_msg = result.error or "unknown error"
             await self._run_tracker.record_error(run_id, result.external_id, error_msg)
+        # ``dedup_dropped`` (#164) and ``unchanged`` are deliberately
+        # silent on the run tracker: neither outcome represents work the
+        # tracker should count.  The metric on
+        # ``INGESTION_DOCUMENTS_PROCESSED_TOTAL`` already records both.
 
 
 __all__ = ["IngestionWorker"]

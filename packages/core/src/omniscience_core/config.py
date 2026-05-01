@@ -385,6 +385,35 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Ingestion dedup (issue #164) ---
+    #
+    # Server-side dedup of operator vs k8s-agentic emitters.  Both env
+    # vars are read directly by the ingestion worker; the Settings
+    # mirror is provided for documentation symmetry and CLI / admin UI
+    # introspection.  See apps/server/src/omniscience_server/ingestion/
+    # dedup.py for the full state-machine semantics.
+    ingestion_dedup_enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch for the ingestion dedup gate. When False, every "
+            "k8s event passes through unchanged (the v0.2 fallback during "
+            "the parallel-deprecation window of epic #98). Honoured under "
+            "the env var OMNISCIENCE_DEDUP_ENABLED."
+        ),
+    )
+    ingestion_dedup_ttl_hours: float = Field(
+        default=24.0,
+        description=(
+            "Authority TTL in hours. Agentic events for an "
+            "operator-authoritative (workspace_id, external_id) pair are "
+            "dropped if the operator emitted within this many hours; "
+            "outside the window, agentic reclaims authority. 0 disables "
+            "TTL re-assignment (operator authority is sticky forever); "
+            "-1 disables the dedup gate entirely (debug only). Honoured "
+            "under the env var OMNISCIENCE_INGEST_DEDUP_TTL_HOURS."
+        ),
+    )
+
     # --- Scheduler ---
     scheduler_enabled: bool = Field(
         default=True,
