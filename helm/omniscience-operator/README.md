@@ -242,3 +242,41 @@ its blast radius is bounded by **four layers**:
 
 The Secret carrying `OMNISCIENCE_WORKSPACE_ID` is mounted via `envFrom` (not
 `valueFrom` on a ConfigMap that could leak via `kubectl describe pod`).
+
+---
+
+## Migrating from `k8s-agentic`?
+
+If you currently run the legacy `k8s-agentic` connector
+(`packages/connectors/src/omniscience_connectors/agentic/k8s.py`) on
+the Omniscience server side, this operator is the replacement. The
+agentic connector is **deprecated as of v0.3** and scheduled for
+removal in **v0.5** — see
+[ADR-0011](../../docs/decisions/0011-k8s-agentic-deprecation-schedule.md).
+
+The detailed migration playbook — including the side-by-side
+comparison, the parallel-running window, the dedup metrics to watch
+during cutover, troubleshooting (NATS, RBAC, PSA, NetworkPolicy), and
+the rollback procedure — lives at:
+
+> [`docs/connectors/k8s-agentic-deprecation.md`](../../docs/connectors/k8s-agentic-deprecation.md)
+
+The kind-by-kind parity status (which K8s kinds the operator covers
+versus the agentic connector) lives at:
+
+> [`docs/connectors/k8s-agentic-vs-operator-parity.md`](../../docs/connectors/k8s-agentic-vs-operator-parity.md)
+
+**Read both before starting your migration.** In particular, the
+parity matrix lists kinds where the operator does **not yet** cover
+what the agentic connector does — if your deployment relies on those
+kinds, the migration is gated on the gap-closure issues listed in the
+matrix.
+
+---
+
+## Operational references
+
+- Architecture: [ADR-0007](../../docs/decisions/0007-k8s-operator-architecture.md)
+- Server-side dedup (during-cutover gate): [ADR-0010](../../docs/decisions/0010-server-side-emitter-dedup.md)
+- Deprecation schedule: [ADR-0011](../../docs/decisions/0011-k8s-agentic-deprecation-schedule.md)
+- Alerts runbook: [`docs/runbooks/operator-alerts.md`](../../docs/runbooks/operator-alerts.md)

@@ -5,6 +5,35 @@ All notable changes to Omniscience are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.3 line
+
+### Deprecated
+
+- **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
+  The legacy LLM-driven Kubernetes connector at
+  `packages/connectors/src/omniscience_connectors/agentic/k8s.py` is
+  superseded by the in-cluster `omniscience-operator` Go controller at
+  `operator/`.  Importing
+  `omniscience_connectors.agentic.k8s` now emits a `DeprecationWarning`
+  carrying the removal version (`v0.5.0`), the migration target name
+  (`omniscience-operator`), and a URL to the migration guide.
+
+  - Migration guide: [`docs/connectors/k8s-agentic-deprecation.md`](docs/connectors/k8s-agentic-deprecation.md)
+  - Parity matrix: [`docs/connectors/k8s-agentic-vs-operator-parity.md`](docs/connectors/k8s-agentic-vs-operator-parity.md)
+  - Schedule (ADR-0011): v0.3 announce → v0.4 default-disabled →
+    v0.5 remove.
+  - During the cutover window, server-side dedup
+    ([ADR-0010](docs/decisions/0010-server-side-emitter-dedup.md))
+    silently drops agentic events for any
+    `(workspace_id, external_id)` the operator is authoritative on.
+    Watch
+    `omniscience_ingestion_dedup_drop_total{authority_emitter="k8s-operator"}`
+    rise as the operator takes over.
+
+  The connector remains **fully functional** in v0.3.  No customer
+  code change is required to upgrade to v0.3; the deprecation warning
+  is informational.
+
 ## [0.2.0] — 2026-04-25
 
 Cutover release for Epic #96. Vector and graph storage move out of Postgres
