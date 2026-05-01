@@ -31,10 +31,29 @@ spec:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
         - name: manager
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "omniscience-operator.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # PSA-restricted compliant (#166). Defaults in values.yaml encode
+          # the restricted floor; this template merges the user-provided
+          # `securityContext` over a non-negotiable baseline so the floor
+          # cannot be relaxed via values overrides.
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- $floor := dict
+                "allowPrivilegeEscalation" false
+                "readOnlyRootFilesystem"   true
+                "runAsNonRoot"             true
+                "runAsUser"                65532
+                "runAsGroup"               65532
+                "capabilities"             (dict "drop" (list "ALL"))
+                "seccompProfile"           (dict "type" "RuntimeDefault") }}
+            {{- $merged := mergeOverwrite (deepCopy $floor) (.Values.securityContext | default dict) }}
+            {{- /* re-stamp the load-bearing fields AFTER merge so user values cannot relax them */ -}}
+            {{- $_ := set $merged "allowPrivilegeEscalation" false }}
+            {{- $_ := set $merged "readOnlyRootFilesystem"   true }}
+            {{- $_ := set $merged "runAsNonRoot"             true }}
+            {{- $_ := set $merged "capabilities"             (dict "drop" (list "ALL")) }}
+            {{- $_ := set $merged "seccompProfile"           (dict "type" "RuntimeDefault") }}
+            {{- toYaml $merged | nindent 12 }}
           env:
             - name: OMNISCIENCE_RESYNC_PERIOD_SECONDS
               value: {{ .Values.resyncPeriodSeconds | quote }}
@@ -101,4 +120,15 @@ spec:
       {{- with .Values.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if and (gt (int .Values.replicaCount) 1) .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- range .Values.topologySpreadConstraints }}
+        - maxSkew: {{ .maxSkew | default 1 }}
+          topologyKey: {{ .topologyKey | default "topology.kubernetes.io/zone" }}
+          whenUnsatisfiable: {{ .whenUnsatisfiable | default "ScheduleAnyway" }}
+          labelSelector:
+            matchLabels:
+              {{- include "omniscience-operator.selectorLabels" $ | nindent 14 }}
+        {{- end }}
       {{- end }}

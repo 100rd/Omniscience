@@ -57,3 +57,74 @@ ServiceAccount name.
 {{- default "default" .Values.serviceAccount.name -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Parse a URL into host and port at template-render time. Returns a dict with
+keys `host`, `port`, `scheme`. Used by the NetworkPolicy to emit explicit
+egress rules to nats.url and omniscience.serverUrl.
+
+Inputs accepted:
+  nats://host:4222
+  nats://host:4222/path
+  https://host:443
+  http://host:8000
+  host:port           (no scheme — assumed nats)
+
+Defaults:
+  nats   -> 4222
+  http   -> 80
+  https  -> 443
+
+If the URL is empty or unparseable the helper returns an empty dict so
+callers can guard with `if`.
+*/}}
+{{- define "omniscience-operator.parseURL" -}}
+{{- $url := . -}}
+{{- if not $url -}}
+{{- dict | toJson -}}
+{{- else -}}
+{{- $scheme := "" -}}
+{{- $rest := $url -}}
+{{- if contains "://" $url -}}
+{{- $parts := splitList "://" $url -}}
+{{- $scheme = index $parts 0 -}}
+{{- $rest = index $parts 1 -}}
+{{- else -}}
+{{- $scheme = "nats" -}}
+{{- end -}}
+{{- /* Drop any trailing path/query: take everything before the first '/' or '?' */ -}}
+{{- $hostport := $rest -}}
+{{- if contains "/" $hostport -}}
+{{- $hostport = (splitList "/" $hostport | first) -}}
+{{- end -}}
+{{- if contains "?" $hostport -}}
+{{- $hostport = (splitList "?" $hostport | first) -}}
+{{- end -}}
+{{- $host := $hostport -}}
+{{- $port := "" -}}
+{{- if contains ":" $hostport -}}
+{{- $hp := splitList ":" $hostport -}}
+{{- $host = index $hp 0 -}}
+{{- $port = index $hp 1 -}}
+{{- else -}}
+{{- if eq $scheme "https" -}}{{- $port = "443" -}}
+{{- else if eq $scheme "http" -}}{{- $port = "80" -}}
+{{- else -}}{{- $port = "4222" -}}
+{{- end -}}
+{{- end -}}
+{{- (dict "host" $host "port" $port "scheme" $scheme) | toJson -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
+Resolve the operator's own image reference. When `image.digest` is set
+(`sha256:...`), the manifest renders `repository@digest` (production-recommended,
+immutable). Otherwise renders `repository:tag` (default).
+*/}}
+{{- define "omniscience-operator.image" -}}
+{{- if .Values.image.digest -}}
+{{- printf "%s@%s" .Values.image.repository .Values.image.digest -}}
+{{- else -}}
+{{- printf "%s:%s" .Values.image.repository (.Values.image.tag | default .Chart.AppVersion) -}}
+{{- end -}}
+{{- end -}}

@@ -1,0 +1,116 @@
+{{/*
+NetworkPolicy — default-deny ingress + egress with named allow-list (#166).
+
+Fourth layer of the operator's defence-in-depth (ADR-0007 §ACL):
+  1. Operator-stamped workspace_id (operator/cmd/manager)
+  2. NATS subject scoping (ingest.changes.k8s.{workspace_id})
+  3. Server-side adapter rejection (apps/server/.../ingestion)
+  4. NetworkPolicy (this file) — bounds egress so a compromised operator
+     cannot exfiltrate to arbitrary endpoints.
+
+Allow-list summary:
+  Ingress
+    - :8080/TCP from `metricsAllowedNamespaceSelector`  (Prometheus scrape)
+    - :8081/TCP from `probePortAllowedFrom`             (kubelet probes)
+  Egress
+    - DNS (53/TCP+UDP) to `dnsNamespaceSelector`        (default kube-system)
+    - kube-apiserver on `apiServerPort` (default 443)   (optional CIDR pin)
+    - NATS host:port parsed from `.Values.nats.url`     (always emitted)
+    - Omniscience server host:port parsed from
+      `.Values.omniscience.serverUrl` (or `.Values.api.baseUrl` fallback)
+      — emitted only when one of those values is non-empty.
+
+CNI assumptions: standard NetworkPolicy v1 semantics. Calico, Cilium,
+kube-router, and AWS VPC CNI (with policy enforcement enabled) honour
+both ingress and egress rules. Older Flannel without npc, and Weave
+without policy controller, drop egress rules silently — DOCUMENT this
+in the customer-facing chart README.
+
+Multi-cluster note: each cluster's operator install ships its own copy
+of this policy; the policy itself does not change for #167.
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $natsParsed := include "omniscience-operator.parseURL" .Values.nats.url | fromJson }}
+{{- $omniUrl := .Values.omniscience.serverUrl | default .Values.api.baseUrl }}
+{{- $omniParsed := include "omniscience-operator.parseURL" $omniUrl | fromJson }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "omniscience-operator.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Metrics scrape (:8080) — ONLY from the configured Prometheus namespace.
+    - from:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.metricsAllowedNamespaceSelector | nindent 12 }}
+      ports:
+        - port: {{ .Values.service.metricsPort }}
+          protocol: TCP
+    # Health probes (:8081) — kubelet sources from node IPs which lack
+    # namespace labels. When `probePortAllowedFrom` is empty we OMIT the
+    # `from` field entirely; absence-of-`from` admits any source on this
+    # port, which is what kubelet needs. Tighter deployments pin sources
+    # via `probePortAllowedFrom` (e.g. the cluster CIDR). The probe port
+    # is health-only — no sensitive data crosses it.
+    - ports:
+        - port: {{ .Values.probes.livenessPort }}
+          protocol: TCP
+      {{- with .Values.networkPolicy.probePortAllowedFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    # ── DNS to the cluster's CoreDNS namespace ────────────────────────────
+    - to:
+        - namespaceSelector:
+            {{- toYaml .Values.networkPolicy.dnsNamespaceSelector | nindent 12 }}
+      ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # ── Kubernetes API server ─────────────────────────────────────────────
+    # When `apiServerCIDR` is set, restrict to that CIDR. Otherwise the
+    # rule is port-only (no `to:`) — egress is allowed to any peer on
+    # tcp/{apiServerPort}. The semantic difference matters: NetworkPolicy
+    # treats `to: []` as MATCH-NOTHING (deny), while OMITTING `to`
+    # entirely means "match any peer". We always emit a port restriction.
+    - ports:
+        - port: {{ .Values.networkPolicy.apiServerPort }}
+          protocol: TCP
+      {{- if .Values.networkPolicy.apiServerCIDR }}
+      to:
+        - ipBlock:
+            cidr: {{ .Values.networkPolicy.apiServerCIDR }}
+      {{- end }}
+    # ── NATS JetStream ────────────────────────────────────────────────────
+    # Host parsed from `.Values.nats.url` at template time. If the customer
+    # changes nats.url, they re-render the chart, which re-renders this rule.
+    # Port restriction is the load-bearing constraint. Customers running a
+    # CNI with FQDN/CIDR policies (Cilium, Calico) override via a values
+    # overlay to add a hostname/CIDR pin.
+    {{- if and $natsParsed.host $natsParsed.port }}
+    - ports:
+        - port: {{ $natsParsed.port | int }}
+          protocol: TCP
+    {{- end }}
+    # ── Omniscience read API (#163) ───────────────────────────────────────
+    # Emitted only when omniscience.serverUrl (or api.baseUrl fallback) is
+    # non-empty. If the reconciler is disabled (`api.baseUrl=""`) and the
+    # customer hasn't set `omniscience.serverUrl`, no rule is emitted —
+    # the operator has no read-API egress need.
+    {{- if and $omniParsed.host $omniParsed.port }}
+    - ports:
+        - port: {{ $omniParsed.port | int }}
+          protocol: TCP
+    {{- end }}
+{{- end }}

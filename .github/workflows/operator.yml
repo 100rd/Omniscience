@@ -3,28 +3,30 @@ name: Operator CI
 on:
   push:
     branches: [main]
+    tags: ['operator-v*']
     paths:
       - 'operator/**'
       - 'helm/omniscience-operator/**'
+      - 'scripts/lint-helm-rbac-verbs.sh'
       - '.github/workflows/operator.yml'
   pull_request:
     branches: [main]
     paths:
       - 'operator/**'
       - 'helm/omniscience-operator/**'
+      - 'scripts/lint-helm-rbac-verbs.sh'
       - '.github/workflows/operator.yml'
 
 permissions:
   contents: read
 
-defaults:
-  run:
-    working-directory: operator
-
 jobs:
   go:
     name: Go (build / vet / test / lint)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: operator
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -42,21 +44,154 @@ jobs:
           args: --timeout=5m
 
   helm:
-    name: Helm lint + template
+    name: Helm lint + template + validate (#166)
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
         with:
           version: v3.15.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install python deps
+        run: pip install pyyaml pytest
+
       - name: helm lint
         run: helm lint helm/omniscience-operator
+
       - name: helm template (with required values)
         run: |
           helm template omniscience-operator helm/omniscience-operator \
             --set workspaceId=11111111-2222-3333-4444-555555555555 \
             --set clusterName=ci \
-            --set nats.url=nats://nats:4222
+            --set nats.url=nats://omniscience-nats:4222 \
+            --set omniscience.serverUrl=https://api.omniscience.example.com:443 \
+            > /tmp/rendered.yaml
+          test -s /tmp/rendered.yaml
+
+      # ── #166 hardening gates ────────────────────────────────────────────
+      - name: RBAC verb allow-list lint (#166)
+        run: bash scripts/lint-helm-rbac-verbs.sh helm/omniscience-operator
+
+      - name: Chart hardening assertions (#166)
+        run: pytest helm/omniscience-operator/tests/assertions/ -v -o addopts=""
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: kubeconform -strict (#166)
+        run: |
+          helm template omniscience-operator helm/omniscience-operator \
+            --set workspaceId=11111111-2222-3333-4444-555555555555 \
+            --set clusterName=ci \
+            --set nats.url=nats://omniscience-nats:4222 \
+            --set omniscience.serverUrl=https://api.omniscience.example.com:443 \
+            --set leaderElection.enabled=true \
+            --set replicaCount=2 \
+          | kubeconform -strict -summary -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'
+
+      - name: Install polaris
+        run: |
+          curl -sSL https://github.com/FairwindsOps/polaris/releases/download/9.5.0/polaris_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin polaris
+
+      - name: polaris audit (production profile, #166)
+        run: |
+          helm template omniscience-operator helm/omniscience-operator \
+            --set workspaceId=11111111-2222-3333-4444-555555555555 \
+            --set clusterName=ci \
+            --set nats.url=nats://omniscience-nats:4222 \
+            --set omniscience.serverUrl=https://api.omniscience.example.com:443 \
+            > /tmp/rendered.yaml
+          polaris audit --audit-path /tmp/rendered.yaml --format=json --set-exit-code-on-danger \
+            --severity danger
+
+      - name: Install kube-score
+        run: |
+          curl -sSL https://github.com/zegl/kube-score/releases/download/v1.18.0/kube-score_1.18.0_linux_amd64.tar.gz \
+            | tar xz -C /usr/local/bin kube-score
+
+      - name: kube-score (pinned baseline, #166)
+        # The ignore-test list is the canonical baseline pinned at
+        # helm/omniscience-operator/.kube-score.yaml. We re-extract it here
+        # via python (yq is not always installed on GH runners).
+        run: |
+          helm template omniscience-operator helm/omniscience-operator \
+            --set workspaceId=11111111-2222-3333-4444-555555555555 \
+            --set clusterName=ci \
+            --set nats.url=nats://omniscience-nats:4222 \
+            --set omniscience.serverUrl=https://api.omniscience.example.com:443 \
+            > /tmp/rendered.yaml
+          ignores=$(python3 -c "import yaml; print(','.join((yaml.safe_load(open('helm/omniscience-operator/.kube-score.yaml')) or {}).get('ignore-tests', [])))")
+          if [ -n "$ignores" ]; then
+            kube-score score /tmp/rendered.yaml --output-format ci --ignore-test "$ignores"
+          else
+            kube-score score /tmp/rendered.yaml --output-format ci
+          fi
+
+  # ── Image build + cosign keyless signing (#166) ──────────────────────────
+  image:
+    name: Build + cosign-sign image
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && (startsWith(github.ref, 'refs/tags/operator-v') || github.ref == 'refs/heads/main')
+    permissions:
+      contents: read
+      packages: write
+      id-token: write    # required for cosign keyless OIDC
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute image tag
+        id: tag
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/operator-v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/operator-v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: operator
+          file: operator/Dockerfile
+          push: true
+          tags: ghcr.io/100rd/omniscience-operator:${{ steps.tag.outputs.tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/100rd/Omniscience
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign image (keyless, OIDC)
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          cosign sign --yes \
+            ghcr.io/100rd/omniscience-operator@${{ steps.build.outputs.digest }}
+
+      - name: Verify signature (sanity check)
+        run: |
+          cosign verify \
+            --certificate-identity-regexp "https://github.com/100rd/Omniscience/.github/workflows/operator.yml@refs/(heads|tags)/.+" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            ghcr.io/100rd/omniscience-operator@${{ steps.build.outputs.digest }}

@@ -1,0 +1,29 @@
+{{/*
+Pod Security Admission labels for the operator namespace (#166).
+
+We only render a Namespace manifest when `podSecurity.manageNamespace=true`
+(default false). The typical enterprise workflow is for the platform team
+to pre-create the namespace and label it themselves; the chart MUST NOT
+silently take ownership of an existing namespace via a Helm-managed
+manifest (Helm would attempt to adopt it on upgrade and fail).
+
+When the chart does manage the namespace, we apply the three PSA labels
+(enforce / audit / warn) at the configured `level` (default: restricted).
+
+The pod spec itself is `restricted`-compliant regardless of this toggle —
+this template only affects whether the *namespace* enforces the standard.
+*/}}
+{{- if and .Values.podSecurity.enforce .Values.podSecurity.manageNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: {{ .Values.podSecurity.level | quote }}
+    pod-security.kubernetes.io/enforce-version: {{ .Values.podSecurity.version | quote }}
+    pod-security.kubernetes.io/audit: {{ .Values.podSecurity.level | quote }}
+    pod-security.kubernetes.io/audit-version: {{ .Values.podSecurity.version | quote }}
+    pod-security.kubernetes.io/warn: {{ .Values.podSecurity.level | quote }}
+    pod-security.kubernetes.io/warn-version: {{ .Values.podSecurity.version | quote }}
+{{- end }}
