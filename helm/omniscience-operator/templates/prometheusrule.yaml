@@ -1,0 +1,153 @@
+{{/*
+PrometheusRule for the Omniscience operator (#165).
+
+Default alert catalog:
+
+  - OmniscienceOperatorPublishStalled  — no successful publish for 5m,
+    GATED on last_publish_unix_seconds > 0 to avoid cold-start false
+    positives. Severity: warning.
+
+  - OmniscienceOperatorPublishErrorBurst — sustained publisher_errors_total
+    rate > 0.5/s for 10m. Severity: warning.
+
+  - OmniscienceOperatorReconcileFailing — > 2 reconcile errors in 1h.
+    Severity: info.
+
+  - OmniscienceOperatorEmitLagHigh — p99 event_lag_seconds > 30s for 15m.
+    Severity: info. Freshness SLO breach.
+
+  - OmniscienceOperatorReconcileDriftHigh — drift events > 1/h. Severity:
+    info. Indicates a possible watch-loss bug.
+
+Gating:
+  1. .Values.prometheusRule.enabled — explicit opt-in.
+  2. .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" — render a
+     no-op rather than fail on clusters without Prometheus Operator.
+
+Each rule is individually toggleable via .Values.prometheusRule.rules.<name>.enabled.
+
+Cold-start safety: the publishStalled expression INCLUDES
+"omniscience_operator_last_publish_unix_seconds > 0" so a freshly-started
+operator that hasn't yet emitted does not page. The other rules are
+rate-based and naturally cold-start safe (rate() over a 5m window of a
+zero counter is zero).
+*/}}
+{{- if .Values.prometheusRule.enabled }}
+{{- if .Capabilities.APIVersions.Has "monitoring.coreos.com/v1" }}
+{{- $rb := .Values.prometheusRule.runbookBaseUrl }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+    {{- with .Values.prometheusRule.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: omniscience-operator.rules
+      rules:
+        {{- with .Values.prometheusRule.rules.publishStalled }}
+        {{- if .enabled }}
+        - alert: OmniscienceOperatorPublishStalled
+          expr: |
+            (time() - omniscience_operator_last_publish_unix_seconds) > 300
+            and on() omniscience_operator_last_publish_unix_seconds > 0
+          for: {{ $.Values.prometheusRule.defaults.publishStalledFor }}
+          labels:
+            severity: {{ .severity }}
+            component: omniscience-operator
+          annotations:
+            summary: "Omniscience operator has not published an event in 5+ minutes"
+            description: |
+              Operator metric omniscience_operator_last_publish_unix_seconds
+              has not advanced in over 5 minutes. Likely causes: NATS
+              JetStream unreachable, watch loop stalled, or workspace_id
+              misconfiguration causing all publishes to fail.
+            runbook_url: "{{ $rb }}#operatorpublishstalled"
+        {{- end }}
+        {{- end }}
+
+        {{- with .Values.prometheusRule.rules.publishErrorBurst }}
+        {{- if .enabled }}
+        - alert: OmniscienceOperatorPublishErrorBurst
+          expr: |
+            sum(rate(omniscience_operator_publisher_errors_total[5m])) by (error_type) > 0.5
+          for: {{ $.Values.prometheusRule.defaults.publishErrorBurstFor }}
+          labels:
+            severity: {{ .severity }}
+            component: omniscience-operator
+          annotations:
+            summary: "Omniscience operator publishing errors at >0.5/s"
+            description: |
+              Operator publisher_errors_total{error_type="{{`{{ $labels.error_type }}`}}"}
+              is above 0.5/s sustained for 10 minutes. Inspect operator
+              logs for the underlying NATS / JetStream failure mode.
+            runbook_url: "{{ $rb }}#operatorpublisherrorburst"
+        {{- end }}
+        {{- end }}
+
+        {{- with .Values.prometheusRule.rules.reconcileFailing }}
+        {{- if .enabled }}
+        - alert: OmniscienceOperatorReconcileFailing
+          expr: |
+            increase(omniscience_operator_reconcile_runs_total{result="error"}[{{ $.Values.prometheusRule.defaults.reconcileFailingWindow }}]) > 2
+          labels:
+            severity: {{ .severity }}
+            component: omniscience-operator
+          annotations:
+            summary: "Omniscience reconciler hitting errors"
+            description: |
+              omniscience_operator_reconcile_runs_total{result="error"}
+              for kind {{`{{ $labels.kind }}`}} has increased by more
+              than 2 in the last hour. The reconciler is failing to
+              compare cluster state to graph state — drift detection
+              is degraded.
+            runbook_url: "{{ $rb }}#operatorreconcilefailing"
+        {{- end }}
+        {{- end }}
+
+        {{- with .Values.prometheusRule.rules.emitLagHigh }}
+        {{- if .enabled }}
+        - alert: OmniscienceOperatorEmitLagHigh
+          expr: |
+            histogram_quantile(0.99, sum(rate(omniscience_operator_event_lag_seconds_bucket[5m])) by (le, kind)) > 30
+          for: {{ $.Values.prometheusRule.defaults.emitLagHighFor }}
+          labels:
+            severity: {{ .severity }}
+            component: omniscience-operator
+          annotations:
+            summary: "Omniscience event freshness SLO breach"
+            description: |
+              p99 of omniscience_operator_event_lag_seconds for kind
+              {{`{{ $labels.kind }}`}} is above 30s. Events are reaching
+              the publisher more than 30 seconds after the resource
+              event timestamp. Likely causes: informer cache pressure,
+              publisher backlog, or NATS RTT inflation.
+            runbook_url: "{{ $rb }}#operatoremitlaghigh"
+        {{- end }}
+        {{- end }}
+
+        {{- with .Values.prometheusRule.rules.reconcileDriftHigh }}
+        {{- if .enabled }}
+        - alert: OmniscienceOperatorReconcileDriftHigh
+          expr: |
+            sum(rate(omniscience_operator_reconcile_drift_total[{{ $.Values.prometheusRule.defaults.reconcileDriftWindow }}])) by (kind, direction) > (1 / 3600)
+          labels:
+            severity: {{ .severity }}
+            component: omniscience-operator
+          annotations:
+            summary: "Omniscience reconciler finding sustained drift"
+            description: |
+              The reconciler is finding more than one drift event per
+              hour for kind {{`{{ $labels.kind }}`}} direction
+              {{`{{ $labels.direction }}`}}. Sustained drift indicates
+              either a watch-loss bug, a publisher backlog, or a server-
+              side ingestion failure causing missing entities.
+            runbook_url: "{{ $rb }}#operatorreconciledrifthigh"
+        {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

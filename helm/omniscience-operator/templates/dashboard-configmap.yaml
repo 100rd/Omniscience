@@ -1,0 +1,31 @@
+{{/*
+Grafana dashboard ConfigMap (#165).
+
+Loads every JSON file under helm/omniscience-operator/dashboards/ into a
+single ConfigMap. The kiwigrid/k8s-sidecar discovers it via the
+{{ .Values.dashboards.labelKey }}={{ .Values.dashboards.labelValue }}
+label and imports each entry as a Grafana dashboard.
+
+Default labelKey/labelValue match kube-prometheus-stack
+(grafana_dashboard=1) so installing this chart against a stock kp-stack
+just works.
+
+Gating:
+  1. .Values.dashboards.enabled — explicit opt-in.
+*/}}
+{{- if .Values.dashboards.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "omniscience-operator.fullname" . }}-dashboards
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "omniscience-operator.labels" . | nindent 4 }}
+    {{ .Values.dashboards.labelKey }}: {{ .Values.dashboards.labelValue | quote }}
+  {{- with .Values.dashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+{{ (.Files.Glob "dashboards/*.json").AsConfig | indent 2 }}
+{{- end }}

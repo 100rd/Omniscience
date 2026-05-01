@@ -140,3 +140,83 @@ api:
 # ── Annotations / labels ──────────────────────────────────────────────────────
 podAnnotations: {}
 podLabels: {}
+
+# ── Observability (#165) ──────────────────────────────────────────────────────
+# Default Prometheus / Grafana wiring. Every section is opt-in (default false)
+# because not every cluster runs Prometheus Operator. The metrics themselves
+# are always exposed on :8080 by the controller-runtime metrics endpoint;
+# this section only controls discovery objects (ServiceMonitor, PrometheusRule,
+# Grafana sidecar ConfigMap).
+#
+# ACL invariant: the operator's metrics endpoint MUST NOT carry workspace_id
+# in any label (ADR-0007 §ACL, issue #165). The chart MUST NOT add labels
+# that synthesise tenancy back in via relabel rules.
+serviceMonitor:
+  # When true, render a Prometheus Operator ServiceMonitor scraping the
+  # operator's metrics Service. Requires monitoring.coreos.com/v1 CRDs;
+  # the template is gated by .Capabilities.APIVersions.Has so installing
+  # against a cluster without Prometheus Operator is a no-op rather than
+  # a chart failure.
+  enabled: false
+  # Scrape interval. 30s matches Prometheus defaults; reduce to 15s on
+  # latency-sensitive deployments at the cost of TSDB write amplification.
+  interval: 30s
+  scrapeTimeout: 10s
+  # Extra labels merged onto the ServiceMonitor metadata. Use to attach the
+  # cluster's monitoring "team" label so Prometheus's serviceMonitorSelector
+  # picks it up.
+  labels: {}
+  # Relabel rules applied at scrape time. The default is empty — operators
+  # MUST NOT add a workspace_id relabel here per ADR-0007 §ACL.
+  relabelings: []
+  metricRelabelings: []
+
+prometheusRule:
+  # When true, render a PrometheusRule containing the default operator
+  # alerts. Same CRD-presence guard as ServiceMonitor.
+  enabled: false
+  # Extra labels attached to every alert (e.g. "team: platform").
+  labels: {}
+  # `for:` durations per rule. Cold-start safety: the publishStalled rule
+  # ALSO requires last_publish_unix_seconds > 0 (encoded in the rule
+  # expression itself, not configurable here).
+  defaults:
+    publishStalledFor: 5m
+    publishErrorBurstFor: 10m
+    emitLagHighFor: 15m
+    reconcileFailingWindow: 1h
+    reconcileDriftWindow: 1h
+  # Each rule can be individually disabled when a customer's platform team
+  # owns the same alert in their own stack.
+  rules:
+    publishStalled:
+      enabled: true
+      severity: warning
+    publishErrorBurst:
+      enabled: true
+      severity: warning
+    reconcileFailing:
+      enabled: true
+      severity: info
+    emitLagHigh:
+      enabled: true
+      severity: info
+    reconcileDriftHigh:
+      enabled: true
+      severity: info
+  # runbookBaseUrl is prepended to each rule's runbook anchor. Override per
+  # deployment so the link points at the customer's own runbook clone.
+  runbookBaseUrl: "https://github.com/100rd/Omniscience/blob/main/docs/runbooks/operator-alerts.md"
+
+dashboards:
+  # When true, render a ConfigMap containing the default Grafana dashboards
+  # and label them so the Grafana sidecar (kiwigrid/k8s-sidecar) auto-imports
+  # them. Customers not using the sidecar can disable this and import the
+  # JSON manually from helm/omniscience-operator/dashboards/.
+  enabled: false
+  # Label the sidecar watches for. The default matches kube-prometheus-stack.
+  labelKey: grafana_dashboard
+  labelValue: "1"
+  # Annotations passed through to the ConfigMap. Useful for sidecar folder
+  # routing, e.g. {grafana_folder: Omniscience}.
+  annotations: {}
