@@ -1,4 +1,19 @@
-"""Kubernetes agentic connector.
+"""Kubernetes agentic connector — DEPRECATED in v0.3, scheduled for removal in v0.5.
+
+.. deprecated:: 0.3.0
+    This connector is superseded by ``omniscience-operator`` — the in-cluster
+    Go operator at ``operator/`` of this repository.  Both paths run in
+    parallel through v0.3 with server-side dedup (issue #164, ADR-0010)
+    making the operator authoritative for kinds it covers.  The connector
+    becomes opt-in default-disabled in v0.4 and is removed in v0.5.
+
+    See the migration guide at
+    ``docs/connectors/k8s-agentic-deprecation.md`` and the parity matrix at
+    ``docs/connectors/k8s-agentic-vs-operator-parity.md``.
+
+    Importing this module raises a :class:`DeprecationWarning` on first
+    import.  The warning is informational only — the connector remains
+    fully functional in v0.3.
 
 Uses an LLM agent to decide which Kubernetes resource kinds to index.
 The LLM is given the list of available API resource kinds in the cluster and
@@ -35,8 +50,9 @@ from __future__ import annotations
 
 import json
 import logging
+import warnings
 from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Final
 
 import httpx
 from pydantic import BaseModel, Field
@@ -47,6 +63,45 @@ from omniscience_connectors.base import DocumentRef, FetchedDocument, WebhookHan
 __all__ = ["K8sAgenticConfig", "K8sAgenticConnector"]
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Deprecation announcement (issue #168, ADR-0011)
+# ---------------------------------------------------------------------------
+#
+# This connector is deprecated as of v0.3.  The replacement is the
+# ``omniscience-operator`` co-located at ``operator/`` of this repo.
+# Removal is scheduled for v0.5 per docs/decisions/0011-k8s-agentic-deprecation-schedule.md.
+#
+# We emit a single ``DeprecationWarning`` at module import time.  Exactly-once
+# semantics are achieved via Python's default warning filter
+# (``"default"`` action) plus the ``stacklevel=2`` argument so the warning
+# is attributed to the caller's import site, not to this module's own line.
+#
+# The warning's message is the load-bearing signal:
+#   * it carries the removal version string ``v0.5``
+#   * it carries the migration target name ``omniscience-operator``
+#   * it carries a relative URL to the migration guide
+# All three are asserted by ``tests/test_agentic_deprecation.py`` so a
+# wording change cannot regress the contract.
+_DEPRECATION_REMOVAL_VERSION: Final[str] = "v0.5.0"
+_DEPRECATION_MIGRATION_TARGET: Final[str] = "omniscience-operator"
+_DEPRECATION_MIGRATION_GUIDE_URL: Final[str] = (
+    "https://github.com/100rd/Omniscience/blob/main/docs/connectors/k8s-agentic-deprecation.md"
+)
+
+DEPRECATION_MESSAGE: Final[str] = (
+    "K8sAgenticConnector is deprecated as of Omniscience v0.3 and will be "
+    f"removed in {_DEPRECATION_REMOVAL_VERSION}.  "
+    f"Migrate to {_DEPRECATION_MIGRATION_TARGET} (the in-cluster Go operator "
+    "at operator/ of this repo).  "
+    f"Migration guide: {_DEPRECATION_MIGRATION_GUIDE_URL}"
+)
+
+warnings.warn(
+    DEPRECATION_MESSAGE,
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 # Resource kinds that are almost always noise or contain secrets — always skip.
 _ALWAYS_EXCLUDE: frozenset[str] = frozenset(

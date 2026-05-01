@@ -1356,6 +1356,7 @@ requires-dist = [
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "watchfiles", specifier = ">=0.21.0" },
 ]
+provides-extras = ["k8s-agentic"]
 
 [[package]]
 name = "omniscience-core"

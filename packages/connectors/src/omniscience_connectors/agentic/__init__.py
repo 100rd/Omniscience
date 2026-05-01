@@ -16,6 +16,14 @@ The ``AgenticConnector`` base class extends ``Connector`` with an LLM-driven
 Built-in agentic connectors:
 
 - ``k8s-agentic`` — discovers which Kubernetes resource kinds to index.
+
+  .. deprecated:: 0.3.0
+      The K8s agentic connector is superseded by ``omniscience-operator``.
+      Importing :mod:`omniscience_connectors.agentic.k8s` (or this package,
+      which re-exports it) emits a :class:`DeprecationWarning` carrying the
+      removal version (``v0.5.0``), the migration target
+      (``omniscience-operator``), and the migration-guide URL.  See
+      ``docs/connectors/k8s-agentic-deprecation.md`` and ADR-0011.
 """
 
 from omniscience_connectors.agentic.base import AgentConfig, AgenticConnector
