@@ -448,6 +448,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := sec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("secret reconciler setup: %w", err)
 	}
+	// ── #202 LimitRange watcher (epic #199 v0.4 parity) ────────────────────
+	if lr, err := controller.NewLimitRangeReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("limitrange reconciler init: %w", err)
+	} else if err := lr.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("limitrange reconciler setup: %w", err)
+	}
 	return nil
 }
 
