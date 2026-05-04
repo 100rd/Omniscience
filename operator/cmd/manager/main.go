@@ -460,6 +460,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := rq.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("resourcequota reconciler setup: %w", err)
 	}
+	// ── #206 ServiceAccount watcher (epic #199 v0.4 parity) ────────────────
+	if sa, err := controller.NewServiceAccountReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("serviceaccount reconciler init: %w", err)
+	} else if err := sa.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("serviceaccount reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -659,6 +665,8 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		// Resource governance (#202, #204)
 		{kind: "LimitRange", listFactory: func() client.ObjectList { return &corev1.LimitRangeList{} }},
 		{kind: "ResourceQuota", listFactory: func() client.ObjectList { return &corev1.ResourceQuotaList{} }},
+		// Identity (#206)
+		{kind: "ServiceAccount", listFactory: func() client.ObjectList { return &corev1.ServiceAccountList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
