@@ -67,6 +67,10 @@ from omniscience_server.ingestion.run_tracker import RunTracker
 # the full semantics.
 _DEDUP_ENABLED_ENV: str = "OMNISCIENCE_DEDUP_ENABLED"
 _DEDUP_TTL_HOURS_ENV: str = "OMNISCIENCE_INGEST_DEDUP_TTL_HOURS"
+# Issue #216 / ADR-0011: when set to "false", k8s-agentic events are
+# dropped at the dedup gate boundary.  Default unset => True in v0.3;
+# v0.4 will ship "false" as the operator-shipped default.
+_AGENTIC_ALLOWED_ENV: str = "OMNISCIENCE_K8S_AGENTIC_ALLOWED"
 
 # Action label emitted when the dedup gate drops an event.  Distinct
 # from the standard pipeline outcomes so dashboards can chart "events
@@ -126,6 +130,7 @@ class IngestionWorker:
             config: DedupConfig = config_from_env(
                 enabled_env=os.environ.get(_DEDUP_ENABLED_ENV),
                 ttl_hours_env=os.environ.get(_DEDUP_TTL_HOURS_ENV),
+                agentic_allowed_env=os.environ.get(_AGENTIC_ALLOWED_ENV),
             )
             self._dedup_gate: DedupGate = DedupGate(
                 session_factory=session_factory,
