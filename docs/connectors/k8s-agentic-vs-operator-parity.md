@@ -116,7 +116,7 @@ migration described in the
 
 | Kind | agentic.emits | operator.emits | Status | Notes |
 |---|---|---|---|---|
-| `HorizontalPodAutoscaler` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Listed in agentic's `_DEFAULT_INCLUDE_KINDS`. Customers using autoscaling rely on HPA indexing for capacity-investigation MCP queries. |
+| `HorizontalPodAutoscaler` | yes | yes (`hpa_controller.go`, `hpa_mapper.go`) | **COVERED** | Operator emits via watch (issue #214). Mapper renders scale target (kind/name/apiVersion), min/max replicas, metrics specs (essential subset across all five MetricSpec types — Resource, Pods, Object, External, ContainerResource), and current/desired replica counts. `spec.behavior` policies are intentionally not emitted (operational tuning, not graph-relevant). |
 
 ---
 
@@ -156,20 +156,24 @@ migration described in the
 
 | Status | Count | Kinds |
 |---|---|---|
-| **COVERED** | 23 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim, CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding |
+| **COVERED** | 24 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim, CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
 | **PARTIAL** | 7 | Argo Rollouts (Rollout), ArgoCD (Application, ApplicationSet), DRA (DeviceClass, ResourceClaim, ResourceClaimTemplate, ResourceSlice) — all gated on customer cluster CRD installation |
-| **NOT-COVERED** | 2 | ReplicationController (low priority), HorizontalPodAutoscaler |
+| **NOT-COVERED** | 1 | ReplicationController (low priority — deferred to v0.5) |
 | **OPERATOR-ONLY** | 3 | Secret (redacted), StorageClass, Cluster (synthetic) |
 | **NEITHER** | 1 | Event |
 
-Total: 23 + 7 + 2 + 3 + 1 = **36 rows**.
+Total: 24 + 7 + 1 + 3 + 1 = **36 rows**.
 
 ### Release-blocker summary for v0.4 default-disable
 
-The following 1 kind is **NOT-COVERED** by the operator and emits
-from the agentic connector's `_DEFAULT_INCLUDE_KINDS`. It must be
-addressed before the v0.4 release flips
-`OMNISCIENCE_K8S_AGENTIC_ALLOWED` to `false` by default:
+**ZERO release-blockers remain.** All 10 kinds previously NOT-COVERED that emitted
+from agentic's `_DEFAULT_INCLUDE_KINDS` are now COVERED by the operator. The v0.4
+release can flip `OMNISCIENCE_K8S_AGENTIC_ALLOWED` to `false` by default once the
+server-side flag itself is wired (separate sub-task of epic #199).
+
+ReplicationController remains NOT-COVERED but is acceptable v0.5 work per the
+parity matrix — it's a legacy kind superseded by ReplicaSet upstream and most
+clusters have zero `ReplicationController` resources.
 
 1. ~~`LimitRange`~~ — **DONE** in issue #202 (namespace resource caps).
 2. ~~`PersistentVolumeClaim`~~ — **DONE** in issue #208 (persistent storage requests).
@@ -180,6 +184,7 @@ addressed before the v0.4 release flips
 7. ~~`RoleBinding`~~ — **DONE** in issue #212 (namespaced RBAC binding).
 8. ~~`ClusterRole`~~ — **DONE** in issue #212 (cluster-scoped RBAC).
 9. ~~`ClusterRoleBinding`~~ — **DONE** in issue #212 (cluster-scoped RBAC binding).
+10. ~~`HorizontalPodAutoscaler`~~ — **DONE** in issue #214 (workload autoscaling).
 10. `HorizontalPodAutoscaler` — workload autoscaling
 
 `ReplicationController` is also NOT-COVERED but acceptable as a v0.5

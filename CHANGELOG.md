@@ -58,6 +58,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rbac.authorization.k8s.io` apiGroup with read-only verbs on the four
   resources.
 
+- **Operator: `HorizontalPodAutoscaler` watcher (issue #214).** The
+  operator now watches `autoscaling/v2 HorizontalPodAutoscaler`
+  cluster-wide and emits the scale target (kind/name/apiVersion),
+  min/max replicas, all five MetricSpec types (Resource / Pods / Object
+  / External / ContainerResource — each rendered as a discriminated-
+  union JSON keeping only graph-relevant fields), and current/desired
+  replica counts. `spec.behavior` policies are intentionally not emitted
+  — operational tuning, not graph-relevant. **Closes the last v0.4
+  default-flip parity release-blocker tracked under epic #199.** RBAC
+  adds a new `autoscaling` apiGroup with read-only verbs on
+  `horizontalpodautoscalers`.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
