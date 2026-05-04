@@ -68,7 +68,7 @@ migration described in the
 | `ResourceQuota` | yes | yes (`resourcequota_controller.go`, `resourcequota_mapper.go`) | **COVERED** | Operator emits via watch (issue #204). Mapper renders `spec.hard`, `spec.scopes`, and `spec.scopeSelector` as deterministic JSON in metadata; namespace appears only in `external_id` and base metadata, never as a metric label. |
 | `Secret` | **no** (`_ALWAYS_EXCLUDE`) | yes (`secret_controller.go`, `secret.go`, **redacted-by-default per issue #166**) | OPERATOR-ONLY | Agentic refuses to emit Secret on security grounds. Operator emits a redacted-by-default mapping (issue #166); strictly safer. Not a deprecation concern. |
 | `Service` | yes | yes (`service_controller.go`, `service.go`) | **COVERED** | |
-| `ServiceAccount` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Listed in agentic's `_DEFAULT_INCLUDE_KINDS`. |
+| `ServiceAccount` | yes | yes (`serviceaccount_controller.go`, `serviceaccount_mapper.go`) | **COVERED** | Operator emits via watch (issue #206). Mapper emits Secret reference NAMES only (no values), image pull Secret names, and the automount setting. Namespace appears only in `external_id` and base metadata, never as a metric label. |
 
 ---
 
@@ -156,17 +156,17 @@ migration described in the
 
 | Status | Count | Kinds |
 |---|---|---|
-| **COVERED** | 16 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota |
+| **COVERED** | 17 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount |
 | **PARTIAL** | 7 | Argo Rollouts (Rollout), ArgoCD (Application, ApplicationSet), DRA (DeviceClass, ResourceClaim, ResourceClaimTemplate, ResourceSlice) — all gated on customer cluster CRD installation |
-| **NOT-COVERED** | 9 | PersistentVolumeClaim, ReplicationController (low priority), ServiceAccount, CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
+| **NOT-COVERED** | 8 | PersistentVolumeClaim, ReplicationController (low priority), CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
 | **OPERATOR-ONLY** | 3 | Secret (redacted), StorageClass, Cluster (synthetic) |
 | **NEITHER** | 1 | Event |
 
-Total: 16 + 7 + 9 + 3 + 1 = **36 rows**.
+Total: 17 + 7 + 8 + 3 + 1 = **36 rows**.
 
 ### Release-blocker summary for v0.4 default-disable
 
-The following 8 kinds are **NOT-COVERED** by the operator and emit
+The following 7 kinds are **NOT-COVERED** by the operator and emit
 from the agentic connector's `_DEFAULT_INCLUDE_KINDS`. Each must be
 addressed before the v0.4 release flips
 `OMNISCIENCE_K8S_AGENTIC_ALLOWED` to `false` by default:
@@ -174,7 +174,7 @@ addressed before the v0.4 release flips
 1. ~~`LimitRange`~~ — **DONE** in issue #202 (namespace resource caps).
 2. `PersistentVolumeClaim` — persistent storage requests
 3. ~~`ResourceQuota`~~ — **DONE** in issue #204 (namespace quota enforcement).
-4. `ServiceAccount` — workload identity
+4. ~~`ServiceAccount`~~ — **DONE** in issue #206 (workload identity).
 5. `CronJob` — scheduled batch workloads
 6. `Role` — namespaced RBAC
 7. `RoleBinding` — namespaced RBAC binding

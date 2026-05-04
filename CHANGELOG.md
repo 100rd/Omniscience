@@ -24,6 +24,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracked under epic #199. RBAC adds `get`/`list`/`watch` on
   `resourcequotas`; no other verbs.
 
+- **Operator: `ServiceAccount` watcher (issue #206).** The operator now
+  watches `core/v1 ServiceAccount` cluster-wide and emits Secret
+  reference NAMES (no values), image pull Secret names, and the
+  automount setting. Closes one of the v0.4 default-flip parity gaps
+  tracked under epic #199. RBAC adds `get`/`list`/`watch` on
+  `serviceaccounts`; no other verbs.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
