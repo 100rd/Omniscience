@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/100rd/omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
@@ -77,6 +78,7 @@ func (r *ResourceClaimTemplateReconciler) Reconcile(ctx context.Context, req ctr
 		// Derived cluster_id (issue #167); see dra_deviceclass_controller.go
 		// for the rationale. Follow-up plumbs cfg.ClusterID through.
 		ev := entity.ResourceClaimTemplateToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
+		opmetrics.RecordEmit("ResourceClaimTemplate", &rc) // #198 freshness probe
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceclaimtemplate event: %w", perr)

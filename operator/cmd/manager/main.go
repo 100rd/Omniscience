@@ -10,18 +10,24 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	rolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/google/uuid"
+	appsv1 "k8s.io/api/apps/v1"
+	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	resourcev1beta1 "k8s.io/api/resource/v1beta1"
 	storagev1 "k8s.io/api/storage/v1"
+	unstructuredv1 "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/discovery"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -329,6 +335,31 @@ func run() error {
 		return fmt.Errorf("add readyz: %w", err)
 	}
 
+	// ── #198 informer cache size ticker ───────────────────────────────────
+	// Periodic reporter for omniscience_operator_informer_cache_objects.
+	// One goroutine, every 30s with ±10% jitter, lists from the manager
+	// cache (no API round-trip) and updates the gauge per active kind.
+	// The kinds slice is built from the same discovery flags the
+	// registration helpers above used so absent CRDs do not produce
+	// zero-cache series. Discovery is re-probed (cheap, one-shot at
+	// startup) to avoid changing the existing helpers' signatures.
+	cacheKinds, err := buildCacheSizeKinds(mgr, argoErr == nil && argoPresence.AnyPresent(), logger)
+	if err != nil {
+		return fmt.Errorf("cache size kinds build: %w", err)
+	}
+	ticker, err := newCacheSizeTicker(mgr.GetCache(), cacheKinds, 30*time.Second, 0.1, ctrl.Log)
+	if err != nil {
+		return fmt.Errorf("cache size ticker init: %w", err)
+	}
+	if err := mgr.Add(ticker); err != nil {
+		return fmt.Errorf("cache size ticker add: %w", err)
+	}
+	logger.Info("cache size ticker registered",
+		"event", "cache_size_ticker.registered",
+		"kinds", len(cacheKinds),
+	)
+	// ── end #198 ───────────────────────────────────────────────────────────
+
 	// --- BEGIN issue #159: Cluster anchor entity publish at startup ---
 	// The Cluster anchor is the per-cluster top-level entity; it is emitted
 	// once before the manager loop starts so every subsequent watch event
@@ -574,3 +605,107 @@ func setupDRAWatchers(
 }
 
 // ── end #190 ──────────────────────────────────────────────────────────────
+
+// ── #198 cache size kinds builder ─────────────────────────────────────────
+//
+// buildCacheSizeKinds returns the list of (kind, listFactory) pairs that
+// the cache_size_ticker should report. Always includes the unconditional
+// watchers (workload + networking + cluster-scoped). Conditionally includes
+// ArgoCD (when discovery confirmed CRDs were present), Argo Rollouts (when
+// the Rollouts CRD discovery probe returned present), and DRA (when the
+// resource.k8s.io API was served).
+//
+// argoPresent is the AnyPresent() result from the ArgoCD discovery probe
+// already performed in run(); we re-use it rather than re-probing. Argo
+// Rollouts and DRA are re-probed here because their discovery results are
+// otherwise consumed inside their setup helpers — re-probing is a single
+// cheap discovery RPC at startup, far cheaper than re-threading state
+// through every helper signature.
+//
+// kind strings MUST exactly match the strings the entity package uses for
+// ev.Metadata["kind"], so the dashboard panel that joins event_lag_seconds
+// with informer_cache_objects on `kind` resolves to the same series.
+func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
+	Info(msg string, keysAndValues ...interface{})
+	Error(err error, msg string, keysAndValues ...interface{})
+}) ([]cacheKindEntry, error) {
+	out := []cacheKindEntry{
+		// Workload (#157)
+		{kind: "Pod", listFactory: func() client.ObjectList { return &corev1.PodList{} }},
+		{kind: "Deployment", listFactory: func() client.ObjectList { return &appsv1.DeploymentList{} }},
+		{kind: "ReplicaSet", listFactory: func() client.ObjectList { return &appsv1.ReplicaSetList{} }},
+		{kind: "StatefulSet", listFactory: func() client.ObjectList { return &appsv1.StatefulSetList{} }},
+		{kind: "DaemonSet", listFactory: func() client.ObjectList { return &appsv1.DaemonSetList{} }},
+		{kind: "Job", listFactory: func() client.ObjectList { return &batchv1.JobList{} }},
+		// Networking + config (#158)
+		{kind: "Service", listFactory: func() client.ObjectList { return &corev1.ServiceList{} }},
+		{kind: "Endpoints", listFactory: func() client.ObjectList { return &corev1.EndpointsList{} }},
+		{kind: "Ingress", listFactory: func() client.ObjectList { return &networkingv1.IngressList{} }},
+		{kind: "NetworkPolicy", listFactory: func() client.ObjectList { return &networkingv1.NetworkPolicyList{} }},
+		{kind: "ConfigMap", listFactory: func() client.ObjectList { return &corev1.ConfigMapList{} }},
+		{kind: "Secret", listFactory: func() client.ObjectList { return &corev1.SecretList{} }},
+		// Cluster-scoped (#159)
+		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
+		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
+		{kind: "PersistentVolume", listFactory: func() client.ObjectList { return &corev1.PersistentVolumeList{} }},
+		{kind: "StorageClass", listFactory: func() client.ObjectList { return &storagev1.StorageClassList{} }},
+	}
+
+	if argoPresent {
+		out = append(out,
+			cacheKindEntry{kind: argocd.KindApplication, listFactory: func() client.ObjectList {
+				ul := &unstructuredList{}
+				ul.SetGroupVersionKind(argocd.ApplicationGVK())
+				return ul
+			}},
+			cacheKindEntry{kind: argocd.KindApplicationSet, listFactory: func() client.ObjectList {
+				ul := &unstructuredList{}
+				ul.SetGroupVersionKind(argocd.ApplicationSetGVK())
+				return ul
+			}},
+		)
+	}
+
+	// Argo Rollouts probe (#161)
+	disc, derr := discovery.NewDiscoveryClientForConfig(mgr.GetConfig())
+	if derr != nil {
+		logger.Error(derr, "cache size kinds: discovery client init; skipping CRD-gated kinds",
+			"event", "cache_size_kinds.discovery_init_error",
+		)
+		return out, nil
+	}
+	if rolloutsPresent, perr := controller.IsArgoRolloutsCRDInstalled(disc); perr != nil {
+		logger.Error(perr, "cache size kinds: argo-rollouts probe; skipping",
+			"event", "cache_size_kinds.argo_rollouts_probe_error",
+		)
+	} else if rolloutsPresent {
+		out = append(out, cacheKindEntry{
+			kind:        "Rollout",
+			listFactory: func() client.ObjectList { return &rolloutsv1alpha1.RolloutList{} },
+		})
+	}
+
+	// DRA probe (#190)
+	if draPresent, perr := controller.IsDRAAPIInstalled(disc); perr != nil {
+		logger.Error(perr, "cache size kinds: dra probe; skipping",
+			"event", "cache_size_kinds.dra_probe_error",
+		)
+	} else if draPresent {
+		out = append(out,
+			cacheKindEntry{kind: "ResourceClaim", listFactory: func() client.ObjectList { return &resourcev1beta1.ResourceClaimList{} }},
+			cacheKindEntry{kind: "ResourceClaimTemplate", listFactory: func() client.ObjectList { return &resourcev1beta1.ResourceClaimTemplateList{} }},
+			cacheKindEntry{kind: "ResourceSlice", listFactory: func() client.ObjectList { return &resourcev1beta1.ResourceSliceList{} }},
+			cacheKindEntry{kind: "DeviceClass", listFactory: func() client.ObjectList { return &resourcev1beta1.DeviceClassList{} }},
+		)
+	}
+
+	return out, nil
+}
+
+// unstructuredList is a tiny alias so the cache size kinds helper can build
+// the ArgoCD ApplicationList / ApplicationSetList without pulling in the
+// unstructured package across every other call site. Re-exported as a
+// pointer-friendly alias to k8s.io/apimachinery/pkg/apis/meta/v1/unstructured.UnstructuredList.
+type unstructuredList = unstructuredv1.UnstructuredList
+
+// ── end #198 ──────────────────────────────────────────────────────────────

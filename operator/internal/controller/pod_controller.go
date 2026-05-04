@@ -20,6 +20,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/100rd/omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
@@ -86,6 +87,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		// is correct. A more precise mapping requires a finalizer or an
 		// in-memory cache and is deferred to a follow-up issue.
 		ev := entity.PodToEvent(&pod, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
+		opmetrics.RecordEmit("Pod", &pod) // #198 freshness probe
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish pod event: %w", perr)
