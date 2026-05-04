@@ -88,7 +88,7 @@ migration described in the
 | Kind | agentic.emits | operator.emits | Status | Notes |
 |---|---|---|---|---|
 | `Job` | yes | yes (`job_controller.go`, `job.go`) | **COVERED** | |
-| `CronJob` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Operator covers `Job` but not `CronJob`. Listed in agentic's `_DEFAULT_INCLUDE_KINDS`. |
+| `CronJob` | yes | yes (`cronjob_controller.go`, `cronjob_mapper.go`) | **COVERED** | Operator emits via watch (issue #210). Mapper renders schedule, timezone, suspend, concurrencyPolicy, deadline/history limits, and status (lastScheduleTime, lastSuccessfulTime, active count). The embedded JobTemplate is intentionally not emitted — the Job watcher (#157) covers the spawned Jobs. |
 
 ---
 
@@ -156,17 +156,17 @@ migration described in the
 
 | Status | Count | Kinds |
 |---|---|---|
-| **COVERED** | 18 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim |
+| **COVERED** | 19 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim, CronJob |
 | **PARTIAL** | 7 | Argo Rollouts (Rollout), ArgoCD (Application, ApplicationSet), DRA (DeviceClass, ResourceClaim, ResourceClaimTemplate, ResourceSlice) — all gated on customer cluster CRD installation |
-| **NOT-COVERED** | 7 | ReplicationController (low priority), CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
+| **NOT-COVERED** | 6 | ReplicationController (low priority), Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
 | **OPERATOR-ONLY** | 3 | Secret (redacted), StorageClass, Cluster (synthetic) |
 | **NEITHER** | 1 | Event |
 
-Total: 18 + 7 + 7 + 3 + 1 = **36 rows**.
+Total: 19 + 7 + 6 + 3 + 1 = **36 rows**.
 
 ### Release-blocker summary for v0.4 default-disable
 
-The following 6 kinds are **NOT-COVERED** by the operator and emit
+The following 5 kinds are **NOT-COVERED** by the operator and emit
 from the agentic connector's `_DEFAULT_INCLUDE_KINDS`. Each must be
 addressed before the v0.4 release flips
 `OMNISCIENCE_K8S_AGENTIC_ALLOWED` to `false` by default:
@@ -175,7 +175,7 @@ addressed before the v0.4 release flips
 2. ~~`PersistentVolumeClaim`~~ — **DONE** in issue #208 (persistent storage requests).
 3. ~~`ResourceQuota`~~ — **DONE** in issue #204 (namespace quota enforcement).
 4. ~~`ServiceAccount`~~ — **DONE** in issue #206 (workload identity).
-5. `CronJob` — scheduled batch workloads
+5. ~~`CronJob`~~ — **DONE** in issue #210 (scheduled batch workloads).
 6. `Role` — namespaced RBAC
 7. `RoleBinding` — namespaced RBAC binding
 8. `ClusterRole` — cluster-scoped RBAC
