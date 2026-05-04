@@ -70,6 +70,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   adds a new `autoscaling` apiGroup with read-only verbs on
   `horizontalpodautoscalers`.
 
+- **Server: `OMNISCIENCE_K8S_AGENTIC_ALLOWED` flag wired in dedup gate
+  (issue #216, ADR-0011).** The server-side enforcement mechanism for
+  the v0.4 agentic default-flip is now in place. Default in v0.3 stays
+  `true` (no behavior change); when set to `false` the dedup gate
+  short-circuits every `source_type="k8s-agentic"` event BEFORE any DB
+  lookup, increments
+  `omniscience_ingestion_dedup_total{action="agentic_flag_disabled"}`,
+  and returns DROP. Operator and non-K8s emitters are unaffected. The
+  flag is enforced even when dedup itself is disabled (debug envs).
+  **Closes epic #199** — all v0.4 default-flip work for both the
+  operator parity push and the server-side mechanism is complete.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
