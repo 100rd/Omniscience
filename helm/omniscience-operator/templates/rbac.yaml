@@ -18,10 +18,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
     verbs: ["get", "list", "watch"]
-  # Workload watcher (issue #157): Job. CronJob is deferred to a follow-up
-  # sub-issue — do NOT add "cronjobs" here until that issue lands.
+  # Workload watcher (issue #157): Job + CronJob (issue #210).
+  # CronJob is the parent template that spawns Jobs on a schedule; the Job
+  # watcher already covers the spawned Jobs themselves.
   - apiGroups: ["batch"]
-    resources: ["jobs"]
+    resources: ["jobs", "cronjobs"]
     verbs: ["get", "list", "watch"]
   # ── #158 networking + config watchers ──────────────────────────────────
   # Read-only verbs only. The Secret get/list permission is unavoidable for

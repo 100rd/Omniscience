@@ -38,6 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default-flip parity gaps tracked under epic #199. RBAC adds
   `get`/`list`/`watch` on `persistentvolumeclaims`; no other verbs.
 
+- **Operator: `CronJob` watcher (issue #210).** The operator now
+  watches `batch/v1 CronJob` cluster-wide and emits schedule, timezone,
+  suspend, concurrencyPolicy, deadline/history limits, and status
+  (lastScheduleTime, lastSuccessfulTime, active job count). The embedded
+  JobTemplate is intentionally not emitted — the existing Job watcher
+  (#157) covers the spawned Jobs. Closes one of the v0.4 default-flip
+  parity gaps tracked under epic #199. RBAC adds `cronjobs` to the
+  existing `batch` apiGroup verbs; no new apiGroup added.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
