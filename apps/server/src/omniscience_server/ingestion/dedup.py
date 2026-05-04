@@ -147,6 +147,13 @@ ACTION_TTL_REASSIGN_TO_AGENTIC: Final[str] = "ttl_reassign_to_agentic"
 ACTION_DEDUP_DISABLED: Final[str] = "dedup_disabled"
 ACTION_NON_K8S_BYPASS: Final[str] = "non_k8s_bypass"
 
+# Set when the OMNISCIENCE_K8S_AGENTIC_ALLOWED flag is false AND an event
+# arrives from the k8s-agentic emitter.  The event is dropped at the gate
+# boundary BEFORE any DB lookup — this is the v0.4 server-side enforcement
+# of the agentic deprecation (ADR-0011, issue #216).  v0.3 default for
+# the flag is true so this action is never observed in v0.3 deployments.
+ACTION_AGENTIC_FLAG_DISABLED: Final[str] = "agentic_flag_disabled"
+
 # external_id shape produced by the operator (see
 # ``operator/internal/entity/entity.go``):
 #
@@ -201,6 +208,14 @@ class DedupConfig:
     agentic.  Always a finite real number; the
     ``-1`` disable sentinel collapses to ``enabled=False`` upstream."""
 
+    agentic_allowed: bool = True
+    """When False, every k8s-agentic event is dropped at the gate
+    boundary before any DB lookup (issue #216, v0.4 default-flip
+    enforcement per ADR-0011).  v0.3 default is True so the wiring is
+    a no-op in current deployments; v0.4 will flip the operator-shipped
+    default to False.  Operator and non-K8s emitters are unaffected by
+    this flag — only k8s-agentic short-circuits."""
+
 
 @dataclass(frozen=True, slots=True)
 class DedupDecision:
@@ -252,21 +267,25 @@ def config_from_env(
     *,
     enabled_env: str | None,
     ttl_hours_env: str | None,
+    agentic_allowed_env: str | None = None,
 ) -> DedupConfig:
-    """Translate the two environment variables into a :class:`DedupConfig`.
+    """Translate the dedup environment variables into a :class:`DedupConfig`.
 
-    Both env vars are honoured for documentation symmetry with the issue:
+    Env vars honoured:
 
-    * ``OMNISCIENCE_DEDUP_ENABLED`` = ``"false"`` -> disabled.
-    * ``OMNISCIENCE_INGEST_DEDUP_TTL_HOURS`` = ``"-1"`` -> disabled.
+    * ``OMNISCIENCE_DEDUP_ENABLED`` = ``"false"`` -> dedup disabled.
+    * ``OMNISCIENCE_INGEST_DEDUP_TTL_HOURS`` = ``"-1"`` -> dedup disabled.
     * ``OMNISCIENCE_INGEST_DEDUP_TTL_HOURS`` = ``"0"`` -> sticky (no TTL).
-    * Any positive number -> TTL in hours.
+    * Any positive ``OMNISCIENCE_INGEST_DEDUP_TTL_HOURS`` -> TTL in hours.
+    * ``OMNISCIENCE_K8S_AGENTIC_ALLOWED`` = ``"false"`` -> drop k8s-agentic
+      events at the gate boundary (issue #216, ADR-0011).  Default ``True``
+      in v0.3; v0.4 flips the operator-shipped default to ``False``.
 
     Unparseable values fall back to the secure default
-    (``enabled=True``, ``ttl=24h``) and are logged at WARNING.  This
-    is the closed posture for a misconfiguration — the same posture
-    used elsewhere on the boundary (e.g. retention worker, OTel
-    receiver).
+    (``enabled=True``, ``ttl=24h``, ``agentic_allowed=True``) and are
+    logged at WARNING.  This is the closed posture for a misconfiguration
+    on every dial — the same posture used elsewhere on the boundary
+    (retention worker, OTel receiver).
     """
     enabled = True
     if enabled_env is not None:
@@ -303,7 +322,22 @@ def config_from_env(
             ttl_hours = DEFAULT_TTL_HOURS
 
     ttl_seconds: float | None = None if ttl_hours is None else float(ttl_hours) * 3600.0
-    return DedupConfig(enabled=enabled, ttl_seconds=ttl_seconds)
+
+    agentic_allowed = True
+    if agentic_allowed_env is not None:
+        agentic_allowed = agentic_allowed_env.strip().lower() not in {
+            "false",
+            "0",
+            "no",
+            "off",
+            "",
+        }
+
+    return DedupConfig(
+        enabled=enabled,
+        ttl_seconds=ttl_seconds,
+        agentic_allowed=agentic_allowed,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -348,6 +382,25 @@ class DedupGate:
         deterministically.
         """
         kind = parse_kind_from_external_id(event.external_id)
+
+        # First: agentic-allowed flag (issue #216 / ADR-0011).  When the
+        # operator owns K8s coverage and the deployment has flipped the
+        # flag closed, drop k8s-agentic events at the gate boundary
+        # before any DB lookup.  Operator and non-K8s events are
+        # unaffected.  This check runs BEFORE the dedup-disabled
+        # short-circuit so the flag is enforced even in deployments
+        # that have explicitly turned dedup off (debug envs, etc.).
+        if not self._config.agentic_allowed and event.source_type == EMITTER_AGENTIC:
+            INGESTION_DEDUP_ACTION_TOTAL.labels(
+                kind=kind,
+                action=ACTION_AGENTIC_FLAG_DISABLED,
+            ).inc()
+            return DedupDecision(
+                action=DedupAction.drop,
+                reason=ACTION_AGENTIC_FLAG_DISABLED,
+                authority_emitter=EMITTER_OPERATOR,
+                kind=kind,
+            )
 
         # Fast path: dedup disabled or non-K8s emitter — bypass the table.
         if not self._config.enabled:

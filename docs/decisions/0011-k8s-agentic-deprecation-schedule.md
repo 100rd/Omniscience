@@ -95,11 +95,17 @@ connector:
 - The agentic module **moves out** of the base install.  Customers who
   want to keep using it must explicitly install
   `omniscience-connectors[k8s-agentic]`.
-- A new server-side feature flag
-  `OMNISCIENCE_K8S_AGENTIC_ALLOWED` is wired in the ingestion worker.
-  Default: **`false`** in v0.4.  When `false`, ingestion drops every
-  event with `source_type="k8s-agentic"` at the gate (before dedup);
-  `omniscience_ingest_emitter_disallowed_total` increments per drop.
+- The server-side feature flag `OMNISCIENCE_K8S_AGENTIC_ALLOWED` is
+  **already wired** in the dedup gate as of issue #216 (v0.3).  The
+  v0.4 cut only flips the operator-shipped default from `true` to
+  `false`; no code change is required at v0.4 release time.  When
+  `false`, the gate short-circuits every event with
+  `source_type="k8s-agentic"` BEFORE any DB lookup; the existing
+  `omniscience_ingestion_dedup_total{action="agentic_flag_disabled"}`
+  counter increments per drop.  (The ADR originally named a separate
+  `omniscience_ingest_emitter_disallowed_total` counter; #216 chose
+  to reuse the existing dedup-action counter with a new action label
+  to avoid extra metric cardinality and keep dashboards consistent.)
 - Customers still on the agentic path at v0.4 have a single Helm /
   env-var change to roll back: `OMNISCIENCE_K8S_AGENTIC_ALLOWED=true`.
   This is the **rollback switch**.

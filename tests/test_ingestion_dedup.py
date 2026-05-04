@@ -35,6 +35,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omniscience_server.ingestion.dedup import (
+    ACTION_AGENTIC_FLAG_DISABLED,
     ACTION_DEDUP_DISABLED,
     ACTION_FIRST_AUTHORITY_ASSIGNED,
     ACTION_NO_OP_AGENTIC_DROPPED,
@@ -211,6 +212,120 @@ class TestConfigFromEnv:
         for raw in ["false", "FALSE", "0", "no", "off", ""]:
             cfg = config_from_env(enabled_env=raw, ttl_hours_env=None)
             assert cfg.enabled is False, raw
+
+    # ── #216: OMNISCIENCE_K8S_AGENTIC_ALLOWED parsing ──────────────────────
+
+    def test_agentic_allowed_default_true_when_unset(self) -> None:
+        cfg = config_from_env(enabled_env=None, ttl_hours_env=None)
+        assert cfg.agentic_allowed is True
+
+    def test_agentic_allowed_explicit_true_passes_through(self) -> None:
+        cfg = config_from_env(enabled_env=None, ttl_hours_env=None, agentic_allowed_env="true")
+        assert cfg.agentic_allowed is True
+
+    def test_agentic_allowed_falsy_synonyms(self) -> None:
+        for raw in ["false", "FALSE", "0", "no", "off", ""]:
+            cfg = config_from_env(enabled_env=None, ttl_hours_env=None, agentic_allowed_env=raw)
+            assert cfg.agentic_allowed is False, raw
+
+    def test_agentic_allowed_independent_of_dedup_enabled(self) -> None:
+        # Disabling dedup must NOT also disable the agentic-allowed flag.
+        # The two dials are orthogonal; the flag is enforced regardless of
+        # the dedup gate's enabled state.
+        cfg = config_from_env(enabled_env="false", ttl_hours_env=None, agentic_allowed_env="false")
+        assert cfg.enabled is False
+        assert cfg.agentic_allowed is False
+
+
+# ---------------------------------------------------------------------------
+# #216: agentic-allowed flag short-circuit at the gate boundary
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestAgenticAllowedFlag:
+    """The flag drops agentic events at the gate before any DB lookup,
+    leaves operator and non-K8s events alone, and is enforced even when
+    the dedup gate itself is disabled."""
+
+    async def test_flag_false_drops_agentic_event_before_db_lookup(self) -> None:
+        factory, session = _make_session(select_row=None)
+        gate = DedupGate(
+            factory,
+            DedupConfig(enabled=True, ttl_seconds=86400.0, agentic_allowed=False),
+        )
+        ws = uuid.uuid4()
+        event = _make_event(source_type=EMITTER_AGENTIC)
+
+        before = _counter(
+            INGESTION_DEDUP_ACTION_TOTAL,
+            kind="Pod",
+            action=ACTION_AGENTIC_FLAG_DISABLED,
+        )
+        decision = await gate.evaluate(workspace_id=ws, event=event)
+        after = _counter(
+            INGESTION_DEDUP_ACTION_TOTAL,
+            kind="Pod",
+            action=ACTION_AGENTIC_FLAG_DISABLED,
+        )
+
+        assert decision.action == DedupAction.drop
+        assert decision.reason == ACTION_AGENTIC_FLAG_DISABLED
+        assert decision.authority_emitter == EMITTER_OPERATOR
+        assert after == before + 1
+        # Critical: NO database query happened.  The session factory was
+        # never invoked because the short-circuit returned before the
+        # ``async with`` block.
+        factory.assert_not_called()
+        session.execute.assert_not_called()
+
+    async def test_flag_false_leaves_operator_event_unchanged(self) -> None:
+        factory, _ = _make_session(select_row=None)
+        gate = DedupGate(
+            factory,
+            DedupConfig(enabled=True, ttl_seconds=86400.0, agentic_allowed=False),
+        )
+        event = _make_event(source_type=EMITTER_OPERATOR)
+
+        decision = await gate.evaluate(workspace_id=uuid.uuid4(), event=event)
+
+        assert decision.action == DedupAction.accept
+        # Operator event went through the normal first-write path.
+        assert decision.reason == ACTION_FIRST_AUTHORITY_ASSIGNED
+        factory.assert_called_once()
+
+    async def test_flag_false_leaves_non_k8s_event_unchanged(self) -> None:
+        factory, _ = _make_session(select_row=None)
+        gate = DedupGate(
+            factory,
+            DedupConfig(enabled=True, ttl_seconds=86400.0, agentic_allowed=False),
+        )
+        event = _make_event(source_type="git", external_id="git/path/to/file.py")
+
+        decision = await gate.evaluate(workspace_id=uuid.uuid4(), event=event)
+
+        # Non-K8s emitter takes the existing non-K8s bypass path.
+        assert decision.action == DedupAction.accept
+        assert decision.reason == ACTION_NON_K8S_BYPASS
+        # Non-K8s bypass also short-circuits before the DB lookup.
+        factory.assert_not_called()
+
+    async def test_flag_false_enforced_even_when_dedup_disabled(self) -> None:
+        # The flag check runs BEFORE the dedup-disabled short-circuit, so
+        # an operator that has dedup off in a debug env still gets agentic
+        # events dropped when the v0.4 flag is set.
+        factory, _session = _make_session(select_row=None)
+        gate = DedupGate(
+            factory,
+            DedupConfig(enabled=False, ttl_seconds=None, agentic_allowed=False),
+        )
+        event = _make_event(source_type=EMITTER_AGENTIC)
+
+        decision = await gate.evaluate(workspace_id=uuid.uuid4(), event=event)
+
+        assert decision.action == DedupAction.drop
+        assert decision.reason == ACTION_AGENTIC_FLAG_DISABLED
+        factory.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
