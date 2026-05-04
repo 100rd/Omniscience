@@ -15,6 +15,7 @@ import (
 	rolloutsv1alpha1 "github.com/argoproj/argo-rollouts/pkg/apis/rollouts/v1alpha1"
 	"github.com/google/uuid"
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -500,6 +501,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := crb.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("clusterrolebinding reconciler setup: %w", err)
 	}
+	// ── #214 HorizontalPodAutoscaler watcher (epic #199 v0.4 parity — last release-blocker) ──
+	if hpa, err := controller.NewHPAReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("hpa reconciler init: %w", err)
+	} else if err := hpa.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("hpa reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -710,6 +717,8 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		{kind: "RoleBinding", listFactory: func() client.ObjectList { return &rbacv1.RoleBindingList{} }},
 		{kind: "ClusterRole", listFactory: func() client.ObjectList { return &rbacv1.ClusterRoleList{} }},
 		{kind: "ClusterRoleBinding", listFactory: func() client.ObjectList { return &rbacv1.ClusterRoleBindingList{} }},
+		// Autoscaling (#214)
+		{kind: "HorizontalPodAutoscaler", listFactory: func() client.ObjectList { return &autoscalingv2.HorizontalPodAutoscalerList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
