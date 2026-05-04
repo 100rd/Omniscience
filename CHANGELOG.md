@@ -47,6 +47,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parity gaps tracked under epic #199. RBAC adds `cronjobs` to the
   existing `batch` apiGroup verbs; no new apiGroup added.
 
+- **Operator: RBAC watchers — `Role`, `RoleBinding`, `ClusterRole`,
+  `ClusterRoleBinding` (issue #212).** The operator now watches all
+  four `rbac.authorization.k8s.io/v1` kinds cluster-wide. Role +
+  ClusterRole emit a deterministic-JSON representation of `rules` (each
+  per-rule string slice sorted, then rules sorted by JSON byte-form);
+  RoleBinding + ClusterRoleBinding emit `roleRef` and `subjects` (sorted
+  by kind, namespace, name). Closes 4 of the v0.4 default-flip parity
+  gaps tracked under epic #199 in a single PR. RBAC adds a new
+  `rbac.authorization.k8s.io` apiGroup with read-only verbs on the four
+  resources.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**

@@ -18,6 +18,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	resourcev1beta1 "k8s.io/api/resource/v1beta1"
 	storagev1 "k8s.io/api/storage/v1"
 	unstructuredv1 "k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -478,6 +479,27 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := cj.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("cronjob reconciler setup: %w", err)
 	}
+	// ── #212 RBAC watchers (Role / RoleBinding / ClusterRole / ClusterRoleBinding) ──
+	if r, err := controller.NewRoleReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("role reconciler init: %w", err)
+	} else if err := r.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("role reconciler setup: %w", err)
+	}
+	if rb, err := controller.NewRoleBindingReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("rolebinding reconciler init: %w", err)
+	} else if err := rb.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("rolebinding reconciler setup: %w", err)
+	}
+	if cr, err := controller.NewClusterRoleReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("clusterrole reconciler init: %w", err)
+	} else if err := cr.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("clusterrole reconciler setup: %w", err)
+	}
+	if crb, err := controller.NewClusterRoleBindingReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("clusterrolebinding reconciler init: %w", err)
+	} else if err := crb.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("clusterrolebinding reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -683,6 +705,11 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		{kind: "PersistentVolumeClaim", listFactory: func() client.ObjectList { return &corev1.PersistentVolumeClaimList{} }},
 		// Scheduled batch (#210)
 		{kind: "CronJob", listFactory: func() client.ObjectList { return &batchv1.CronJobList{} }},
+		// RBAC (#212)
+		{kind: "Role", listFactory: func() client.ObjectList { return &rbacv1.RoleList{} }},
+		{kind: "RoleBinding", listFactory: func() client.ObjectList { return &rbacv1.RoleBindingList{} }},
+		{kind: "ClusterRole", listFactory: func() client.ObjectList { return &rbacv1.ClusterRoleList{} }},
+		{kind: "ClusterRoleBinding", listFactory: func() client.ObjectList { return &rbacv1.ClusterRoleBindingList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
