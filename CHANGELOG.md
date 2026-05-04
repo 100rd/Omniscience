@@ -31,6 +31,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracked under epic #199. RBAC adds `get`/`list`/`watch` on
   `serviceaccounts`; no other verbs.
 
+- **Operator: `PersistentVolumeClaim` watcher (issue #208).** The
+  operator now watches `core/v1 PersistentVolumeClaim` cluster-wide and
+  emits access modes, storage class, bound PV name, volume mode,
+  requests/limits storage, and status phase. Closes one of the v0.4
+  default-flip parity gaps tracked under epic #199. RBAC adds
+  `get`/`list`/`watch` on `persistentvolumeclaims`; no other verbs.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**

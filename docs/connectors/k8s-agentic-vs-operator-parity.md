@@ -62,7 +62,7 @@ migration described in the
 | `Namespace` | yes | yes (`namespace_controller.go`, `namespace.go`) | **COVERED** | Operator additionally emits a synthetic `Cluster` anchor (issue #159) — strict superset. |
 | `Node` | yes | yes (`node_controller.go`, `node.go`) | **COVERED** | |
 | `PersistentVolume` | yes | yes (`persistentvolume_controller.go`, `persistentvolume.go`) | **COVERED** | |
-| `PersistentVolumeClaim` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Operator covers `PersistentVolume` but not `PersistentVolumeClaim`. Listed in agentic's `_DEFAULT_INCLUDE_KINDS`. |
+| `PersistentVolumeClaim` | yes | yes (`persistentvolumeclaim_controller.go`, `persistentvolumeclaim_mapper.go`) | **COVERED** | Operator emits via watch (issue #208). Mapper renders access modes (sorted JSON), storage class name, bound PV name, volume mode, requests/limits storage, and status phase. Namespace appears only in `external_id` and base metadata, never as a metric label. |
 | `Pod` | yes | yes (`pod_controller.go`, `entity.go::PodToEvent`) | **COVERED** | Note: agentic's `_DEFAULT_EXCLUDE_KINDS` lists Pod, but the LLM is allowed to override and the explicit `_KIND_CORE` mapping is present. Operator covers Pod as a first-class kind. |
 | `ReplicationController` | yes (`_KIND_CORE`) | **no** | **NOT-COVERED** (low priority) | Legacy kind; superseded by `ReplicaSet` upstream. Most clusters have zero `ReplicationController` resources. **Acceptable v0.5 gap** if customer telemetry confirms zero usage; flagged for explicit confirmation before v0.4 cut. |
 | `ResourceQuota` | yes | yes (`resourcequota_controller.go`, `resourcequota_mapper.go`) | **COVERED** | Operator emits via watch (issue #204). Mapper renders `spec.hard`, `spec.scopes`, and `spec.scopeSelector` as deterministic JSON in metadata; namespace appears only in `external_id` and base metadata, never as a metric label. |
@@ -156,23 +156,23 @@ migration described in the
 
 | Status | Count | Kinds |
 |---|---|---|
-| **COVERED** | 17 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount |
+| **COVERED** | 18 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim |
 | **PARTIAL** | 7 | Argo Rollouts (Rollout), ArgoCD (Application, ApplicationSet), DRA (DeviceClass, ResourceClaim, ResourceClaimTemplate, ResourceSlice) — all gated on customer cluster CRD installation |
-| **NOT-COVERED** | 8 | PersistentVolumeClaim, ReplicationController (low priority), CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
+| **NOT-COVERED** | 7 | ReplicationController (low priority), CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
 | **OPERATOR-ONLY** | 3 | Secret (redacted), StorageClass, Cluster (synthetic) |
 | **NEITHER** | 1 | Event |
 
-Total: 17 + 7 + 8 + 3 + 1 = **36 rows**.
+Total: 18 + 7 + 7 + 3 + 1 = **36 rows**.
 
 ### Release-blocker summary for v0.4 default-disable
 
-The following 7 kinds are **NOT-COVERED** by the operator and emit
+The following 6 kinds are **NOT-COVERED** by the operator and emit
 from the agentic connector's `_DEFAULT_INCLUDE_KINDS`. Each must be
 addressed before the v0.4 release flips
 `OMNISCIENCE_K8S_AGENTIC_ALLOWED` to `false` by default:
 
 1. ~~`LimitRange`~~ — **DONE** in issue #202 (namespace resource caps).
-2. `PersistentVolumeClaim` — persistent storage requests
+2. ~~`PersistentVolumeClaim`~~ — **DONE** in issue #208 (persistent storage requests).
 3. ~~`ResourceQuota`~~ — **DONE** in issue #204 (namespace quota enforcement).
 4. ~~`ServiceAccount`~~ — **DONE** in issue #206 (workload identity).
 5. `CronJob` — scheduled batch workloads
