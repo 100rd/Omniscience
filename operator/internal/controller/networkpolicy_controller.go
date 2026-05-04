@@ -15,6 +15,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/100rd/omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
@@ -64,6 +65,7 @@ func (r *NetworkPolicyReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	switch {
 	case err == nil:
 		ev := entity.NetworkPolicyToEvent(&np, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
+		opmetrics.RecordEmit("NetworkPolicy", &np) // #198 freshness probe
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish networkpolicy event: %w", perr)

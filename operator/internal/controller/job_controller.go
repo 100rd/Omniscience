@@ -14,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/100rd/omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
@@ -65,6 +66,7 @@ func (r *JobReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	switch {
 	case err == nil:
 		ev := entity.JobToEvent(&j, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
+		opmetrics.RecordEmit("Job", &j) // #198 freshness probe
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish job event: %w", perr)

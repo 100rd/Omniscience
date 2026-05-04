@@ -19,6 +19,7 @@ import (
 
 	"github.com/100rd/omniscience/operator/internal/argocd"
 	"github.com/100rd/omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
@@ -73,6 +74,7 @@ func (r *ArgoCDApplicationSetReconciler) Reconcile(ctx context.Context, req ctrl
 			return ctrl.Result{}, nil
 		}
 		ev := entity.ApplicationSetToEvent(appset, entity.ActionUpdated, r.WorkspaceID, r.ClusterID, r.ClusterName, r.Now())
+		opmetrics.RecordEmit(argocd.KindApplicationSet, u) // #198 freshness probe — use unstructured for full ObjectMeta
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish applicationset event: %w", perr)

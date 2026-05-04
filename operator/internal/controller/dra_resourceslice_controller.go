@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/100rd/omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
 	"github.com/100rd/omniscience/operator/internal/publisher"
 )
 
@@ -76,6 +77,7 @@ func (r *ResourceSliceReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	case err == nil:
 		// Derived cluster_id (issue #167); see dra_deviceclass_controller.go.
 		ev := entity.ResourceSliceToEvent(&rc, entity.ActionUpdated, r.WorkspaceID, entity.DeriveClusterID(r.WorkspaceID, r.ClusterName), r.ClusterName, r.Now())
+		opmetrics.RecordEmit("ResourceSlice", &rc) // #198 freshness probe
 		if perr := r.Publisher.Publish(ctx, ev); perr != nil {
 			logger.Error(perr, "publish failed; will requeue")
 			return ctrl.Result{}, fmt.Errorf("publish resourceslice event: %w", perr)
