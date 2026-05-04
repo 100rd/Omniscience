@@ -448,6 +448,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := sec.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("secret reconciler setup: %w", err)
 	}
+	// ── #202 LimitRange watcher (epic #199 v0.4 parity) ────────────────────
+	if lr, err := controller.NewLimitRangeReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("limitrange reconciler init: %w", err)
+	} else if err := lr.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("limitrange reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -644,6 +650,8 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		{kind: "NetworkPolicy", listFactory: func() client.ObjectList { return &networkingv1.NetworkPolicyList{} }},
 		{kind: "ConfigMap", listFactory: func() client.ObjectList { return &corev1.ConfigMapList{} }},
 		{kind: "Secret", listFactory: func() client.ObjectList { return &corev1.SecretList{} }},
+		// Resource governance (#202)
+		{kind: "LimitRange", listFactory: func() client.ObjectList { return &corev1.LimitRangeList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
