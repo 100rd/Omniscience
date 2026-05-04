@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — v0.3 line
 
+### Added
+
+- **Operator: `LimitRange` watcher (issue #202).** The operator now watches
+  `core/v1 LimitRange` cluster-wide and emits a deterministic-JSON
+  representation of `spec.limits[]` (defaults / min / max /
+  maxLimitRequestRatio for Container, Pod, PersistentVolumeClaim, and
+  similar object types). Closes one of the v0.4 default-flip parity gaps
+  tracked under epic #199. RBAC adds `get`/`list`/`watch` on
+  `limitranges`; no other verbs.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
