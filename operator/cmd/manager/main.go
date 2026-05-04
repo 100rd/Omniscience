@@ -466,6 +466,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := sa.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("serviceaccount reconciler setup: %w", err)
 	}
+	// ── #208 PersistentVolumeClaim watcher (epic #199 v0.4 parity) ─────────
+	if pvc, err := controller.NewPersistentVolumeClaimReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("persistentvolumeclaim reconciler init: %w", err)
+	} else if err := pvc.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("persistentvolumeclaim reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -667,6 +673,8 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		{kind: "ResourceQuota", listFactory: func() client.ObjectList { return &corev1.ResourceQuotaList{} }},
 		// Identity (#206)
 		{kind: "ServiceAccount", listFactory: func() client.ObjectList { return &corev1.ServiceAccountList{} }},
+		// Storage claims (#208)
+		{kind: "PersistentVolumeClaim", listFactory: func() client.ObjectList { return &corev1.PersistentVolumeClaimList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
