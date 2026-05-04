@@ -66,6 +66,15 @@ rules:
     resources: ["persistentvolumeclaims"]
     verbs: ["get", "list", "watch"]
   # ── end #208 ──────────────────────────────────────────────────────────
+  # ── #212 RBAC watchers (Role + RoleBinding + ClusterRole + ClusterRoleBinding) ──
+  # Read-only verbs only. The operator emits the RBAC graph itself — it
+  # never grants or revokes permissions. Role / RoleBinding are namespaced;
+  # ClusterRole / ClusterRoleBinding are cluster-scoped. All under
+  # rbac.authorization.k8s.io.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch"]
+  # ── end #212 ──────────────────────────────────────────────────────────
   # --- BEGIN issue #159: cluster-scoped watcher RBAC ---
   # Node, Namespace, PersistentVolume — all cluster-scoped under the core
   # API group. ClusterRole + ClusterRoleBinding above already grants the

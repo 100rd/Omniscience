@@ -105,10 +105,10 @@ migration described in the
 
 | Kind | agentic.emits | operator.emits | Status | Notes |
 |---|---|---|---|---|
-| `Role` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Listed in agentic's `_DEFAULT_INCLUDE_KINDS`. RBAC indexing is a security-posture-relevant capability. |
-| `RoleBinding` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Same as Role. |
-| `ClusterRole` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Same as Role. |
-| `ClusterRoleBinding` | yes | **no** | **NOT-COVERED** | **Release-blocker for v0.4.** Same as Role. |
+| `Role` | yes | yes (`role_controller.go`, `role_mapper.go`) | **COVERED** | Operator emits via watch (issue #212). Mapper renders `rules` as deterministic JSON with each per-rule string slice sorted, then rules sorted by JSON byte-form. Namespace appears only in `external_id` and base metadata. |
+| `RoleBinding` | yes | yes (`rolebinding_controller.go`, `rolebinding_mapper.go`) | **COVERED** | Operator emits via watch (issue #212). Mapper renders `roleRef` (kind/name/apiGroup) and `subjects` as deterministic JSON sorted by (kind, namespace, name). |
+| `ClusterRole` | yes | yes (`clusterrole_controller.go`, `role_mapper.go`) | **COVERED** | Operator emits via watch (issue #212). Same payload shape as Role; cluster-scoped. |
+| `ClusterRoleBinding` | yes | yes (`clusterrolebinding_controller.go`, `rolebinding_mapper.go`) | **COVERED** | Operator emits via watch (issue #212). Same payload shape as RoleBinding; cluster-scoped. |
 
 ---
 
@@ -156,18 +156,18 @@ migration described in the
 
 | Status | Count | Kinds |
 |---|---|---|
-| **COVERED** | 19 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim, CronJob |
+| **COVERED** | 23 | ConfigMap, Endpoints, LimitRange, Namespace, Node, PersistentVolume, Pod, Service, Deployment, DaemonSet, ReplicaSet, StatefulSet, Job, Ingress, NetworkPolicy, ResourceQuota, ServiceAccount, PersistentVolumeClaim, CronJob, Role, RoleBinding, ClusterRole, ClusterRoleBinding |
 | **PARTIAL** | 7 | Argo Rollouts (Rollout), ArgoCD (Application, ApplicationSet), DRA (DeviceClass, ResourceClaim, ResourceClaimTemplate, ResourceSlice) — all gated on customer cluster CRD installation |
-| **NOT-COVERED** | 6 | ReplicationController (low priority), Role, RoleBinding, ClusterRole, ClusterRoleBinding, HorizontalPodAutoscaler |
+| **NOT-COVERED** | 2 | ReplicationController (low priority), HorizontalPodAutoscaler |
 | **OPERATOR-ONLY** | 3 | Secret (redacted), StorageClass, Cluster (synthetic) |
 | **NEITHER** | 1 | Event |
 
-Total: 19 + 7 + 6 + 3 + 1 = **36 rows**.
+Total: 23 + 7 + 2 + 3 + 1 = **36 rows**.
 
 ### Release-blocker summary for v0.4 default-disable
 
-The following 5 kinds are **NOT-COVERED** by the operator and emit
-from the agentic connector's `_DEFAULT_INCLUDE_KINDS`. Each must be
+The following 1 kind is **NOT-COVERED** by the operator and emits
+from the agentic connector's `_DEFAULT_INCLUDE_KINDS`. It must be
 addressed before the v0.4 release flips
 `OMNISCIENCE_K8S_AGENTIC_ALLOWED` to `false` by default:
 
@@ -176,10 +176,10 @@ addressed before the v0.4 release flips
 3. ~~`ResourceQuota`~~ — **DONE** in issue #204 (namespace quota enforcement).
 4. ~~`ServiceAccount`~~ — **DONE** in issue #206 (workload identity).
 5. ~~`CronJob`~~ — **DONE** in issue #210 (scheduled batch workloads).
-6. `Role` — namespaced RBAC
-7. `RoleBinding` — namespaced RBAC binding
-8. `ClusterRole` — cluster-scoped RBAC
-9. `ClusterRoleBinding` — cluster-scoped RBAC binding
+6. ~~`Role`~~ — **DONE** in issue #212 (namespaced RBAC).
+7. ~~`RoleBinding`~~ — **DONE** in issue #212 (namespaced RBAC binding).
+8. ~~`ClusterRole`~~ — **DONE** in issue #212 (cluster-scoped RBAC).
+9. ~~`ClusterRoleBinding`~~ — **DONE** in issue #212 (cluster-scoped RBAC binding).
 10. `HorizontalPodAutoscaler` — workload autoscaling
 
 `ReplicationController` is also NOT-COVERED but acceptable as a v0.5
