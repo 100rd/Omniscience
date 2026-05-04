@@ -17,6 +17,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tracked under epic #199. RBAC adds `get`/`list`/`watch` on
   `limitranges`; no other verbs.
 
+- **Operator: `ResourceQuota` watcher (issue #204).** The operator now
+  watches `core/v1 ResourceQuota` cluster-wide and emits a deterministic-
+  JSON representation of `spec.hard`, `spec.scopes`, and
+  `spec.scopeSelector`. Closes one of the v0.4 default-flip parity gaps
+  tracked under epic #199. RBAC adds `get`/`list`/`watch` on
+  `resourcequotas`; no other verbs.
+
 ### Deprecated
 
 - **`k8s-agentic` connector deprecation announced (issue #168, ADR-0011).**
