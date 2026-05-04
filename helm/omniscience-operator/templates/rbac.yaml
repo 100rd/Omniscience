@@ -44,6 +44,12 @@ rules:
     resources: ["limitranges"]
     verbs: ["get", "list", "watch"]
   # ── end #202 ──────────────────────────────────────────────────────────
+  # ── #204 ResourceQuota watcher (epic #199 v0.4 parity) ────────────────
+  # Read-only verbs only. ResourceQuota is namespaced under core/v1.
+  - apiGroups: [""]
+    resources: ["resourcequotas"]
+    verbs: ["get", "list", "watch"]
+  # ── end #204 ──────────────────────────────────────────────────────────
   # --- BEGIN issue #159: cluster-scoped watcher RBAC ---
   # Node, Namespace, PersistentVolume — all cluster-scoped under the core
   # API group. ClusterRole + ClusterRoleBinding above already grants the

@@ -454,6 +454,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := lr.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("limitrange reconciler setup: %w", err)
 	}
+	// ── #204 ResourceQuota watcher (epic #199 v0.4 parity) ─────────────────
+	if rq, err := controller.NewResourceQuotaReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("resourcequota reconciler init: %w", err)
+	} else if err := rq.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("resourcequota reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -650,8 +656,9 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		{kind: "NetworkPolicy", listFactory: func() client.ObjectList { return &networkingv1.NetworkPolicyList{} }},
 		{kind: "ConfigMap", listFactory: func() client.ObjectList { return &corev1.ConfigMapList{} }},
 		{kind: "Secret", listFactory: func() client.ObjectList { return &corev1.SecretList{} }},
-		// Resource governance (#202)
+		// Resource governance (#202, #204)
 		{kind: "LimitRange", listFactory: func() client.ObjectList { return &corev1.LimitRangeList{} }},
+		{kind: "ResourceQuota", listFactory: func() client.ObjectList { return &corev1.ResourceQuotaList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
