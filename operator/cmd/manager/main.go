@@ -472,6 +472,12 @@ func setupNetworkingAndConfigWatchers(
 	} else if err := pvc.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("persistentvolumeclaim reconciler setup: %w", err)
 	}
+	// ── #210 CronJob watcher (epic #199 v0.4 parity) ───────────────────────
+	if cj, err := controller.NewCronJobReconciler(mgr.GetClient(), pub, workspaceID, clusterID, clusterName); err != nil {
+		return fmt.Errorf("cronjob reconciler init: %w", err)
+	} else if err := cj.SetupWithManager(mgr); err != nil {
+		return fmt.Errorf("cronjob reconciler setup: %w", err)
+	}
 	return nil
 }
 
@@ -675,6 +681,8 @@ func buildCacheSizeKinds(mgr ctrl.Manager, argoPresent bool, logger interface {
 		{kind: "ServiceAccount", listFactory: func() client.ObjectList { return &corev1.ServiceAccountList{} }},
 		// Storage claims (#208)
 		{kind: "PersistentVolumeClaim", listFactory: func() client.ObjectList { return &corev1.PersistentVolumeClaimList{} }},
+		// Scheduled batch (#210)
+		{kind: "CronJob", listFactory: func() client.ObjectList { return &batchv1.CronJobList{} }},
 		// Cluster-scoped (#159)
 		{kind: "Node", listFactory: func() client.ObjectList { return &corev1.NodeList{} }},
 		{kind: "Namespace", listFactory: func() client.ObjectList { return &corev1.NamespaceList{} }},
