@@ -4,7 +4,7 @@
 # static so the operator carries no shell, no libc surface, and runs as
 # UID 65532 (nonroot) by default.
 
-ARG GO_VERSION=1.22
+ARG GO_VERSION=1.23
 FROM golang:${GO_VERSION}-alpine AS builder
 WORKDIR /workspace
 
