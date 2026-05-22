@@ -120,9 +120,7 @@ def _neo4j_factory() -> Callable[[], AsyncIterator[GraphStore]]:
         # through ``get_driver()``.  Using ``.with_env("NEO4J_AUTH", ...)``
         # here is silently overridden by the wrapper's own configure step
         # (the same trap the bootstrap test in PR #227 documents).
-        with Neo4jContainer(
-            "neo4j:5.19-community", password="contract_test_password"
-        ) as neo4j:
+        with Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j:
             config = Neo4jStoreConfig(
                 uri=neo4j.get_connection_url(),
                 username="neo4j",
