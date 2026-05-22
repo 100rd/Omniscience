@@ -7,21 +7,30 @@ Two layers
 ----------
 
 1. **Pure-Python lints** (run unconditionally) — assert the
-   ``_BOOTSTRAP_STATEMENTS`` tuple includes the six new bitemporal
-   DDL statements, that every new index is composite on
-   ``workspace_id`` first, and that the bitemporal DDL appears
-   *after* the ADR-0005 carry-forward statements (ordering matters
-   only for human review, but stable ordering helps reviewers).
+   ``_BOOTSTRAP_STATEMENTS`` tuple includes the new bitemporal
+   DDL statements that remain static, that every new node-label
+   index is composite on ``workspace_id`` first, and that the
+   bitemporal DDL appears *after* the ADR-0005 carry-forward
+   statements (ordering matters only for human review, but stable
+   ordering helps reviewers).
 
 2. **Live Neo4j contract** (opt-in via
    ``OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1``) — spins up a fresh
    Neo4j container, runs ``connect()``, then queries
    ``SHOW CONSTRAINTS`` / ``SHOW INDEXES`` and asserts every entry
-   from ADR-0008 §4 exists.  Mirrors the gate in
+   from ADR-0008 §4 (node-label DDL) exists.  Mirrors the gate in
    :mod:`tests.test_graph_store_contract`.
 
-The contract tests are skipped when Docker / testcontainers-neo4j is
-unavailable; the lint tests always run.
+Relationship-property indexes (issue #224 / ADR-0012) are emitted
+dynamically per relationship type at bootstrap time, so their
+end-to-end coverage lives in the integration test at
+:mod:`tests.integration.test_neo4j_bootstrap_schema` — which runs
+in CI without an opt-in env var.  The dynamic path cannot be lint-
+checked from a string tuple, so the unit-level tests below cover
+only the static node-label DDL.
+
+The contract tests in this module are skipped when Docker /
+testcontainers-neo4j is unavailable; the lint tests always run.
 """
 
 from __future__ import annotations
@@ -34,18 +43,21 @@ from omniscience_index.stores import neo4j_store
 from omniscience_index.stores.neo4j_store import (
     _BITEMPORAL_BACKFILL_STATEMENTS,
     _BOOTSTRAP_STATEMENTS,
+    _EDGE_INDEX_TEMPLATES,
     Neo4jGraphStore,
     Neo4jStoreConfig,
 )
 
-# ADR-0008 §4 — every new index/constraint name MUST appear in the bootstrap.
+# ADR-0008 §4 — every new node-label index/constraint name MUST appear in
+# the static bootstrap.  Relationship-property indexes
+# (``edge_workspace_valid_window`` / ``edge_workspace_recorded_at``) were
+# moved to the per-type dynamic path in issue #224 / ADR-0012; their
+# bootstrap coverage is asserted by the integration test.
 _ADR_0008_DDL_NAMES: tuple[str, ...] = (
     "entity_state_workspace_id_valid_from_unique",
     "entity_workspace_recorded_at",
     "entity_state_workspace_valid_window",
     "entity_state_workspace_recorded_at",
-    "edge_workspace_valid_window",
-    "edge_workspace_recorded_at",
 )
 
 
@@ -56,7 +68,7 @@ _ADR_0008_DDL_NAMES: tuple[str, ...] = (
 
 @pytest.mark.parametrize("ddl_name", _ADR_0008_DDL_NAMES)
 def test_bootstrap_includes_adr_0008_ddl_by_name(ddl_name: str) -> None:
-    """Every ADR-0008 §4 DDL name must appear verbatim in the bootstrap."""
+    """Every ADR-0008 §4 node-label DDL name must appear in the bootstrap."""
     rendered = "\n".join(_BOOTSTRAP_STATEMENTS)
     assert ddl_name in rendered, (
         f"Bootstrap is missing ADR-0008 §4 DDL '{ddl_name}' — see neo4j_store.py."
@@ -69,27 +81,74 @@ def test_bootstrap_uses_if_not_exists_everywhere() -> None:
         assert "IF NOT EXISTS" in stmt, f"Bootstrap statement is not idempotent: {stmt!r}"
 
 
+def test_edge_index_templates_use_if_not_exists() -> None:
+    """Per-type edge-index templates must be idempotent too (issue #224)."""
+    for prefix, template in _EDGE_INDEX_TEMPLATES:
+        assert "IF NOT EXISTS" in template, (
+            f"Edge index template '{prefix}' is not idempotent: {template!r}"
+        )
+
+
+def test_edge_index_templates_use_typed_relationship_pattern() -> None:
+    """Issue #224 — every edge-index template must specify a relationship type.
+
+    Neo4j 5.x rejects ``FOR ()-[r]-() ON (r.prop)`` at parse time for
+    relationship-property indexes; the typed form ``FOR ()-[r:`{rel_type}`]-()``
+    is required.  This lint is a regression guard against a refactor that
+    accidentally drops the rel-type placeholder.
+    """
+    for prefix, template in _EDGE_INDEX_TEMPLATES:
+        assert "[r:`{rel_type}`]" in template, (
+            f"Edge index template '{prefix}' is missing the rel-type placeholder "
+            f"— Neo4j 5.x will reject this DDL.  See ADR-0012 and issue #224."
+        )
+
+
 def test_new_bitemporal_indexes_are_workspace_id_first() -> None:
-    """ACL invariant — every new index is composite on workspace_id first.
+    """ACL invariant — every new node-label index is composite on workspace_id first.
 
     ADR-0008 §Consequences-security #1 + ACL carry-forward from
     #117 / #119: workspace_id is always the leading column.
+
+    Relationship-property indexes follow the same invariant via the
+    per-type templates in ``_EDGE_INDEX_TEMPLATES``; their workspace-id-
+    first ordering is asserted by
+    ``test_edge_index_templates_are_workspace_id_first`` below.
     """
     composite_index_names = (
         "entity_workspace_recorded_at",
         "entity_state_workspace_valid_window",
         "entity_state_workspace_recorded_at",
-        "edge_workspace_valid_window",
-        "edge_workspace_recorded_at",
     )
     for name in composite_index_names:
         stmt = next(s for s in _BOOTSTRAP_STATEMENTS if name in s)
         # The first parenthesised property in the ON (...) clause must be
         # workspace_id.  We do a substring check on the canonical form
         # used in the templates.
-        assert (
-            "(n.workspace_id" in stmt or "(s.workspace_id" in stmt or "(r.workspace_id" in stmt
-        ), f"Index '{name}' is not workspace_id-first — ACL invariant violated"
+        assert "(n.workspace_id" in stmt or "(s.workspace_id" in stmt, (
+            f"Index '{name}' is not workspace_id-first — ACL invariant violated"
+        )
+
+
+def test_edge_index_templates_are_workspace_id_first() -> None:
+    """ACL invariant for the dynamic edge-index templates (issue #224).
+
+    ``edge_source_id`` is intentionally NOT composite on workspace_id —
+    it indexes the ingestion source identifier alone (mirrors the
+    node-label ``entity_source_id`` index from ADR-0005).  Every other
+    template must lead with ``r.workspace_id``.
+    """
+    workspace_first_prefixes = {
+        "edge_workspace_id",
+        "edge_workspace_valid_window",
+        "edge_workspace_recorded_at",
+    }
+    for prefix, template in _EDGE_INDEX_TEMPLATES:
+        if prefix in workspace_first_prefixes:
+            assert "(r.workspace_id" in template, (
+                f"Edge index template '{prefix}' is not workspace_id-first "
+                "— ACL invariant violated"
+            )
 
 
 def test_entity_state_unique_constraint_includes_workspace_id() -> None:
@@ -102,16 +161,24 @@ def test_entity_state_unique_constraint_includes_workspace_id() -> None:
 
 
 def test_bitemporal_ddl_is_additive_not_replacing() -> None:
-    """ADR-0005 carry-forward DDL must remain in the bootstrap unchanged."""
+    """ADR-0005 carry-forward node-label DDL must remain in the bootstrap unchanged.
+
+    Unit-level only — replaced for the relationship-property DDL by the
+    integration test at :mod:`tests.integration.test_neo4j_bootstrap_schema`,
+    which executes the bootstrap end-to-end against Neo4j 5.19-community.
+    The previous version of this test string-grepped for ``edge_workspace_id``
+    / ``edge_source_id`` in ``_BOOTSTRAP_STATEMENTS`` and gave a false sense
+    of coverage — the DDL it asserted was syntactically invalid Cypher
+    (issue #224).  Those two checks are now performed at runtime by the
+    integration test, which asserts a per-type index was actually created.
+    """
     rendered = "\n".join(_BOOTSTRAP_STATEMENTS)
-    # Pre-existing statements that #130 must not touch.
+    # Pre-existing node-label statements that #130 must not touch.
     for legacy_name in (
         "entity_workspace_id_unique",
         "entity_workspace_kind",
         "entity_workspace_name",
         "entity_source_id",
-        "edge_workspace_id",
-        "edge_source_id",
     ):
         assert legacy_name in rendered, (
             f"ADR-0005 carry-forward DDL '{legacy_name}' was dropped — "
@@ -137,25 +204,39 @@ def test_backfill_statements_kept_separate_from_bootstrap() -> None:
 
 
 def test_bootstrap_count_within_documented_envelope() -> None:
-    """Sanity floor — bootstrap is 12 statements (6 ADR-0005 + 6 ADR-0008).
+    """Sanity floor — static bootstrap is 8 statements (5 ADR-0005 + 3 ADR-0008).
 
     A 1M-node graph hits each `CREATE ... IF NOT EXISTS` once at startup;
-    the marginal cost over the 6 pre-existing DDL statements is the 6
-    new ones from ADR-0008 §4.  Each new statement is a no-op on a
+    the marginal cost over the pre-existing node-label DDL is the
+    bitemporal node-label additions.  Each statement is a no-op on a
     bootstrapped database (`IF NOT EXISTS` resolves in O(1) when the
     constraint or index is already present, since Neo4j 5.x consults
     the schema cache, not the data plane).  The cumulative wall time
-    of the six no-op DDL statements is well under the 200ms p50 target
-    documented in #130 — the bootstrap budget is therefore preserved.
+    is well under the 200ms p50 target documented in #130 — the
+    bootstrap budget is therefore preserved.
 
-    The empirical 200ms-on-1M-nodes target cannot be exercised in the
-    worktree without a populated DB; this test is a sanity floor that
-    prevents the count from drifting unnoticed.
+    Issue #224 / ADR-0012 moved the four relationship-property indexes
+    out of the static tuple and into the per-type dynamic path; the
+    static tuple shrank from 12 to 8 entries.  Dynamic per-type DDL
+    bounds are exercised by the integration test.
     """
-    assert len(_BOOTSTRAP_STATEMENTS) == 12, (
-        "Bootstrap statement count drifted from documented envelope. "
-        "ADR-0005 carries 6 statements; ADR-0008 §4 adds 6. "
+    assert len(_BOOTSTRAP_STATEMENTS) == 8, (
+        "Static bootstrap statement count drifted from documented envelope. "
+        "ADR-0005 carries 5 node-label statements; ADR-0008 §4 adds 3. "
         "Update this test deliberately if the contract changes."
+    )
+
+
+def test_edge_index_template_count_within_documented_envelope() -> None:
+    """Sanity floor for the per-type edge-index templates (issue #224).
+
+    Four templates (workspace_id, source_id, workspace_valid_window,
+    workspace_recorded_at) issued per discovered relationship type.
+    Bumping this count means we're emitting more DDL per type at every
+    cold-start; do it deliberately and update ADR-0012 §Consequences.
+    """
+    assert len(_EDGE_INDEX_TEMPLATES) == 4, (
+        "Edge-index template count drifted — see ADR-0012 §Consequences."
     )
 
 
@@ -185,7 +266,13 @@ pytestmark_contract = pytest.mark.skipif(
 @pytestmark_contract
 @pytest.mark.asyncio
 async def test_connect_creates_all_adr_0008_constraints_and_indexes() -> None:
-    """After ``connect()``, every ADR-0008 §4 entry shows up in the schema."""
+    """After ``connect()``, every ADR-0008 §4 node-label entry shows up.
+
+    Relationship-property index coverage (issue #224 / ADR-0012) is
+    exercised in :mod:`tests.integration.test_neo4j_bootstrap_schema`,
+    which runs without an opt-in env var so the bug never reaches
+    production again.
+    """
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
     with Neo4jContainer("neo4j:5.19-community").with_env(
@@ -224,8 +311,6 @@ async def test_connect_creates_all_adr_0008_constraints_and_indexes() -> None:
         "entity_workspace_recorded_at",
         "entity_state_workspace_valid_window",
         "entity_state_workspace_recorded_at",
-        "edge_workspace_valid_window",
-        "edge_workspace_recorded_at",
     ):
         assert new_index in index_names, f"ADR-0008 §4 index '{new_index}' missing"
 
@@ -237,9 +322,10 @@ async def test_bootstrap_is_fast_on_empty_container() -> None:
 
     Per the issue body: "bootstrap startup adds < 200ms to p50 connect()
     time on a 1M-node graph".  We can't reproduce that here without a
-    populated DB, so the floor we assert is "12 DDL statements complete
-    in well under a second on an empty container" — anything slower is
-    a hard regression and a signal to investigate.
+    populated DB, so the floor we assert is "static DDL completes in well
+    under a second on an empty container, plus a single empty
+    db.relationshipTypes() round-trip" — anything slower is a hard
+    regression and a signal to investigate.
     """
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
@@ -265,7 +351,7 @@ async def test_bootstrap_is_fast_on_empty_container() -> None:
             await store.close()
 
     # Generous floor — per-statement cost on an empty graph is single-digit
-    # ms on Neo4j 5.x; the loop is sequential so 12 statements is well
+    # ms on Neo4j 5.x; the loop is sequential so the static DDL is well
     # under 5s in practice.  Asserting <10s catches a hard regression
     # without being flaky on slow CI.
     assert elapsed < 10.0, f"Bootstrap took {elapsed:.2f}s — investigate."

@@ -166,10 +166,16 @@ _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     f"CREATE INDEX entity_workspace_name IF NOT EXISTS "
     f"FOR (n:{_ENTITY_LABEL}) ON (n.workspace_id, n.name)",
     f"CREATE INDEX entity_source_id IF NOT EXISTS FOR (n:{_ENTITY_LABEL}) ON (n.source_id)",
-    # Edges: workspace_id is property on the relationship too.  Neo4j 5.x
-    # supports relationship property indexes.
-    "CREATE INDEX edge_workspace_id IF NOT EXISTS FOR ()-[r]-() ON (r.workspace_id)",
-    "CREATE INDEX edge_source_id IF NOT EXISTS FOR ()-[r]-() ON (r.source_id)",
+    # Relationship-property indexes for `workspace_id` / `source_id` are
+    # NOT declared here.  Neo4j 5.x requires a specific relationship
+    # type for any property index (`FOR ()-[r:TYPE]-() ON (...)`) — the
+    # untyped `()-[r]-()` shape is a syntax error.  Edge types in this
+    # codebase are dynamic (connectors + parsers emit per-source
+    # vocabulary; the API accepts any regex-validated identifier), so a
+    # static allowlist would couple bootstrap to connector inventory.
+    # Instead the per-type indexes are issued at runtime in
+    # `_bootstrap_schema` against the live `db.relationshipTypes()` set.
+    # See ADR-0012 and issue #224.
     # --- ADR-0008 §4 — bitemporal schema (issue #130). ---------------------
     # Each statement below is copied verbatim from ADR-0008 §4.  Every
     # index is composite on `workspace_id` first per ADR-0008
@@ -198,11 +204,53 @@ _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     # the retention worker (ADR-0009).
     f"CREATE INDEX entity_state_workspace_recorded_at IF NOT EXISTS "
     f"FOR (s:{_ENTITY_STATE_LABEL}) ON (s.workspace_id, s.recorded_at)",
-    # Edge bitemporal seek (relationship property index, Neo4j 5.x).
-    "CREATE INDEX edge_workspace_valid_window IF NOT EXISTS "
-    "FOR ()-[r]-() ON (r.workspace_id, r.valid_from, r.valid_to)",
-    "CREATE INDEX edge_workspace_recorded_at IF NOT EXISTS "
-    "FOR ()-[r]-() ON (r.workspace_id, r.recorded_at)",
+    # Bitemporal edge indexes (`edge_workspace_valid_window`,
+    # `edge_workspace_recorded_at`) are issued per relationship type at
+    # runtime — see the note above and ADR-0012.
+)
+
+
+# Per-relationship-type property-index DDL templates.  Neo4j 5.x rejects
+# untyped relationship-property index DDL (`FOR ()-[r]-() ON (...)`) at
+# parse time, so the bootstrap path discovers the live relationship-type
+# set via `db.relationshipTypes()` and renders one CREATE statement per
+# (template, type) pair.  See ADR-0012 and issue #224.
+#
+# Each template carries two placeholders:
+#   * ``{name}`` — the unique index name (must be globally unique per
+#     Neo4j database; we suffix the relationship type so two types do
+#     not collide).
+#   * ``{rel_type}`` — the relationship type label, already validated
+#     against `_EDGE_TYPE_REGEX` before substitution.
+#
+# Adding a new template here automatically extends bootstrap coverage to
+# every relationship type that exists in the database at startup.
+_EDGE_INDEX_TEMPLATES: Final[tuple[tuple[str, str], ...]] = (
+    (
+        "edge_workspace_id",
+        "CREATE INDEX {name} IF NOT EXISTS FOR ()-[r:`{rel_type}`]-() ON (r.workspace_id)",
+    ),
+    (
+        "edge_source_id",
+        "CREATE INDEX {name} IF NOT EXISTS FOR ()-[r:`{rel_type}`]-() ON (r.source_id)",
+    ),
+    (
+        "edge_workspace_valid_window",
+        "CREATE INDEX {name} IF NOT EXISTS "
+        "FOR ()-[r:`{rel_type}`]-() ON (r.workspace_id, r.valid_from, r.valid_to)",
+    ),
+    (
+        "edge_workspace_recorded_at",
+        "CREATE INDEX {name} IF NOT EXISTS "
+        "FOR ()-[r:`{rel_type}`]-() ON (r.workspace_id, r.recorded_at)",
+    ),
+)
+
+# Cypher to enumerate relationship types currently present in the DB.
+# `db.relationshipTypes()` returns one row per type — including types
+# defined by the schema but not yet materialised (rare but possible).
+_LIST_RELATIONSHIP_TYPES_CYPHER: Final[str] = (
+    "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
 )
 
 
@@ -1244,6 +1292,19 @@ def _validate_edge_types(edge_types: list[str] | None) -> list[str] | None:
     return edge_types
 
 
+def _edge_index_name(prefix: str, rel_type: str) -> str:
+    """Build a stable, unique index name for a per-type relationship index.
+
+    Neo4j 5.x requires index names to be unique within a database.  We
+    suffix the relationship type with two underscores so the prefix can
+    be parsed back out for debugging.  Caller MUST have validated
+    ``rel_type`` against :data:`_EDGE_TYPE_REGEX` (which caps the
+    identifier at 64 characters, leaving ample room under Neo4j's
+    object-name limits).  See ADR-0012 and issue #224.
+    """
+    return f"{prefix}__{rel_type}"
+
+
 def _build_traverse_cypher(
     max_depth: int,
     edge_types: list[str] | None,
@@ -1544,10 +1605,54 @@ class Neo4jGraphStore:
     # ------------------------------------------------------------------
 
     async def _bootstrap_schema(self) -> None:
-        """Run constraint + index DDL idempotently (ADR-0005 §Schema)."""
+        """Run constraint + index DDL idempotently (ADR-0005 §Schema).
+
+        Two phases:
+
+        1. Static DDL from :data:`_BOOTSTRAP_STATEMENTS` — node-label
+           constraints and indexes that do not depend on the live
+           relationship-type set.
+        2. Dynamic per-type relationship-property indexes (issue #224).
+           Neo4j 5.x requires a specific relationship type for every
+           property index, so we discover the live type set via
+           ``db.relationshipTypes()`` and render one DDL per (template,
+           type) pair from :data:`_EDGE_INDEX_TEMPLATES`.  On an empty
+           database the discovery returns the empty set and the dynamic
+           phase is a no-op — which is correct, because with no
+           relationships there is no scan to optimise.  On a warm
+           restart every type the system has ever seen gets an index.
+           See ADR-0012 for the design rationale.
+        """
         async with self._driver.session(database=self._config.database) as session:
             for stmt in _BOOTSTRAP_STATEMENTS:
                 await session.execute_write(_run_write_stmt, stmt, {})
+            # Phase 2 — per-relationship-type property indexes.
+            rel_type_rows = await session.execute_read(
+                _run_read_stmt, _LIST_RELATIONSHIP_TYPES_CYPHER, {}
+            )
+            for row in rel_type_rows:
+                rel_type = str(row["relationshipType"])
+                if not _EDGE_TYPE_REGEX.match(rel_type):
+                    # Defence in depth: a relationship type that does not
+                    # match the allowlist regex is refused here rather
+                    # than interpolated into Cypher.  The MERGE writer
+                    # already validates `edge_type` against the same
+                    # regex at write time, so a non-matching type can
+                    # only appear if (a) the database was populated by
+                    # an out-of-band tool, or (b) the regex was tightened
+                    # after data was already written.  Either way:
+                    # bootstrap continues, the index is simply not
+                    # created for that type, and the next ingestion will
+                    # be rejected by the writer's own validator.
+                    log.warning(
+                        "neo4j_skipping_index_for_invalid_rel_type",
+                        rel_type=rel_type,
+                    )
+                    continue
+                for index_prefix, template in _EDGE_INDEX_TEMPLATES:
+                    index_name = _edge_index_name(index_prefix, rel_type)
+                    stmt = template.format(name=index_name, rel_type=rel_type)
+                    await session.execute_write(_run_write_stmt, stmt, {})
 
     # ------------------------------------------------------------------
     # Write API
