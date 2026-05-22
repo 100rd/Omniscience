@@ -23,14 +23,16 @@ import io
 import uuid
 from dataclasses import dataclass
 from datetime import date
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import boto3
 import pyarrow as pa
 import pyarrow.parquet as pq
 import structlog
 from botocore.config import Config as BotoConfig
-from mypy_boto3_s3.client import S3Client
+
+if TYPE_CHECKING:
+    from mypy_boto3_s3.client import S3Client
 
 from omniscience_server.retention_constants import (
     ARCHIVE_KEY_TEMPLATE,
