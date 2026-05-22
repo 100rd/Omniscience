@@ -17,6 +17,7 @@ Coverage:
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import patch
 
@@ -47,7 +48,18 @@ REPO = "Omniscience"
 TOKEN = "ghp_fakeFAKEfake"
 
 
-def _pr_payload(number: int, *, updated_at: str = "2026-04-20T10:00:00Z") -> dict[str, Any]:
+def _recent_ts(*, days_ago: int = 1) -> str:
+    """Return an ISO-8601 Z timestamp `days_ago` days before now (UTC).
+
+    Default fixtures must stay within `max_age_days` cutoffs (90 by default,
+    30 in the cutoff test) regardless of when the suite runs.
+    """
+    return (datetime.now(tz=UTC) - timedelta(days=days_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pr_payload(number: int, *, updated_at: str | None = None) -> dict[str, Any]:
+    if updated_at is None:
+        updated_at = _recent_ts(days_ago=1)
     return {
         "number": number,
         "state": "open",
@@ -57,7 +69,7 @@ def _pr_payload(number: int, *, updated_at: str = "2026-04-20T10:00:00Z") -> dic
         "html_url": f"https://github.com/{OWNER}/{REPO}/pull/{number}",
         "merged_at": None,
         "closed_at": None,
-        "created_at": "2026-04-19T10:00:00Z",
+        "created_at": _recent_ts(days_ago=2),
         "updated_at": updated_at,
     }
 
@@ -246,7 +258,7 @@ async def test_discover_respects_max_age_cutoff() -> None:
         return_value=httpx.Response(
             200,
             json=[
-                _pr_payload(1, updated_at="2026-04-20T10:00:00Z"),
+                _pr_payload(1, updated_at=_recent_ts(days_ago=5)),  # within 30-day cutoff
                 _pr_payload(2, updated_at="2020-01-01T00:00:00Z"),  # too old
             ],
         )
