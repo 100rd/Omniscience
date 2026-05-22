@@ -35,6 +35,7 @@ Design rules
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from dataclasses import dataclass
@@ -1425,6 +1426,81 @@ def _coerce_metadata(value: Any) -> dict[str, Any]:
     raise TypeError(f"metadata must be dict, got {type(value).__name__}")
 
 
+# ---------------------------------------------------------------------------
+# Metadata JSON encoding (issue #226)
+# ---------------------------------------------------------------------------
+#
+# Neo4j 5.x rejects Map-shaped property values: a Cypher write like
+# ``SET n.metadata = $metadata`` with ``$metadata`` bound to a Python
+# ``dict`` fails with ``Neo.ClientError.Statement.TypeError`` —
+# *Property values can only be of primitive types or arrays thereof.
+# Encountered: Map{}.*  We sidestep the restriction by encoding the
+# ``metadata`` dict to a JSON string on the way in and decoding on the
+# way out.  The persisted shape is opaque to query plans (no Cypher
+# template in this package indexes into ``metadata.<key>``), so JSON-as-
+# string round-trips losslessly and is compatible with ADR-0005 §Schema
+# and ADR-0008 §2 — neither mandates a particular property shape for
+# metadata.
+#
+# Empty / None handling:
+#   _serialise_metadata(None) == _serialise_metadata({}) == "{}"
+#   _deserialise_metadata("") == _deserialise_metadata(None) == {}
+# so reading a freshly-created entity with no metadata returns ``{}``
+# rather than ``None`` — matches the contract of :func:`_coerce_metadata`
+# at the write boundary.
+
+
+def _serialise_metadata(value: Any) -> str:
+    """Encode a metadata dict (or ``None``) to a JSON string for Neo4j.
+
+    The encoding is deterministic (``sort_keys=True``, no spaces) so
+    string equality on the stored value is meaningful for diff tools and
+    so the on-disk shape is stable across Python interpreter versions.
+    """
+    coerced = _coerce_metadata(value)
+    return json.dumps(coerced, separators=(",", ":"), sort_keys=True, default=str)
+
+
+def _deserialise_metadata(raw: Any) -> dict[str, Any]:
+    """Decode a JSON string from Neo4j back into a ``dict[str, Any]``.
+
+    Tolerates three shapes for forward/backward compatibility:
+
+    * ``str``  — JSON-encoded payload (the post-#226 shape).  Empty
+      string is treated as ``{}``.
+    * ``dict`` — already-decoded; returned via :func:`_coerce_metadata`.
+      Covers in-memory test fakes that bypass the serialiser and any
+      legacy rows that pre-date this fix.
+    * ``None`` / missing — returns ``{}``.
+    """
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        if not raw:
+            return {}
+        decoded = json.loads(raw)
+        if not isinstance(decoded, dict):
+            raise TypeError(f"metadata JSON must decode to dict, got {type(decoded).__name__}")
+        return {str(k): v for k, v in decoded.items()}
+    if isinstance(raw, dict):
+        return _coerce_metadata(raw)
+    raise TypeError(f"cannot deserialise metadata of type {type(raw).__name__}")
+
+
+def _serialise_metadata_param(params: dict[str, Any]) -> None:
+    """Replace ``params['metadata']`` (dict) with its JSON-encoded form.
+
+    Called immediately before the parameters are bound to a Cypher
+    statement so the Bolt driver sees a primitive string instead of a
+    Map.  No-op when ``metadata`` is already a string (idempotent — safe
+    to call twice on the same params dict).
+    """
+    current = params.get("metadata")
+    if isinstance(current, str):
+        return
+    params["metadata"] = _serialise_metadata(current)
+
+
 def _coerce_to_datetime(value: Any) -> datetime:
     """Coerce a Neo4j temporal-like value to a Python aware ``datetime``.
 
@@ -1829,6 +1905,10 @@ class Neo4jGraphStore:
             params = _entity_to_params(ext_ent, source_id, workspace_id, now)
             if bitemporal_enabled:
                 params["state_fingerprint"] = _entity_state_fingerprint(params)
+            # Issue #226 — JSON-encode metadata so the Bolt driver does
+            # not serialise a Python dict as a Cypher Map (rejected by
+            # Neo4j 5.x as a non-primitive property value).
+            _serialise_metadata_param(params)
             await tx.run(entity_cypher, params)
             name_to_id[str(params["name"])] = uuid.UUID(str(params["id"]))
             display = str(params.get("display_name") or "")
@@ -1846,6 +1926,8 @@ class Neo4jGraphStore:
                 continue
             if bitemporal_enabled:
                 edge_params["state_fingerprint"] = _edge_state_fingerprint(edge_params)
+            # Issue #226 — see entity loop above.
+            _serialise_metadata_param(edge_params)
             rendered = edge_template.replace("{edge_type}", str(edge_params["edge_type"]))
             await tx.run(rendered, edge_params)
 
@@ -1915,20 +1997,34 @@ class Neo4jGraphStore:
     def _select_entity_upsert_cypher(self, params: dict[str, Any]) -> str:
         """Pick legacy or bitemporal entity upsert Cypher; mutate params if needed.
 
-        Mutates ``params`` in place to add the ``state_fingerprint`` key
-        when the bitemporal path is active.  Keeps the call sites short
-        (``upsert_entity`` and ``_run_upsert_graph`` share this).
+        Mutates ``params`` in place: adds the ``state_fingerprint`` key
+        when the bitemporal path is active, and replaces ``metadata``
+        with its JSON-encoded form so Neo4j 5.x does not reject the
+        bind value as a Map (issue #226).  The fingerprint is computed
+        BEFORE serialisation — fingerprints stay stable across the fix
+        because they hash the in-memory dict, not the on-disk shape.
+        Keeps the call sites short (``upsert_entity`` and
+        ``_run_upsert_graph`` share this).
         """
         if not self._bitemporal_enabled:
+            _serialise_metadata_param(params)
             return _UPSERT_ENTITY_CYPHER
         params["state_fingerprint"] = _entity_state_fingerprint(params)
+        _serialise_metadata_param(params)
         return _UPSERT_ENTITY_BITEMPORAL_CYPHER
 
     def _select_edge_upsert_cypher(self, params: dict[str, Any], edge_type: str) -> str:
-        """Pick legacy or bitemporal edge upsert Cypher; render edge-type slot."""
+        """Pick legacy or bitemporal edge upsert Cypher; render edge-type slot.
+
+        Also JSON-encodes ``params['metadata']`` in place so Neo4j 5.x
+        accepts the bind value (issue #226).  Fingerprint is computed
+        BEFORE serialisation so the hash basis is unchanged.
+        """
         if not self._bitemporal_enabled:
+            _serialise_metadata_param(params)
             return _UPSERT_EDGE_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
         params["state_fingerprint"] = _edge_state_fingerprint(params)
+        _serialise_metadata_param(params)
         return _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
 
     async def delete_tombstoned(self, *, workspace_id: uuid.UUID | None = None) -> int:
