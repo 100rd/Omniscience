@@ -152,7 +152,21 @@ _EDGE_SCHEMA: pa.Schema = pa.schema(
 
 
 def _rows_to_table(rows: list[dict[str, Any]], schema: pa.Schema) -> pa.Table:
-    """Project ``rows`` onto ``schema`` field-by-field, JSON-encoding metadata."""
+    """Project ``rows`` onto ``schema`` field-by-field, JSON-encoding metadata.
+
+    ``metadata`` arrives in two shapes depending on the writer path
+    (issue #226):
+
+    * ``str`` — a JSON-encoded payload produced by
+      :func:`omniscience_index.stores.neo4j_store._serialise_metadata`.
+      The Neo4j 5.x writer path stores ``metadata`` as a string property
+      because Map-shaped property values are rejected.  Pass it through
+      verbatim (it is already canonical-form JSON).
+    * ``dict`` — an in-memory shape from a test fake or a pre-#226
+      legacy row that survived the migration.  JSON-encode it on the
+      way out so the parquet column is always a string.
+    * ``None`` / missing — emit ``"{}"`` so the column stays non-null.
+    """
     import json
 
     columns: dict[str, list[Any]] = {field.name: [] for field in schema}
@@ -160,10 +174,11 @@ def _rows_to_table(rows: list[dict[str, Any]], schema: pa.Schema) -> pa.Table:
         for field in schema:
             value = row.get(field.name)
             if field.name == "metadata_json":
-                # Source row ships ``metadata`` (dict); we store it as a
-                # JSON string to keep the schema flat.
-                meta = row.get("metadata") or {}
-                columns[field.name].append(json.dumps(meta, sort_keys=True, default=str))
+                meta = row.get("metadata")
+                if isinstance(meta, str):
+                    columns[field.name].append(meta or "{}")
+                else:
+                    columns[field.name].append(json.dumps(meta or {}, sort_keys=True, default=str))
             elif value is None:
                 columns[field.name].append(None)
             else:

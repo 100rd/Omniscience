@@ -34,10 +34,13 @@ drift fails here.
 
 from __future__ import annotations
 
-import os
+import shutil
+import socket
 import uuid
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 from omniscience_core.storage.graph import (
@@ -59,18 +62,47 @@ _WORKSPACE_B = uuid.UUID("bbbbbbbb-0000-0000-0000-0000000000b2")
 
 
 def _neo4j_available() -> bool:
-    """True iff testcontainers + Docker are available.
+    """True iff testcontainers + a reachable Docker daemon are present.
 
-    Controlled via env var ``OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1`` —
-    opt-in so CI without Docker does not slow down on image pulls.
+    Issue #226 — this gate USED TO be opt-in via
+    ``OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1``, which silently skipped
+    the writer contract tests in CI for over a month and let the
+    metadata-as-Map bug ship.  We mirror the pattern from
+    ``tests/integration/test_neo4j_bootstrap_schema.py`` (PR #227):
+    skip only when the live dependency genuinely cannot be reached,
+    never on operator opt-in.
     """
-    if os.environ.get("OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS", "0") != "1":
-        return False
     try:
         import testcontainers.neo4j  # noqa: F401
-
-        return True
     except ImportError:
+        return False
+    if shutil.which("docker") is None:
+        return False
+    return _docker_daemon_reachable()
+
+
+def _docker_daemon_reachable() -> bool:
+    """Ping the Docker daemon endpoint; returns False on any failure.
+
+    testcontainers itself will raise on a missing/unreachable daemon
+    when the fixture spins up; pre-checking here keeps the pytest
+    output clean (skip vs. error) and matches the pattern used by
+    ``tests/integration/test_neo4j_bootstrap_schema.py``.
+    """
+    import os
+
+    host = os.environ.get("DOCKER_HOST")
+    if not host:
+        return Path("/var/run/docker.sock").exists()
+    parsed = urlparse(host)
+    if parsed.scheme in ("unix", ""):
+        return Path(parsed.path or host).exists()
+    if parsed.hostname is None or parsed.port is None:
+        return False
+    try:
+        with socket.create_connection((parsed.hostname, parsed.port), timeout=1.0):
+            return True
+    except OSError:
         return False
 
 
@@ -83,9 +115,12 @@ def _neo4j_factory() -> Callable[[], AsyncIterator[GraphStore]]:
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
     async def _factory() -> AsyncIterator[GraphStore]:
-        with Neo4jContainer("neo4j:5.19-community").with_env(
-            "NEO4J_AUTH", "neo4j/contract_test_password"
-        ) as neo4j:
+        # Pass the password through the constructor — the wrapper writes
+        # it into NEO4J_AUTH inside ``_configure`` and threads it back
+        # through ``get_driver()``.  Using ``.with_env("NEO4J_AUTH", ...)``
+        # here is silently overridden by the wrapper's own configure step
+        # (the same trap the bootstrap test in PR #227 documents).
+        with Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j:
             config = Neo4jStoreConfig(
                 uri=neo4j.get_connection_url(),
                 username="neo4j",
