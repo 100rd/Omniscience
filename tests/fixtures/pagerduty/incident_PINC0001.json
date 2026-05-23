@@ -1,0 +1,21 @@
+{
+  "incident": {
+    "id": "PINC0001",
+    "type": "incident",
+    "incident_number": 4242,
+    "title": "api-gateway 5xx spike",
+    "status": "acknowledged",
+    "urgency": "high",
+    "created_at": "2026-05-22T12:00:00Z",
+    "last_status_change_at": "2026-05-22T12:05:00Z",
+    "service": {"id": "PSVC001", "type": "service_reference", "summary": "api-gateway"},
+    "escalation_policy": {"id": "PESC001", "type": "escalation_policy_reference"},
+    "assignments": [
+      {"at": "2026-05-22T12:00:00Z", "assignee": {"id": "PUSR001", "type": "user_reference"}}
+    ],
+    "acknowledgements": [
+      {"at": "2026-05-22T12:05:00Z", "acknowledger": {"id": "PUSR001", "type": "user_reference"}}
+    ],
+    "html_url": "https://acme.pagerduty.com/incidents/PINC0001"
+  }
+}

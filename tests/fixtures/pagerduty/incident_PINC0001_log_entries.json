@@ -1,0 +1,31 @@
+{
+  "log_entries": [
+    {
+      "id": "RLOG001",
+      "type": "trigger_log_entry",
+      "created_at": "2026-05-22T12:00:00Z",
+      "summary": "Triggered through the website",
+      "agent": {"id": "PSVC001", "type": "service_reference"},
+      "channel": {"type": "web_trigger"}
+    },
+    {
+      "id": "RLOG002",
+      "type": "assign_log_entry",
+      "created_at": "2026-05-22T12:00:01Z",
+      "summary": "Assigned to Alice Engineer",
+      "agent": {"id": "PUSR001", "type": "user_reference"},
+      "channel": {"type": "auto"}
+    },
+    {
+      "id": "RLOG003",
+      "type": "acknowledge_log_entry",
+      "created_at": "2026-05-22T12:05:00Z",
+      "summary": "Acknowledged by Alice Engineer",
+      "agent": {"id": "PUSR001", "type": "user_reference"},
+      "channel": {"type": "web"}
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "more": false
+}

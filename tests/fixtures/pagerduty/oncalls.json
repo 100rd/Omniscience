@@ -1,0 +1,51 @@
+{
+  "oncalls": [
+    {
+      "escalation_policy": {
+        "id": "PESC001",
+        "type": "escalation_policy_reference",
+        "summary": "Platform on-call"
+      },
+      "escalation_level": 1,
+      "schedule": {
+        "id": "PSCH001",
+        "type": "schedule_reference",
+        "summary": "Platform primary",
+        "html_url": "https://acme.pagerduty.com/schedules/PSCH001"
+      },
+      "user": {
+        "id": "PUSR001",
+        "type": "user_reference",
+        "summary": "Alice Engineer",
+        "email": "alice@example.com"
+      },
+      "start": "2026-05-22T00:00:00Z",
+      "end": "2026-05-23T00:00:00Z"
+    },
+    {
+      "escalation_policy": {
+        "id": "PESC001",
+        "type": "escalation_policy_reference",
+        "summary": "Platform on-call"
+      },
+      "escalation_level": 1,
+      "schedule": {
+        "id": "PSCH001",
+        "type": "schedule_reference",
+        "summary": "Platform primary",
+        "html_url": "https://acme.pagerduty.com/schedules/PSCH001"
+      },
+      "user": {
+        "id": "PUSR002",
+        "type": "user_reference",
+        "summary": "Bob Engineer",
+        "email": "bob@example.com"
+      },
+      "start": "2026-05-23T00:00:00Z",
+      "end": "2026-05-24T00:00:00Z"
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "more": false
+}
