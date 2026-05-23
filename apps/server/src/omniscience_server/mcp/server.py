@@ -1,12 +1,14 @@
 """FastMCP server setup for Omniscience.
 
-Registers six tools:
+Registers seven tools:
 - search              (requires scope: search)
 - get_document        (requires scope: search)
 - get_entity          (requires scope: search + workspace-scoped token)
 - get_related_entities (requires scope: search + workspace-scoped token)
 - list_sources        (requires scope: sources:read)
 - source_stats        (requires scope: sources:read)
+- resolve_incident    (requires scope: search + workspace-scoped token)
+- blast_radius        (requires scope: search + workspace-scoped token)
 
 Auth:
 - HTTP transport: Bearer token from Authorization header
@@ -19,12 +21,12 @@ app.state (db_session_factory, retrieval_service).
 Bitemporal reads (issue #133)
 -----------------------------
 
-``search``, ``get_entity`` and ``get_related_entities`` accept an
-optional ``as_of`` parameter — an ISO-8601 timezone-aware UTC datetime
-string (``Z`` suffix or ``+00:00``).  Naive datetimes are rejected with
-the structured error code ``invalid_timezone``.  See ADR-0008 §5 for
-the bitemporal predicate semantics.  ``resolve_incident`` is filed as
-issue #153 and will surface its own ``as_of`` natively when it lands.
+``search``, ``get_entity``, ``get_related_entities``, ``resolve_incident``
+and ``blast_radius`` accept an optional ``as_of`` parameter — an
+ISO-8601 timezone-aware UTC datetime string (``Z`` suffix or ``+00:00``).
+Naive datetimes are rejected with the structured error code
+``invalid_timezone``.  See ADR-0008 §5 for the bitemporal predicate
+semantics.
 """
 
 from __future__ import annotations
@@ -48,6 +50,25 @@ from omniscience_core.telemetry.clients import (
 from omniscience_server.as_of import (
     INVALID_TIMEZONE_CODE,
     INVALID_TIMEZONE_MESSAGE,
+)
+from omniscience_server.blast_radius import (
+    ACTION_TYPES,
+    INVALID_ACTION_TYPE_CODE,
+    INVALID_ENTITY_ID_CODE,
+    ActionType,
+    mcp_blast_radius,
+)
+from omniscience_server.blast_radius import (
+    DEFAULT_MAX_DEPTH as BLAST_DEFAULT_MAX_DEPTH,
+)
+from omniscience_server.blast_radius import (
+    ENTITY_NOT_FOUND_CODE as BLAST_ENTITY_NOT_FOUND_CODE,
+)
+from omniscience_server.blast_radius import (
+    MAX_MAX_DEPTH as BLAST_MAX_MAX_DEPTH,
+)
+from omniscience_server.blast_radius import (
+    MIN_MAX_DEPTH as BLAST_MIN_MAX_DEPTH,
 )
 from omniscience_server.incidents import (
     ALERT_NOT_FOUND_CODE,
@@ -540,6 +561,82 @@ async def incident_timeline(
         as_of=as_of,
         max_depth=max_depth,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tool: blast_radius (issue #234)
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="blast_radius",
+    description=(
+        "Traverse the causal dependency graph from a seed entity and "
+        "rank the downstream entities impacted by performing "
+        "`action_type` on it.  Supported actions: "
+        + ", ".join(ACTION_TYPES)
+        + ".  Returns a list of `{entity_id, entity_type, dependency_path, "
+        "impact_score, confidence}` ranked descending by impact_score.  "
+        "Optional `as_of` (ISO-8601 UTC datetime) anchors the traversal "
+        "to graph state at that time per ADR-0008 §5.  Requires a "
+        "workspace-scoped token.  Impact-score model: v0.1 deterministic "
+        "placeholder per issue #234 spec; calibrated model is a follow-up."
+    ),
+)
+async def blast_radius(
+    entity_id: str,
+    ctx: Context[Any, Any, Any],
+    action_type: str = "restart",
+    max_depth: int = BLAST_DEFAULT_MAX_DEPTH,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """blast_radius tool — requires scope 'search' AND a workspace token.
+
+    Mirrors the auth posture of :func:`resolve_incident` — graph reads
+    are workspace-scoped, fail-closed, and reject unscoped tokens.
+    Cross-workspace ``entity_id`` resolution returns ``entity_not_found``
+    to avoid leaking entity existence (issue #117 / #234 §ACL).
+    """
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="blast_radius", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_blast_radius_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+
+    if action_type not in ACTION_TYPES:
+        raise ValueError(
+            f"{INVALID_ACTION_TYPE_CODE}:action_type must be one of " + ", ".join(ACTION_TYPES)
+        )
+    # Narrow to ActionType (runtime check above guarantees it).
+    typed_action: ActionType = action_type
+
+    parsed_as_of = _parse_as_of(as_of)
+    clamped_depth = max(BLAST_MIN_MAX_DEPTH, min(max_depth, BLAST_MAX_MAX_DEPTH))
+    try:
+        return await mcp_blast_radius(
+            app=_get_app(),
+            entity_id=entity_id,
+            workspace_id=workspace_id,
+            action_type=typed_action,
+            as_of=parsed_as_of,
+            max_depth=clamped_depth,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if msg.startswith(f"{INVALID_ENTITY_ID_CODE}:"):
+            raise
+        if msg.startswith(f"{INVALID_ACTION_TYPE_CODE}:"):
+            raise
+        if msg.startswith(f"{BLAST_ENTITY_NOT_FOUND_CODE}:"):
+            raise
+        raise
 
 
 __all__ = ["mcp_server", "set_fastapi_app"]
