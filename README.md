@@ -4,6 +4,30 @@ Self-hosted knowledge retrieval service with an **MCP-first API**. Indexes your 
 
 Retrieval-only: Omniscience returns chunks with citations, and the calling LLM synthesizes the answer. No opinionated chat, no embedded LLM, no vendor lock-in.
 
+[![MCP Registry](https://img.shields.io/badge/MCP-Registry-blue?logo=anthropic)](https://registry.modelcontextprotocol.io/)
+[![PulseMCP](https://img.shields.io/badge/PulseMCP-listed-orange)](https://www.pulsemcp.com/servers/omniscience)
+[![Cline Marketplace](https://img.shields.io/badge/Cline-Marketplace-7C3AED)](https://github.com/cline/mcp-marketplace)
+[![mcp.directory](https://img.shields.io/badge/mcp.directory-listed-green)](https://mcp.directory/server/omniscience)
+[![Awesome MCP](https://img.shields.io/badge/Awesome-MCP-yellow)](https://github.com/punkpeye/awesome-mcp-servers)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
+
+> Registry badges marked `listed` are **pending** until the submissions tracked in [docs/mcp-catalog-submission.md](docs/mcp-catalog-submission.md) are merged by each catalog's maintainers. The badges will resolve automatically once they land.
+
+## Install (one line)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash
+```
+
+Starts the stack with Docker, mints secrets into `./omniscience/.env`, and waits for `/health`. Then wire it into your IDE in one shot:
+
+```bash
+uvx --from omniscience-cli omniscience init --client claude-code
+# or: cursor, cline, zed, continue, gemini
+```
+
+Tested on macOS (Intel + Apple Silicon) and Linux (Ubuntu 22.04, Debian 12). See [docs/mcp-catalog-submission.md](docs/mcp-catalog-submission.md) for the catalog submission recipes.
+
 ## Status
 
 Pre-v0.1 — scaffolding. See [docs/roadmap.md](docs/roadmap.md).
@@ -85,6 +109,7 @@ Then ask your AI assistant a question — it will call `omniscience.search` and 
 - [Freshness & lineage](docs/freshness-and-lineage.md) — trust model for AI clients
 - [Retrieval strategy (ADR 0004)](docs/decisions/0004-retrieval-strategy-staged.md) — hybrid → structural → GraphRAG-if-needed
 - [Architecture decisions](docs/decisions/)
+- [MCP catalog submission tracker](docs/mcp-catalog-submission.md)
 
 ## Benchmarks
 

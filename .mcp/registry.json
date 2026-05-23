@@ -1,0 +1,161 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.100rd/omniscience",
+  "description": "Self-hosted MCP retrieval service with bitemporal replay and audit. Indexes code, docs, infra, tickets and wikis; exposes them as MCP retrieval tools to any AI client (Claude Code, Cursor, Gemini, custom agents). Retrieval-only, returns chunks with citations.",
+  "repository": {
+    "url": "https://github.com/100rd/Omniscience",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "websiteUrl": "https://github.com/100rd/Omniscience",
+  "status": "active",
+  "packages": [
+    {
+      "registryType": "oci",
+      "registryBaseUrl": "https://ghcr.io",
+      "identifier": "ghcr.io/100rd/omniscience",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "-e",
+          "value": "OMNISCIENCE_URL",
+          "isRepeated": true
+        },
+        {
+          "type": "named",
+          "name": "-e",
+          "value": "OMNISCIENCE_TOKEN",
+          "isRepeated": true
+        }
+      ],
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "OMNISCIENCE_URL",
+          "description": "URL of the Omniscience server (e.g. http://localhost:8000)",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "OMNISCIENCE_TOKEN",
+          "description": "API token created with `omniscience tokens create`",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "omniscience-cli",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        },
+        {
+          "type": "positional",
+          "value": "serve"
+        },
+        {
+          "type": "named",
+          "name": "--transport",
+          "value": "stdio"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "OMNISCIENCE_URL",
+          "description": "URL of the Omniscience server",
+          "isRequired": true,
+          "isSecret": false
+        },
+        {
+          "name": "OMNISCIENCE_TOKEN",
+          "description": "API token created with `omniscience tokens create`",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://{host}/mcp",
+      "headers": [
+        {
+          "name": "Authorization",
+          "description": "Bearer token from `omniscience tokens create`",
+          "isRequired": true,
+          "isSecret": true
+        }
+      ]
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher": {
+      "publishedBy": "100rd",
+      "publishedAt": "2026-05-24T00:00:00Z"
+    },
+    "io.github.100rd/omniscience": {
+      "categories": [
+        "devtools",
+        "retrieval",
+        "observability",
+        "knowledge-management",
+        "audit"
+      ],
+      "tags": [
+        "rag",
+        "self-hosted",
+        "bitemporal",
+        "replay",
+        "audit",
+        "k8s",
+        "sre",
+        "incident-response",
+        "citations"
+      ],
+      "license": "Apache-2.0",
+      "tools": [
+        "search",
+        "fetch",
+        "list_sources",
+        "describe_source",
+        "replay",
+        "blast_radius",
+        "suggest_runbook",
+        "timeline"
+      ],
+      "screenshots": [
+        "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/search.png",
+        "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/replay.png",
+        "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/blast-radius.png"
+      ],
+      "icon": "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/icon-256.png"
+    }
+  }
+}
