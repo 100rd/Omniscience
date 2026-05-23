@@ -15,6 +15,7 @@ const NAV_ITEMS = [
   { to: "/tokens", label: "Tokens" },
   { to: "/ingestion", label: "Ingestion" },
   { to: "/search", label: "Search Playground" },
+  { to: "/replay", label: "Replay" },
 ];
 
 export function Layout({ children }: LayoutProps) {

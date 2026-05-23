@@ -90,6 +90,14 @@ from omniscience_server.mcp.tools import (
     mcp_search,
     mcp_source_stats,
 )
+from omniscience_server.replay import (
+    SUPPORTED_REPLAY_TOOLS,
+    AuditLogNotFoundError,
+    ReplayQuery,
+    envelope_to_dict,
+    replay_by_audit_id,
+    replay_context,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -637,6 +645,94 @@ async def blast_radius(
         if msg.startswith(f"{BLAST_ENTITY_NOT_FOUND_CODE}:"):
             raise
         raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: replay_context (issue #243) — ADP replay primitive
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="replay_context",
+    description=(
+        "Replay a previous tool invocation against the bitemporal graph at "
+        "a specific time. Surfaces the ADR-0008 substrate as the public "
+        "'what did the agent see at time T' primitive (ADP). Either supply "
+        "audit_log_id (replay a stored invocation) or at_time + tool_name + "
+        "arguments (inline replay). Returns the original-shape response plus "
+        "a deterministic state_fingerprint hash. Requires a workspace-scoped "
+        "token. Supported tool_name values: " + ", ".join(SUPPORTED_REPLAY_TOOLS) + "."
+    ),
+)
+async def replay_context_tool(
+    ctx: Context[Any, Any, Any],
+    audit_log_id: str | None = None,
+    at_time: str | None = None,
+    tool_name: str | None = None,
+    arguments: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """replay_context tool — requires scope 'search' AND workspace token."""
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="replay_context", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_replay_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Replay requires a workspace-scoped token")
+
+    has_audit = audit_log_id is not None and audit_log_id != ""
+    has_inline = at_time is not None or tool_name is not None
+    if has_audit and has_inline:
+        raise ValueError(
+            "bad_request:Supply either audit_log_id OR (at_time + tool_name + arguments)"
+        )
+    if not has_audit and not (at_time and tool_name):
+        raise ValueError("bad_request:Must supply audit_log_id OR (at_time AND tool_name)")
+
+    app = _get_app()
+    factory = getattr(app.state, "db_session_factory", None)
+    if factory is None:
+        raise RuntimeError("db_session_factory not available on app.state")
+
+    try:
+        if has_audit:
+            import uuid as _uuid
+
+            try:
+                parsed_id = _uuid.UUID(audit_log_id)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"bad_request:audit_log_id must be a UUID, got {audit_log_id!r}"
+                ) from exc
+            async with factory() as session:
+                result = await replay_by_audit_id(
+                    app=app,
+                    session=session,
+                    audit_log_id=parsed_id,
+                    workspace_id=workspace_id,
+                )
+        else:
+            parsed_at = _parse_as_of(at_time)
+            assert parsed_at is not None  # noqa: S101 — has_inline guards this
+            assert tool_name is not None  # noqa: S101
+            result = await replay_context(
+                app=app,
+                workspace_id=workspace_id,
+                at_time=parsed_at,
+                query=ReplayQuery(
+                    tool_name=tool_name,
+                    arguments=dict(arguments or {}),
+                ),
+            )
+    except AuditLogNotFoundError as exc:
+        raise ValueError(f"audit_log_not_found:{exc}") from exc
+
+    return envelope_to_dict(result)
 
 
 __all__ = ["mcp_server", "set_fastapi_app"]

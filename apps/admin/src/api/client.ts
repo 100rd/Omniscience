@@ -340,6 +340,43 @@ export interface IncidentTimelineQuery {
   max_depth?: number;
 }
 
+/*
+ * Wire format for `POST /api/v1/replay` and `GET /api/v1/replay/audit/:id`
+ * (Issue #243 — ADP replay primitive).  Mirrors the Pydantic
+ * `envelope_to_dict` shape from `apps/server/src/omniscience_server/replay.py`.
+ *
+ *   - `state_fingerprint`           — 64-char lowercase hex (BLAKE2b-256).
+ *   - `original_state_fingerprint`  — present iff replayed by audit_log_id.
+ *   - `fingerprint_match`           — boolean only when original is set.
+ *   - `response`                    — the inner payload the original tool
+ *                                     returned, shape-identical to the
+ *                                     underlying MCP/REST tool surface.
+ */
+export interface ReplayEnvelope {
+  tool_name: string;
+  at_time: string;
+  state_fingerprint: string;
+  fingerprint_algorithm: string;
+  original_state_fingerprint: string | null;
+  fingerprint_match: boolean | null;
+  audit_log_id: string | null;
+  response: Record<string, unknown>;
+}
+
+export interface ReplayInlineRequest {
+  at_time: string;
+  query: {
+    tool_name: string;
+    arguments: Record<string, unknown>;
+  };
+}
+
+export interface ReplayByAuditIdRequest {
+  audit_log_id: string;
+}
+
+export type ReplayRequest = ReplayInlineRequest | ReplayByAuditIdRequest;
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -608,5 +645,21 @@ export class ApiClient {
       throw new ApiError(res.status, detail);
     }
     return await res.text();
+  }
+
+  // Replay (Issue #243 — ADP primitive)
+  async replay(payload: ReplayRequest): Promise<ReplayEnvelope> {
+    return this.request<ReplayEnvelope>(
+      "POST",
+      "/api/v1/replay",
+      payload
+    );
+  }
+
+  async replayByAuditId(auditLogId: string): Promise<ReplayEnvelope> {
+    return this.request<ReplayEnvelope>(
+      "GET",
+      `/api/v1/replay/audit/${encodeURIComponent(auditLogId)}`
+    );
   }
 }
