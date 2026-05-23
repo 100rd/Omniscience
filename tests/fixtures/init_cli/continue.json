@@ -1,0 +1,28 @@
+{
+  "experimental": {
+    "modelContextProtocolServers": [
+      {
+        "name": "omniscience",
+        "transport": {
+          "headers": {
+            "Authorization": "Bearer sk_test_TOKEN"
+          },
+          "type": "streamable-http",
+          "url": "https://omni.example.com/mcp"
+        }
+      }
+    ]
+  },
+  "mcpServers": [
+    {
+      "name": "omniscience",
+      "transport": {
+        "headers": {
+          "Authorization": "Bearer sk_test_TOKEN"
+        },
+        "type": "streamable-http",
+        "url": "https://omni.example.com/mcp"
+      }
+    }
+  ]
+}
