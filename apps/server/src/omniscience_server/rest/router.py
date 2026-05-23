@@ -18,6 +18,7 @@ from omniscience_server.rest.replay import router as replay_router
 from omniscience_server.rest.retention import router as retention_router
 from omniscience_server.rest.runbook import router as runbook_router
 from omniscience_server.rest.search import router as search_router
+from omniscience_server.rest.similar_incidents import router as similar_incidents_router
 from omniscience_server.rest.sources import router as sources_router
 from omniscience_server.rest.stats import router as stats_router
 from omniscience_server.rest.webhooks import router as webhooks_router
@@ -41,5 +42,6 @@ api_v1_router.include_router(incidents_admin_router)
 api_v1_router.include_router(blast_radius_router)
 api_v1_router.include_router(replay_router)
 api_v1_router.include_router(runbook_router)
+api_v1_router.include_router(similar_incidents_router)
 
 __all__ = ["api_v1_router"]
