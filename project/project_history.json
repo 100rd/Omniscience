@@ -51,6 +51,68 @@
         "issue-240",
         "wave-3"
       ]
+    },
+    {
+      "timestamp": "2026-05-23T12:00:00Z",
+      "agent": "senior-backend-engineer",
+      "issue": 231,
+      "branch": "feat/231-runbook-parser",
+      "action": {
+        "type": "feature_implementation",
+        "summary": "Runbook parser + suggest_runbook MCP tool + POST /incidents/{id}/runbook-step REST endpoint"
+      },
+      "files": {
+        "added": [
+          "packages/connectors/src/omniscience_connectors/runbook/__init__.py",
+          "packages/connectors/src/omniscience_connectors/runbook/models.py",
+          "packages/connectors/src/omniscience_connectors/runbook/parser.py",
+          "packages/connectors/src/omniscience_connectors/runbook/linker.py",
+          "packages/connectors/src/omniscience_connectors/runbook/connector.py",
+          "apps/server/src/omniscience_server/runbook.py",
+          "apps/server/src/omniscience_server/rest/runbook.py",
+          "tests/test_runbook_connector.py",
+          "tests/integration/test_runbook_suggest.py",
+          "tests/fixtures/runbook/db-connections-exhausted.md",
+          "tests/fixtures/runbook/redis-evictions.md",
+          "tests/fixtures/runbook/generic-5xx.md",
+          "tests/fixtures/runbook/malformed.md",
+          "docs/runbooks/runbook-connector.md"
+        ],
+        "modified": [
+          "packages/connectors/src/omniscience_connectors/__init__.py",
+          "apps/server/src/omniscience_server/rest/router.py",
+          "apps/server/src/omniscience_server/mcp/server.py"
+        ]
+      },
+      "tests": {
+        "added": 38,
+        "passing": 38,
+        "runtime_seconds": 0.09,
+        "regression_check": "142 connector tests + 67 incident/replay/blast-radius tests still pass"
+      },
+      "quality_gates": {
+        "ruff_check": "clean",
+        "ruff_format": "clean",
+        "mypy_strict": "clean (218 source files)"
+      },
+      "design_decisions": [
+        "v0.1 confidence scoring: weighted sum (exact 0.55, pattern 0.25, tags 0.15, severity 0.05) with monotonicity invariant",
+        "In-memory ring-buffer recorder (no Alembic migration) + structlog event + Prometheus counter for triple-durability of step events",
+        "Self-contained YAML subset parser to avoid pulling 200KB markdown-it-py / pyyaml deps",
+        "Permissive parsing: malformed runbooks return RunbookDocument with parse_warnings rather than raising"
+      ],
+      "tags": [
+        "backend",
+        "connector",
+        "runbook",
+        "parser",
+        "incidents",
+        "bitemporal",
+        "mcp",
+        "rest",
+        "issue-231",
+        "wave-2"
+      ]
     }
   ]
 }

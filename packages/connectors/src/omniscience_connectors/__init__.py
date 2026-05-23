@@ -22,7 +22,7 @@ Registry::
 
 Built-in connectors (``git``, ``github_pr``, ``fs``, ``confluence``, ``notion``,
 ``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``, ``alerts``, ``otel``,
-``datadog``, ``pagerduty``) are registered below and available immediately on import.
+``datadog``, ``pagerduty``, ``runbook``) are registered below and available immediately on import.
 Third-party connectors call :func:`get_connector` after registering against
 the shared registry.
 """
@@ -79,6 +79,10 @@ from omniscience_connectors.registry import (
     _registry,
     get_connector,
 )
+from omniscience_connectors.runbook import (
+    RunbookConfig,
+    RunbookConnector,
+)
 from omniscience_connectors.s3.connector import S3Config, S3Connector
 from omniscience_connectors.slack.connector import SlackConnector
 
@@ -98,6 +102,7 @@ _registry.register(AlertsConnector)
 _registry.register(OtelConnector)
 _registry.register(DatadogConnector)
 _registry.register(PagerDutyConnector)
+_registry.register(RunbookConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -137,6 +142,8 @@ __all__ = [
     "ParsedSpan",
     "ParsedTrace",
     "ParsedTraces",
+    "RunbookConfig",
+    "RunbookConnector",
     "S3Config",
     "S3Connector",
     "SlackConnector",
