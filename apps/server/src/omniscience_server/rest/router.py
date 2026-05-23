@@ -14,6 +14,7 @@ from omniscience_server.rest.incidents_admin import router as incidents_admin_ro
 from omniscience_server.rest.ingestion_runs import router as ingestion_runs_router
 from omniscience_server.rest.operator import router as operator_router
 from omniscience_server.rest.otlp import router as otlp_router
+from omniscience_server.rest.replay import router as replay_router
 from omniscience_server.rest.retention import router as retention_router
 from omniscience_server.rest.search import router as search_router
 from omniscience_server.rest.sources import router as sources_router
@@ -37,5 +38,6 @@ api_v1_router.include_router(incidents_router)
 api_v1_router.include_router(incident_timeline_router)
 api_v1_router.include_router(incidents_admin_router)
 api_v1_router.include_router(blast_radius_router)
+api_v1_router.include_router(replay_router)
 
 __all__ = ["api_v1_router"]
