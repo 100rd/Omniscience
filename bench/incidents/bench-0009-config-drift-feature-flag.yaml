@@ -1,0 +1,29 @@
+id: bench-0009
+category: config-drift
+description: >
+  A feature flag was set to "on" in production via the admin UI (not via
+  GitOps), persisted only in the flag service. After a flag-service
+  restart re-read its on-disk state, the manual override was lost.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-24-019
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-24T09:14:00+00:00"
+  summary: "feature 'new-checkout-flow' flipped off in prod after flag-service restart"
+  target_entity: "featureflag/new-checkout-flow"
+
+expected_root_cause:
+  summary: >
+    Flag was enabled via the admin UI but never committed to flags.yaml; flag-service restart
+    restored the GitOps-declared 'off' state.
+  canonical_entities:
+    - "audit-log://flags/new-checkout-flow#manual-enable-2026-04-22"
+    - "featureflag/new-checkout-flow"
+
+expected_runbook_step: >
+  Open PR to set new-checkout-flow=on in flags.yaml; merge; flag-service auto-reload picks it up.
+
+expected_blast_radius:
+  - "service/checkout"
+  - "service/web"

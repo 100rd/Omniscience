@@ -1,0 +1,25 @@
+id: bench-0006
+category: dns
+description: >
+  A Service was renamed but one stale client still hardcoded the old name.
+  Intermittent NXDOMAIN until the cached DNS entry expired client-side.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-21-007
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-21T06:55:00+00:00"
+  summary: "checkout -> billing-v1 NXDOMAIN — intermittent (cache TTL = 60s)"
+  target_entity: "service/billing-v1"
+
+expected_root_cause:
+  summary: "PR #5300 renamed Service billing-v1 -> billing; checkout chart still pinned to old name."
+  canonical_entities:
+    - "https://github.com/acme/billing/pull/5300"
+    - "service/billing-v1"
+
+expected_runbook_step: >
+  Add a temporary ExternalName Service billing-v1 -> billing.default.svc.cluster.local; ship checkout fix.
+
+expected_blast_radius:
+  - "service/checkout"

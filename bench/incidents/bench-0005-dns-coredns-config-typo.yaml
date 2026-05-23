@@ -1,0 +1,27 @@
+id: bench-0005
+category: dns
+description: >
+  CoreDNS Corefile change introduced a typo in a forward block; lookups
+  for cluster-external hostnames started returning SERVFAIL.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-dns-servfail-rate-2026-04-20
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-20T14:22:00+00:00"
+  summary: "external DNS SERVFAIL rate >20%/min for 5m"
+  target_entity: "configmap/coredns"
+
+expected_root_cause:
+  summary: "PR #2210 misspelled 'forward . /etc/resolv.conf' as 'foward'; CoreDNS silently no-op'd the block."
+  canonical_entities:
+    - "https://github.com/acme/platform/pull/2210"
+    - "configmap/coredns"
+
+expected_runbook_step: >
+  Edit Corefile to correct 'foward' -> 'forward'; kubectl rollout restart deployment/coredns -n kube-system.
+
+expected_blast_radius:
+  - "namespace/default"
+  - "namespace/prod"
+  - "service/api"

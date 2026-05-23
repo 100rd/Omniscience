@@ -1,0 +1,26 @@
+id: bench-0007
+category: deploy-rollback
+description: >
+  A deploy promoted an unreviewed image tag with a broken migration step;
+  the deploy must be rolled back AND the migration reverted.
+
+alert_payload:
+  provider: argocd
+  alert_id: argocd-sync-degraded-2026-04-22
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-22T17:31:00+00:00"
+  summary: "ArgoCD app 'orders' degraded — pods crashlooping after sync"
+  target_entity: "deployment/orders"
+
+expected_root_cause:
+  summary: "PR #6101 promoted image orders:abc123 which fails on schema v32 migration."
+  canonical_entities:
+    - "https://github.com/acme/gitops/pull/6101"
+    - "deployment/orders"
+
+expected_runbook_step: >
+  argocd app rollback orders --revision <previous>; run migrate down v32; redeploy known-good tag.
+
+expected_blast_radius:
+  - "deployment/orders"
+  - "database/orders"

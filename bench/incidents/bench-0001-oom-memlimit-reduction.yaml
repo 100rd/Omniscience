@@ -1,0 +1,35 @@
+id: bench-0001
+category: oom
+description: >
+  api pod OOMKilled after a PR cut the memory limit from 1Gi to 256Mi.
+  Recency tie-break: the offending PR merged 4h before the alert; an
+  older logging refactor PR (7d before) must NOT win.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-12-001
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-12T19:30:00+00:00"
+  summary: "api pod 5xx spike — OOMKilled"
+  target_entity: "pod/api-7f9b9d4c-xj4kp"
+
+expected_root_cause:
+  summary: "PR #4242 reduced memory limit from 1Gi to 256Mi; pod hit limit under normal traffic."
+  canonical_entities:
+    - "https://github.com/acme/api/pull/4242"
+    - "pod/api-7f9b9d4c-xj4kp"
+    - "deployment/api"
+
+expected_runbook_step: >
+  Revert PR #4242 and restore memory limit to 1Gi; scale replicas to 5 while traffic drains.
+
+expected_blast_radius:
+  - "service/api"
+  - "deployment/api"
+  - "ingress/api-public"
+
+notes: >
+  Mirrors tests/fixtures/incident_demo/workspace_a.json so the runner has a
+  fixture that exercises the same v0.1 demo path end-to-end.
+source_files:
+  - "tests/fixtures/incident_demo/workspace_a.json"

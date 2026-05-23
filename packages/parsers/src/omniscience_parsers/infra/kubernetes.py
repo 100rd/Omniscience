@@ -19,7 +19,7 @@ import re
 from typing import Any
 
 import structlog
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from omniscience_parsers.base import ParsedDocument, Section
 

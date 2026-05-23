@@ -86,6 +86,10 @@ Then ask your AI assistant a question — it will call `omniscience.search` and 
 - [Retrieval strategy (ADR 0004)](docs/decisions/0004-retrieval-strategy-staged.md) — hybrid → structural → GraphRAG-if-needed
 - [Architecture decisions](docs/decisions/)
 
+## Benchmarks
+
+MCP retrieval-quality benchmark suite under [bench/](bench/) (scaffolding subset of issue #241).
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).
