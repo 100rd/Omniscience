@@ -77,6 +77,9 @@ from omniscience_server.incidents import (
     MAX_MAX_DEPTH,
     MIN_MAX_DEPTH,
 )
+from omniscience_server.mcp.apps import (
+    wrap_resolve_incident_response,
+)
 from omniscience_server.mcp.incident_timeline import (
     TIMELINE_MAX_DEPTH,
     incident_timeline_tool,
@@ -522,7 +525,7 @@ async def resolve_incident(
     parsed_as_of = _parse_as_of(as_of)
     clamped_depth = max(MIN_MAX_DEPTH, min(max_depth, MAX_MAX_DEPTH))
     try:
-        return await mcp_resolve_incident(
+        legacy_response = await mcp_resolve_incident(
             app=_get_app(),
             alert_id=alert_id,
             workspace_id=workspace_id,
@@ -536,6 +539,11 @@ async def resolve_incident(
         if msg.startswith(f"{ALERT_NOT_FOUND_CODE}:"):
             raise
         raise
+    # Issue #238: MCP Apps UI card wrapper.  When the connected client
+    # advertised the ``omniscience/apps`` experimental capability, attach
+    # the rendered card under ``_meta``; otherwise the legacy response
+    # passes through byte-for-byte (backwards-compat invariant).
+    return wrap_resolve_incident_response(legacy_response, ctx=ctx)
 
 
 # ---------------------------------------------------------------------------
