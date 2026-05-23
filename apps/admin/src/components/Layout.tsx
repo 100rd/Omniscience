@@ -11,6 +11,7 @@ const NAV_ITEMS = [
   { to: "/sources", label: "Sources" },
   { to: "/freshness", label: "Freshness" },
   { to: "/retention", label: "Retention" },
+  { to: "/incidents", label: "Incidents" },
   { to: "/tokens", label: "Tokens" },
   { to: "/ingestion", label: "Ingestion" },
   { to: "/search", label: "Search Playground" },

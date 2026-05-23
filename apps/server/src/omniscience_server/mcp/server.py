@@ -56,6 +56,10 @@ from omniscience_server.incidents import (
     MAX_MAX_DEPTH,
     MIN_MAX_DEPTH,
 )
+from omniscience_server.mcp.incident_timeline import (
+    TIMELINE_MAX_DEPTH,
+    incident_timeline_tool,
+)
 from omniscience_server.mcp.tools import (
     mcp_get_document,
     mcp_get_entity,
@@ -488,6 +492,54 @@ async def resolve_incident(
         if msg.startswith(f"{ALERT_NOT_FOUND_CODE}:"):
             raise
         raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: incident_timeline (issue #235)
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="incident_timeline",
+    description=(
+        "Render the bitemporal state-change timeline for entities in an "
+        "alerts blast radius. alert_id MUST be of the form "
+        "alert://{provider}/{provider_alert_id}. Optional from/to bound "
+        "the event-time window; optional entity_types is an allowlist of "
+        "entity kinds. Returns events sorted ascending by timestamp with "
+        "before/after summaries and source provenance per ADR-0008 1. "
+        "Requires a workspace-scoped token."
+    ),
+)
+async def incident_timeline(
+    alert_id: str,
+    ctx: Context[Any, Any, Any],
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    entity_types: list[str] | None = None,
+    as_of: str | None = None,
+    max_depth: int = TIMELINE_MAX_DEPTH,
+) -> dict[str, Any]:
+    """incident_timeline tool requires scope search AND a workspace token.
+
+    Mirrors the auth posture of resolve_incident workspace-scoped,
+    fail-closed, no existence leak for cross-workspace alert ids
+    (issue #117 / ADR-0005).
+    """
+    return await incident_timeline_tool(
+        app=_get_app(),
+        ctx=ctx,
+        resolve_token=_resolve_token,
+        require_scope=_require_scope,
+        parse_as_of=_parse_as_of,
+        record_invocation=_record_tool_invocation,
+        alert_id=alert_id,
+        from_ts=from_ts,
+        to_ts=to_ts,
+        entity_types=entity_types,
+        as_of=as_of,
+        max_depth=max_depth,
+    )
 
 
 __all__ = ["mcp_server", "set_fastapi_app"]

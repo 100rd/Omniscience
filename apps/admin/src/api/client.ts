@@ -301,6 +301,45 @@ export interface RetentionRunNowResponse {
   lag_seconds: number;
 }
 
+/*
+ * Wire format for `GET /api/v1/incidents/{id}/timeline` (Issue #235).
+ *
+ * Mirrors the Pydantic `IncidentTimelineResponse` /  `TimelineEvent`
+ * defined in `apps/server/src/omniscience_server/incident_timeline.py`.
+ * Each event represents one bitemporal state change for an entity in
+ * the alert's blast radius. `change_kind` is "created" when the row's
+ * `valid_from` projects forward, or "ended" when its `valid_to` does.
+ */
+export type TimelineChangeKind = "created" | "ended";
+
+export interface TimelineEvent {
+  ts: string;
+  entity_id: string;
+  entity_type: string;
+  change_kind: TimelineChangeKind;
+  before_state_summary: string | null;
+  after_state_summary: string | null;
+  source: string;
+}
+
+export interface IncidentTimelineResponse {
+  alert_id: string;
+  events: TimelineEvent[];
+  effective_as_of: string;
+  window_from: string | null;
+  window_to: string | null;
+  entity_types_filter: string[] | null;
+  truncated: boolean;
+}
+
+export interface IncidentTimelineQuery {
+  from?: string;
+  to?: string;
+  entity_types?: string[];
+  as_of?: string;
+  max_depth?: number;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -513,5 +552,61 @@ export class ApiClient {
       "POST",
       "/api/v1/admin/retention/run-now"
     );
+  }
+
+  // Incident timeline (Issue #235)
+  async incidentTimeline(
+    alertId: string,
+    query: IncidentTimelineQuery = {},
+    signal?: AbortSignal
+  ): Promise<IncidentTimelineResponse> {
+    const qs = new URLSearchParams();
+    if (query.from) qs.set("from", query.from);
+    if (query.to) qs.set("to", query.to);
+    if (query.as_of) qs.set("as_of", query.as_of);
+    if (query.max_depth != null) qs.set("max_depth", String(query.max_depth));
+    if (query.entity_types) {
+      for (const t of query.entity_types) qs.append("entity_types", t);
+    }
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return this.request<IncidentTimelineResponse>(
+      "GET",
+      `/api/v1/incidents/${encodeURIComponent(alertId)}/timeline${suffix}`,
+      undefined,
+      signal
+    );
+  }
+
+  async incidentTimelineMermaid(
+    alertId: string,
+    query: IncidentTimelineQuery = {},
+    signal?: AbortSignal
+  ): Promise<string> {
+    const qs = new URLSearchParams();
+    qs.set("format", "mermaid");
+    if (query.from) qs.set("from", query.from);
+    if (query.to) qs.set("to", query.to);
+    if (query.as_of) qs.set("as_of", query.as_of);
+    if (query.max_depth != null) qs.set("max_depth", String(query.max_depth));
+    if (query.entity_types) {
+      for (const t of query.entity_types) qs.append("entity_types", t);
+    }
+    const path = `/api/v1/incidents/${encodeURIComponent(alertId)}/timeline?${qs}`;
+    const res = await fetch(path, {
+      method: "GET",
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : undefined,
+      signal,
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({ detail: res.statusText }));
+      const detail =
+        typeof data?.detail === "string"
+          ? data.detail
+          : typeof data?.detail?.message === "string"
+            ? data.detail.message
+            : JSON.stringify(data?.detail ?? data);
+      throw new ApiError(res.status, detail);
+    }
+    return await res.text();
   }
 }
