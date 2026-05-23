@@ -22,7 +22,7 @@ Registry::
 
 Built-in connectors (``git``, ``github_pr``, ``fs``, ``confluence``, ``notion``,
 ``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``, ``alerts``, ``otel``,
-``datadog``) are registered below and available immediately on import.
+``datadog``, ``pagerduty``) are registered below and available immediately on import.
 Third-party connectors call :func:`get_connector` after registering against
 the shared registry.
 """
@@ -69,6 +69,10 @@ from omniscience_connectors.otel import (
     canonical_trace_name,
     parse_otlp_payload,
 )
+from omniscience_connectors.pagerduty.connector import (
+    PagerDutyConfig,
+    PagerDutyConnector,
+)
 from omniscience_connectors.registry import (
     ConnectorRegistry,
     NotFoundError,
@@ -93,6 +97,7 @@ _registry.register(AwsConnector)
 _registry.register(AlertsConnector)
 _registry.register(OtelConnector)
 _registry.register(DatadogConnector)
+_registry.register(PagerDutyConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -127,6 +132,8 @@ __all__ = [
     "OtelConfig",
     "OtelConnector",
     "OtelDecodeError",
+    "PagerDutyConfig",
+    "PagerDutyConnector",
     "ParsedSpan",
     "ParsedTrace",
     "ParsedTraces",

@@ -1,0 +1,8 @@
+{
+  "abilities": [
+    "preview_incident_alerts",
+    "read_only_users",
+    "teams",
+    "service_dependencies"
+  ]
+}

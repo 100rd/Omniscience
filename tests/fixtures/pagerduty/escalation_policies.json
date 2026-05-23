@@ -1,0 +1,38 @@
+{
+  "escalation_policies": [
+    {
+      "id": "PESC001",
+      "type": "escalation_policy",
+      "summary": "Platform on-call",
+      "name": "Platform on-call",
+      "description": "Tiered platform on-call escalation",
+      "num_loops": 2,
+      "teams": [
+        {"id": "PTEAM01", "type": "team_reference", "summary": "Platform SRE"}
+      ],
+      "escalation_rules": [
+        {"id": "PR1", "escalation_delay_in_minutes": 5, "targets": []},
+        {"id": "PR2", "escalation_delay_in_minutes": 15, "targets": []}
+      ],
+      "html_url": "https://acme.pagerduty.com/escalation_policies/PESC001"
+    },
+    {
+      "id": "PESC002",
+      "type": "escalation_policy",
+      "summary": "Payments on-call",
+      "name": "Payments on-call",
+      "description": "Payments escalation policy",
+      "num_loops": 1,
+      "teams": [
+        {"id": "PTEAM02", "type": "team_reference", "summary": "Payments"}
+      ],
+      "escalation_rules": [
+        {"id": "PR3", "escalation_delay_in_minutes": 10, "targets": []}
+      ],
+      "html_url": "https://acme.pagerduty.com/escalation_policies/PESC002"
+    }
+  ],
+  "limit": 100,
+  "offset": 0,
+  "more": false
+}
