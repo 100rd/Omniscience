@@ -98,15 +98,6 @@ from omniscience_server.replay import (
     replay_by_audit_id,
     replay_context,
 )
-from omniscience_server.similar_incidents import (
-    MAX_LIMIT as SIMILAR_MAX_LIMIT,
-)
-from omniscience_server.similar_incidents import (
-    MAX_SINCE_DAYS as SIMILAR_MAX_SINCE_DAYS,
-)
-from omniscience_server.similar_incidents import (
-    mcp_find_similar_incidents,
-)
 from omniscience_server.runbook import (
     ALERT_NOT_FOUND_CODE as RUNBOOK_ALERT_NOT_FOUND_CODE,
 )
@@ -121,6 +112,15 @@ from omniscience_server.runbook import (
 )
 from omniscience_server.runbook import (
     suggest_runbook as mcp_suggest_runbook,
+)
+from omniscience_server.similar_incidents import (
+    MAX_LIMIT as SIMILAR_MAX_LIMIT,
+)
+from omniscience_server.similar_incidents import (
+    MAX_SINCE_DAYS as SIMILAR_MAX_SINCE_DAYS,
+)
+from omniscience_server.similar_incidents import (
+    mcp_find_similar_incidents,
 )
 
 log = structlog.get_logger(__name__)
