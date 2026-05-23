@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import uuid
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from omniscience_core.storage import ChunkPayload, VectorStore
@@ -275,3 +275,65 @@ async def test_upsert_is_unchanged_when_content_hash_matches() -> None:
     assert outcome.chunks_written == 0
     assert outcome.document_id == existing_doc_id
     client.upsert.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Client construction: the API key from QdrantConfig reaches AsyncQdrantClient
+# Regression coverage for issue #225 — the qdrant-client gRPC interceptor
+# in v1.12+ returns UNAUTHENTICATED when no bearer token is sent, so we MUST
+# forward whatever api_key the settings layer resolved (including None, which
+# is still a valid dev path on the HTTP transport).
+# ---------------------------------------------------------------------------
+
+
+def test_build_client_forwards_api_key_from_config() -> None:
+    """``_build_client`` must hand the configured api_key to ``AsyncQdrantClient``.
+
+    Regression for #225: without this, dev/staging/prod all crash at
+    ``_ensure_collection`` with ``StatusCode.UNAUTHENTICATED`` because the
+    gRPC interceptor refuses to send unauthenticated calls.
+    """
+    config = QdrantConfig(
+        host="qdrant.example",
+        grpc_port=6334,
+        http_port=6333,
+        api_key="secret-key-from-env",
+        https=True,
+        prefer_grpc=True,
+        timeout_seconds=12.5,
+    )
+    store = QdrantVectorStore(config=config, embedding_provider=_embedding_provider())
+
+    with patch("omniscience_index.stores.qdrant_store.AsyncQdrantClient") as mock_client_cls:
+        mock_client_cls.return_value = MagicMock(spec=AsyncQdrantClient)
+        store._build_client()
+
+    mock_client_cls.assert_called_once()
+    kwargs = mock_client_cls.call_args.kwargs
+    assert kwargs["api_key"] == "secret-key-from-env"
+    assert kwargs["host"] == "qdrant.example"
+    assert kwargs["grpc_port"] == 6334
+    assert kwargs["port"] == 6333
+    assert kwargs["https"] is True
+    assert kwargs["prefer_grpc"] is True
+    # timeout is coerced to int per qdrant-client signature.
+    assert kwargs["timeout"] == 12
+
+
+def test_build_client_passes_none_api_key_when_unset() -> None:
+    """``api_key=None`` is still forwarded verbatim.
+
+    The HTTP transport tolerates ``None`` and that is the documented
+    air-gapped/test path; we therefore must not silently substitute an
+    empty string or omit the kwarg.
+    """
+    config = QdrantConfig(api_key=None)
+    store = QdrantVectorStore(config=config, embedding_provider=_embedding_provider())
+
+    with patch("omniscience_index.stores.qdrant_store.AsyncQdrantClient") as mock_client_cls:
+        mock_client_cls.return_value = MagicMock(spec=AsyncQdrantClient)
+        store._build_client()
+
+    kwargs = mock_client_cls.call_args.kwargs
+    assert "api_key" in kwargs
+    assert kwargs["api_key"] is None
