@@ -28,6 +28,11 @@ Composition shape
    ships per the architect memo on epic #99; #155 replaces it with a
    calibrated model.
 5. **Bundle** the recommendation into :class:`ResolveIncidentResponse`.
+6. **Cluster** past similar incidents (issue #233, additive field
+   ``similar_past``) via the same-incident clustering primitives in
+   :mod:`omniscience_server.similar_incidents`.  The clustering call is
+   best-effort: any failure returns an empty list rather than breaking
+   the primary resolve path.
 
 ACL invariant (non-negotiable)
 ------------------------------
@@ -222,6 +227,14 @@ class ResolveIncidentResponse(BaseModel):
     ``confidence_score`` is a v0.1 placeholder per the architect memo on
     epic #99; the calibrated model lands in #155.  Callers should treat
     the score as a stable schema slot, not a calibrated probability.
+
+    ``similar_past`` (issue #233, additive) carries the ranked list of
+    past incidents that the same-incident clustering primitive matched
+    for this seed.  Each entry follows the
+    :class:`omniscience_server.similar_incidents.SimilarIncident`
+    schema (serialised as a JSON dict for transport-agnostic delivery).
+    Empty list when the clustering call returned no matches or could
+    not run (best-effort, never breaks the primary bundle).
     """
 
     alert: AlertSummary
@@ -231,6 +244,14 @@ class ResolveIncidentResponse(BaseModel):
     confidence_score: float = Field(ge=0.0, le=1.0)
     effective_as_of: datetime
     meta: dict[str, Any] | None = None
+    similar_past: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Ranked past incidents similar to this one (issue #233). "
+            "Shape matches SimilarIncident; empty when clustering yields "
+            "no matches or is unavailable."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -330,12 +351,23 @@ async def mcp_resolve_incident(
             config=scoring_config,
         )
         meta = _build_meta(confidence=confidence, config=scoring_config)
+        # Issue #233 — additive ``similar_past`` augmentation.  Called
+        # AFTER the primary classification so any failure is contained
+        # and does not break the bundle.  Late import avoids a circular
+        # dependency (similar_incidents -> incidents).
+        similar_past = await _augment_with_similar_past(
+            app=app,
+            alert_id=alert_id,
+            workspace_id=workspace_id,
+            as_of=normalised_as_of,
+        )
         return _build_response(
             alert=seed,
             classified=classified,
             confidence=confidence,
             as_of=normalised_as_of,
             meta=meta,
+            similar_past=similar_past,
         ).model_dump(mode="json")
 
 
@@ -521,6 +553,7 @@ def _build_response(
     confidence: float,
     as_of: datetime | None,
     meta: dict[str, Any] | None = None,
+    similar_past: list[dict[str, Any]] | None = None,
 ) -> ResolveIncidentResponse:
     """Produce the bounded :class:`ResolveIncidentResponse` payload."""
     return ResolveIncidentResponse(
@@ -537,6 +570,7 @@ def _build_response(
         confidence_score=confidence,
         effective_as_of=resolve_effective_as_of(as_of),
         meta=meta,
+        similar_past=list(similar_past or []),
     )
 
 
@@ -646,6 +680,37 @@ def _summarise_thread(node: EntityNodeView) -> SlackThreadSummary:
         source=node.source,
         chunk_text=node.chunk_text,
         edge_type=node.edge_type,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Similar-incident augmentation (issue #233, additive only)
+# ---------------------------------------------------------------------------
+
+
+async def _augment_with_similar_past(
+    *,
+    app: FastAPI,
+    alert_id: str,
+    workspace_id: uuid.UUID,
+    as_of: datetime | None,
+) -> list[dict[str, Any]]:
+    """Best-effort call to :func:`collect_similar_past`.
+
+    Wrapped here so the import is late (avoids the circular dep) and
+    so any failure is contained — clustering errors must NEVER fail
+    the primary ``resolve_incident`` bundle (additive-field contract
+    from the issue #233 spec).
+    """
+    try:
+        from omniscience_server.similar_incidents import collect_similar_past
+    except ImportError:  # pragma: no cover - defensive
+        return []
+    return await collect_similar_past(
+        app=app,
+        incident_id=alert_id,
+        workspace_id=workspace_id,
+        as_of=as_of,
     )
 
 

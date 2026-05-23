@@ -113,6 +113,15 @@ from omniscience_server.runbook import (
 from omniscience_server.runbook import (
     suggest_runbook as mcp_suggest_runbook,
 )
+from omniscience_server.similar_incidents import (
+    MAX_LIMIT as SIMILAR_MAX_LIMIT,
+)
+from omniscience_server.similar_incidents import (
+    MAX_SINCE_DAYS as SIMILAR_MAX_SINCE_DAYS,
+)
+from omniscience_server.similar_incidents import (
+    mcp_find_similar_incidents,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -806,6 +815,57 @@ async def suggest_runbook(
         if msg.startswith(f"{RUNBOOK_ALERT_NOT_FOUND_CODE}:"):
             raise
         raise
+
+
+# ---------------------------------------------------------------------------
+# Tool: find_similar_incidents (issue #233)
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="find_similar_incidents",
+    description=(
+        "Find past incidents similar to the given incident via the "
+        "same-incident clustering primitive (alert_type + service + "
+        "symptom-embedding signature with recency decay). incident_id "
+        "MUST be of the form alert://{provider}/{provider_alert_id}. "
+        "Returns ranked matches with per-component similarity breakdown. "
+        "Optional `as_of` anchors the comparison window per ADR-0008 §5. "
+        "Requires a workspace-scoped token."
+    ),
+)
+async def find_similar_incidents(
+    incident_id: str,
+    ctx: Context[Any, Any, Any],
+    limit: int = 5,
+    since_days: int = 90,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """find_similar_incidents tool — requires scope 'search' AND workspace token."""
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="find_similar_incidents", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_find_similar_incidents_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Similar-incident search requires a workspace-scoped token")
+
+    parsed_as_of = _parse_as_of(as_of)
+    clamped_limit = max(1, min(limit, SIMILAR_MAX_LIMIT))
+    clamped_since = max(1, min(since_days, SIMILAR_MAX_SINCE_DAYS))
+    return await mcp_find_similar_incidents(
+        app=_get_app(),
+        incident_id=incident_id,
+        workspace_id=workspace_id,
+        limit=clamped_limit,
+        since_days=clamped_since,
+        as_of=parsed_as_of,
+    )
 
 
 __all__ = ["mcp_server", "set_fastapi_app"]
