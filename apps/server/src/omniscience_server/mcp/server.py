@@ -98,6 +98,21 @@ from omniscience_server.replay import (
     replay_by_audit_id,
     replay_context,
 )
+from omniscience_server.runbook import (
+    ALERT_NOT_FOUND_CODE as RUNBOOK_ALERT_NOT_FOUND_CODE,
+)
+from omniscience_server.runbook import (
+    DEFAULT_TOP_K as RUNBOOK_DEFAULT_TOP_K,
+)
+from omniscience_server.runbook import (
+    INVALID_ALERT_ID_CODE as RUNBOOK_INVALID_ALERT_ID_CODE,
+)
+from omniscience_server.runbook import (
+    MAX_TOP_K as RUNBOOK_MAX_TOP_K,
+)
+from omniscience_server.runbook import (
+    suggest_runbook as mcp_suggest_runbook,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -733,6 +748,64 @@ async def replay_context_tool(
         raise ValueError(f"audit_log_not_found:{exc}") from exc
 
     return envelope_to_dict(result)
+
+
+# ---------------------------------------------------------------------------
+# Tool: suggest_runbook (issue #231)
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="suggest_runbook",
+    description=(
+        "Return the top matching runbooks for an alert. "
+        "alert_id MUST be of the form 'alert://{provider}/{provider_alert_id}'. "
+        "Returns suggestions ordered by confidence DESC with citation blocks "
+        "(title, source, first step) so the responder UI can render previews "
+        "without a second round-trip. Optional `as_of` (ISO-8601 UTC datetime) "
+        "anchors the traversal to graph state at that time per ADR-0008 §5. "
+        "Requires a workspace-scoped token. Confidence-score model: v0.1 "
+        "deterministic placeholder per issue #231; calibrated model is a "
+        "follow-up."
+    ),
+)
+async def suggest_runbook(
+    alert_id: str,
+    ctx: Context[Any, Any, Any],
+    top_k: int = RUNBOOK_DEFAULT_TOP_K,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """suggest_runbook tool requires scope 'search' AND workspace token."""
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="suggest_runbook", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_suggest_runbook_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Runbook suggestion requires a workspace-scoped token")
+
+    parsed_as_of = _parse_as_of(as_of)
+    clamped_top_k = max(1, min(top_k, RUNBOOK_MAX_TOP_K))
+    try:
+        return await mcp_suggest_runbook(
+            app=_get_app(),
+            alert_id=alert_id,
+            workspace_id=workspace_id,
+            as_of=parsed_as_of,
+            top_k=clamped_top_k,
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if msg.startswith(f"{RUNBOOK_INVALID_ALERT_ID_CODE}:"):
+            raise
+        if msg.startswith(f"{RUNBOOK_ALERT_NOT_FOUND_CODE}:"):
+            raise
+        raise
 
 
 __all__ = ["mcp_server", "set_fastapi_app"]
