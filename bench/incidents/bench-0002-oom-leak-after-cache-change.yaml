@@ -1,0 +1,30 @@
+id: bench-0002
+category: oom
+description: >
+  Slow memory leak in worker pods after a caching library upgrade. Workers
+  fall over on a 6h cadence — OOMKills track the upgrade rollout, not the
+  alert time. The expected root cause is a dependency bump, not a config.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-15-014
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-15T08:14:00+00:00"
+  summary: "worker pods crashlooping — OOMKilled (3rd cycle in 18h)"
+  target_entity: "deployment/worker"
+
+expected_root_cause:
+  summary: "PR #4380 bumped the in-process LRU cache library; new default unbounded mode leaks under load."
+  canonical_entities:
+    - "https://github.com/acme/worker/pull/4380"
+    - "deployment/worker"
+
+expected_runbook_step: >
+  Pin caching library to previous minor; set cache_max_entries=10000 explicitly; rolling-restart worker.
+
+expected_blast_radius:
+  - "deployment/worker"
+  - "queue/jobs"
+  - "service/api"
+
+notes: Topical contrast to bench-0001 — different OOM root cause (leak vs limit).

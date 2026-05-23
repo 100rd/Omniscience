@@ -1,0 +1,28 @@
+id: bench-0004
+category: cert-expiry
+description: >
+  Public TLS cert at the edge expired — Let's Encrypt renewal failed for
+  three consecutive cycles because the HTTP-01 challenge path was blocked
+  by a recent WAF rule.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-19-003
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-19T11:02:00+00:00"
+  summary: "edge TLS cert expired — public traffic NXDOMAIN-equivalent (browser error)"
+  target_entity: "ingress/edge-public"
+
+expected_root_cause:
+  summary: "WAF rule from PR #5102 blocked /.well-known/acme-challenge/*; cert-manager could not renew."
+  canonical_entities:
+    - "https://github.com/acme/edge/pull/5102"
+    - "ingress/edge-public"
+
+expected_runbook_step: >
+  Exempt /.well-known/acme-challenge/* in the WAF rule; manually trigger renewal; verify chain.
+
+expected_blast_radius:
+  - "ingress/edge-public"
+  - "service/api"
+  - "service/web"

@@ -1,0 +1,28 @@
+id: bench-0011
+category: noisy-neighbor
+description: >
+  A batch job got co-scheduled with latency-sensitive api pods on the
+  same node; CPU throttling caused api p99 to spike. The expected root
+  cause is the missing PodAntiAffinity, not the batch job itself.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-cpu-throttle-api-2026-04-26
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-26T02:11:00+00:00"
+  summary: "api pods CPU throttled >40%; p99 latency degraded"
+  target_entity: "deployment/api"
+
+expected_root_cause:
+  summary: "Missing PodAntiAffinity for nightly-etl Job; co-scheduled with api on node ip-10-0-1-42."
+  canonical_entities:
+    - "https://github.com/acme/gitops/pull/6310"
+    - "deployment/api"
+    - "job/nightly-etl"
+
+expected_runbook_step: >
+  Add PodAntiAffinity to api Deployment excluding label app=nightly-etl; cordon node ip-10-0-1-42 until next cycle.
+
+expected_blast_radius:
+  - "service/api"
+  - "deployment/api"

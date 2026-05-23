@@ -1,0 +1,28 @@
+id: bench-0003
+category: cert-expiry
+description: >
+  Internal mTLS cert expired silently — cert-manager renewal was disabled
+  by a config-as-code change two months prior; nobody noticed until
+  service-to-service calls started failing.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-cert-expired-payments-2026-04-18
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-18T03:47:00+00:00"
+  summary: "payments<->ledger mTLS handshake failures (cert expired)"
+  target_entity: "secret/payments-mtls"
+
+expected_root_cause:
+  summary: "PR #3801 disabled cert-manager auto-renew on payments-mtls; cert expired 60d later."
+  canonical_entities:
+    - "https://github.com/acme/platform/pull/3801"
+    - "secret/payments-mtls"
+
+expected_runbook_step: >
+  Re-enable renewer on Certificate/payments-mtls; force rotate via cmctl renew; restart payments/ledger pods.
+
+expected_blast_radius:
+  - "service/payments"
+  - "service/ledger"
+  - "service/checkout"

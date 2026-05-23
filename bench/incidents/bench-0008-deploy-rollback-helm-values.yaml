@@ -1,0 +1,28 @@
+id: bench-0008
+category: deploy-rollback
+description: >
+  A Helm values change reduced HPA maxReplicas from 50 to 5 right before a
+  traffic surge; pods saturated, p99 latency spiked, no errors visible
+  upstream until the connection pool exhausted.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-p99-latency-2026-04-23
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-23T20:08:00+00:00"
+  summary: "service/api p99 latency >2s for 10m; saturation alert"
+  target_entity: "horizontalpodautoscaler/api"
+
+expected_root_cause:
+  summary: "PR #6244 changed values.yaml hpa.maxReplicas: 50 -> 5; HPA hit the new ceiling."
+  canonical_entities:
+    - "https://github.com/acme/gitops/pull/6244"
+    - "horizontalpodautoscaler/api"
+    - "deployment/api"
+
+expected_runbook_step: >
+  Revert PR #6244; helm upgrade api --reuse-values --set hpa.maxReplicas=50; verify scale-up.
+
+expected_blast_radius:
+  - "service/api"
+  - "deployment/api"

@@ -1,0 +1,32 @@
+id: bench-0012
+category: data-corruption
+description: >
+  A dual-write migration (old table + new table) drifted because the
+  back-fill job stopped silently after an env var rename. New writes
+  hit both tables; old rows were never copied. Discovered when a read
+  fell through to the new table and 404'd on legacy ids.
+
+alert_payload:
+  provider: sentry
+  alert_id: sentry-issue-2026-04-27-NotFoundError-spike
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-27T13:05:00+00:00"
+  summary: "NotFoundError spike on /api/orders/<legacy-id> — 8% of reads"
+  target_entity: "table/orders_v2"
+
+expected_root_cause:
+  summary: >
+    Backfill CronJob orders-backfill silently exited after PR #6402 renamed env var
+    DB_URL -> ORDERS_DB_URL; legacy rows never copied to orders_v2.
+  canonical_entities:
+    - "https://github.com/acme/orders/pull/6402"
+    - "cronjob/orders-backfill"
+    - "table/orders_v2"
+
+expected_runbook_step: >
+  Patch CronJob env to use ORDERS_DB_URL; rerun backfill from last successful checkpoint; verify row counts.
+
+expected_blast_radius:
+  - "service/orders"
+  - "table/orders_v2"
+  - "service/reporting"
