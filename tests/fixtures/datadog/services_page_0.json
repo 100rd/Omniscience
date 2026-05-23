@@ -1,0 +1,41 @@
+{
+  "data": [
+    {
+      "id": "checkout",
+      "type": "service-definition",
+      "attributes": {
+        "modified": "2026-05-15T10:00:00.000000+00:00",
+        "schema": {
+          "schema-version": "v2.2",
+          "dd-service": "checkout",
+          "description": "Synchronous checkout API. Receives cart, returns order ID.",
+          "team": "payments",
+          "tier": "1",
+          "lifecycle": "production",
+          "contacts": [
+            {"name": "On-call", "type": "slack", "contact": "#payments-oncall"},
+            {"name": "Owner", "type": "email", "contact": "payments@example.com"}
+          ],
+          "links": [
+            {"name": "runbook", "type": "runbook", "url": "https://runbooks.example.com/checkout"}
+          ]
+        }
+      }
+    },
+    {
+      "id": "postgres",
+      "type": "service-definition",
+      "attributes": {
+        "modified": "2026-04-22T12:00:00.000000+00:00",
+        "schema": {
+          "schema-version": "v2.2",
+          "dd-service": "postgres",
+          "description": "Primary OLTP store.",
+          "team": "data",
+          "tier": "1",
+          "lifecycle": "production"
+        }
+      }
+    }
+  ]
+}

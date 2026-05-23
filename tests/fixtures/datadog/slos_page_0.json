@@ -1,0 +1,26 @@
+{
+  "data": [
+    {
+      "id": "slo-checkout-latency",
+      "name": "Checkout p99 < 500ms",
+      "type": "metric",
+      "description": "p99 latency for checkout under 500ms over 30d.",
+      "modified_at": "2026-05-10T10:00:00.000000+00:00",
+      "thresholds": [
+        {"timeframe": "30d", "target": 99.0, "warning": 99.5}
+      ],
+      "tags": ["service:checkout", "team:payments"]
+    },
+    {
+      "id": "slo-postgres-availability",
+      "name": "Postgres availability 99.95%",
+      "type": "monitor",
+      "description": "Primary db availability over 30d.",
+      "modified_at": "2026-04-25T09:00:00.000000+00:00",
+      "thresholds": [
+        {"timeframe": "30d", "target": 99.95, "warning": 99.97}
+      ],
+      "tags": ["service:postgres", "team:data"]
+    }
+  ]
+}
