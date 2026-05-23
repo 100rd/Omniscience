@@ -21,9 +21,10 @@ Registry::
     from omniscience_connectors import ConnectorRegistry, get_connector
 
 Built-in connectors (``git``, ``github_pr``, ``fs``, ``confluence``, ``notion``,
-``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``, ``alerts``, ``otel``) are
-registered below and available immediately on import.  Third-party connectors call
-:func:`get_connector` after registering against the shared registry.
+``slack``, ``jira``, ``k8s-agentic``, ``s3``, ``aws``, ``alerts``, ``otel``,
+``datadog``) are registered below and available immediately on import.
+Third-party connectors call :func:`get_connector` after registering against
+the shared registry.
 """
 
 from omniscience_connectors.agentic import (
@@ -50,6 +51,7 @@ from omniscience_connectors.base import (
 )
 from omniscience_connectors.confluence.connector import ConfluenceConnector
 from omniscience_connectors.database.connector import DatabaseConnector
+from omniscience_connectors.datadog.connector import DatadogConfig, DatadogConnector
 from omniscience_connectors.fs.connector import FsConnector
 from omniscience_connectors.git.connector import GitConnector
 from omniscience_connectors.github_pr.connector import GithubPrConfig, GithubPrConnector
@@ -90,6 +92,7 @@ _registry.register(S3Connector)
 _registry.register(AwsConnector)
 _registry.register(AlertsConnector)
 _registry.register(OtelConnector)
+_registry.register(DatadogConnector)
 
 # Public alias for the shared registry instance (all built-ins pre-registered).
 default_registry: ConnectorRegistry = _registry
@@ -105,6 +108,8 @@ __all__ = [
     "Connector",
     "ConnectorRegistry",
     "DatabaseConnector",
+    "DatadogConfig",
+    "DatadogConnector",
     "DocumentRef",
     "FetchedDocument",
     "FsConnector",

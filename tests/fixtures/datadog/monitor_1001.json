@@ -1,0 +1,12 @@
+{
+  "id": 1001,
+  "name": "Checkout latency p99 high",
+  "type": "metric alert",
+  "query": "avg(last_5m):avg:trace.servlet.request.duration{service:checkout,env:prod,pod_name:checkout-7f6c} by {pod_name} > 1.5",
+  "message": "@pagerduty-payments Checkout latency above SLO. Runbook: https://runbooks.example.com/checkout-latency",
+  "tags": ["service:checkout", "env:prod", "team:payments", "host:checkout-pool-a"],
+  "overall_state": "Alert",
+  "created": "2025-12-01T10:00:00.000000+00:00",
+  "modified": "2026-05-20T08:12:31.000000+00:00",
+  "creator": {"email": "sre@example.com", "name": "SRE Bot"}
+}

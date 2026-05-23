@@ -1,0 +1,16 @@
+{
+  "dashboards": [
+    {
+      "id": "abc-123-xyz",
+      "title": "Checkout overview",
+      "author_handle": "sre@example.com",
+      "modified_at": "2026-05-19T11:11:00.000000+00:00"
+    },
+    {
+      "id": "def-456-uvw",
+      "title": "Postgres health",
+      "author_handle": "data@example.com",
+      "modified_at": "2026-05-18T09:09:00.000000+00:00"
+    }
+  ]
+}

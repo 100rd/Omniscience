@@ -1,0 +1,12 @@
+{
+  "event": {
+    "id": 9000001,
+    "title": "[Triggered on {service:checkout}] Checkout latency p99 high",
+    "text": "Monitor crossed alert threshold. Current p99: 1.83s",
+    "alert_type": "error",
+    "source": "Monitor Alert",
+    "monitor_id": 1001,
+    "date_happened": 1779763200,
+    "tags": ["service:checkout", "env:prod", "monitor_id:1001"]
+  }
+}
