@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "omniscience": {
+      "autoApprove": [],
+      "disabled": false,
+      "headers": {
+        "Authorization": "Bearer sk_test_TOKEN"
+      },
+      "type": "http",
+      "url": "https://omni.example.com/mcp"
+    }
+  }
+}

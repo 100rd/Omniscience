@@ -1,0 +1,13 @@
+{
+  "context_servers": {
+    "omniscience": {
+      "settings": {
+        "headers": {
+          "Authorization": "Bearer sk_test_TOKEN"
+        },
+        "transport": "http",
+        "url": "https://omni.example.com/mcp"
+      }
+    }
+  }
+}
