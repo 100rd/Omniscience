@@ -1,0 +1,31 @@
+id: bench-0030
+category: deploy-rollback
+description: >
+  Major Helm chart version bump for kafka changed defaultProperties for
+  log.retention.hours from 168 to 24; brokers silently deleted 6 days of
+  consumer offsets within hours.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-30-077
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-30T03:33:00+00:00"
+  summary: "kafka consumer lag reset — historical replay impossible past 24h"
+  target_entity: "statefulset/kafka"
+
+expected_root_cause:
+  summary: >
+    PR #1115 bumped bitnami/kafka chart 21.x -> 26.x; upstream changed
+    log.retention.hours default from 168 to 24.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/1115"
+    - "statefulset/kafka"
+    - "configmap/kafka-broker-config"
+
+expected_runbook_step: >
+  Pin log.retention.hours=168 explicitly in chart values; helm upgrade; verify on all brokers.
+
+expected_blast_radius:
+  - "statefulset/kafka"
+  - "service/analytics"
+  - "service/audit"

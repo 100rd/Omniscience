@@ -1,0 +1,30 @@
+id: bench-0036
+category: config-drift
+description: >
+  A NetworkPolicy authored with an empty podSelector ({}) was meant to
+  affect a single Deployment, but {} selects every pod in the namespace;
+  cross-service traffic dropped to zero in that namespace at apply time.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-cross-svc-traffic-drop-ns-payments-2026-05-06
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-06T15:33:00+00:00"
+  summary: "payments namespace east-west traffic 0 rps; egress to redis denied"
+  target_entity: "networkpolicy/payments-restrict-egress"
+
+expected_root_cause:
+  summary: >
+    PR #1208 created NetworkPolicy with podSelector:{} (selects all pods)
+    intended for one Deployment; default-deny applied namespace-wide.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/1208"
+    - "networkpolicy/payments-restrict-egress"
+
+expected_runbook_step: >
+  Patch NetworkPolicy podSelector to matchLabels.app=payments-api (or delete and re-author); kubectl apply.
+
+expected_blast_radius:
+  - "namespace/payments"
+  - "service/payments"
+  - "service/checkout"

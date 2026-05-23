@@ -1,0 +1,29 @@
+id: bench-0023
+category: dns
+description: >
+  External lookups for sqs.us-east-1.amazonaws.com were 5x slower after
+  a Pod-spec change set dnsConfig.options.ndots from 2 to 5; every lookup
+  first tried 5 search-domain permutations.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-dns-latency-orders-2026-04-23
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-23T12:09:00+00:00"
+  summary: "orders p99 latency 200ms -> 1.4s — dns_lookup_ms p99 1100ms"
+  target_entity: "deployment/orders"
+
+expected_root_cause:
+  summary: >
+    PR #6033 set dnsConfig.options.ndots=5 on orders pods to 'fix' an
+    unrelated cross-namespace lookup; now every external FQDN triggers 5 NXDOMAINs.
+  canonical_entities:
+    - "https://github.com/acme/orders/pull/6033"
+    - "deployment/orders"
+
+expected_runbook_step: >
+  Revert PR #6033 (restore ndots=2); add explicit trailing dot on the cross-namespace hostname that motivated the change.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/checkout"

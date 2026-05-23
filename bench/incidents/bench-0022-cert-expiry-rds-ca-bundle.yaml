@@ -1,0 +1,30 @@
+id: bench-0022
+category: cert-expiry
+description: >
+  RDS connections began failing after AWS rotated rds-ca-rsa2048-g1; our
+  app images still ship the rds-ca-2019 bundle and were never updated.
+
+alert_payload:
+  provider: sentry
+  alert_id: sentry-issue-2026-04-22-SSLCertVerification
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-22T18:05:00+00:00"
+  summary: "orders service: SSLCertVerificationError on RDS connect — 100% failure"
+  target_entity: "rds-instance/orders-prod"
+
+expected_root_cause:
+  summary: >
+    AWS rotated rds-ca-rsa2048-g1 root; PR #810 never landed to vendor
+    the new CA bundle into our base image.
+  canonical_entities:
+    - "https://github.com/acme/base-images/pull/810"
+    - "rds-instance/orders-prod"
+    - "deployment/orders"
+
+expected_runbook_step: >
+  Apply PR #810 (vendor new rds-ca bundle); rebuild and roll out base image; verify orders reconnects.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/checkout"
+  - "service/inventory"

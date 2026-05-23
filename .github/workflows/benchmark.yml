@@ -1,0 +1,180 @@
+name: Benchmark
+
+# Two triggers:
+#   - per-PR: runs Omniscience-only against the 50-incident corpus as a
+#     regression gate; fails the PR if top-1 accuracy drops below the
+#     baseline threshold.
+#   - nightly: runs the full cross-vendor matrix against pinned vendor
+#     versions (see bench/vendors/versions.json) and publishes the JSON
+#     artifact for the leaderboard tracker.
+#
+# Live vendor calls are gated behind BENCH_LIVE_VENDORS=1; the nightly
+# job sets it explicitly. Per-PR runs stay in mock-mode so external
+# vendor availability never breaks an Omniscience PR.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/**"
+      - "packages/**"
+      - "bench/**"
+      - ".github/workflows/benchmark.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+  schedule:
+    # 02:00 UTC nightly — clear of the daily release window.
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+    inputs:
+      live_vendors:
+        description: "Run live vendor calls (requires secrets)"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  # -------------------------------------------------------------------
+  # PR gate — Omniscience-only, mock-mode adapters, deterministic.
+  # -------------------------------------------------------------------
+  pr-regression-gate:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+
+      - name: Validate full 50-incident corpus
+        run: uv run python bench/runner.py --validate-corpus
+
+      - name: Run Omniscience-only benchmark (mock-mode)
+        run: |
+          uv run python bench/runner_matrix.py \
+            --vendor omniscience --json > bench-pr.json
+          cat bench-pr.json
+
+      - name: Upload PR benchmark artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-pr-${{ github.run_id }}
+          path: bench-pr.json
+          retention-days: 30
+
+      - name: Unit tests for the benchmark suite
+        run: |
+          uv run pytest \
+            tests/test_benchmark_runner.py \
+            tests/test_benchmark_vendors.py \
+            tests/test_benchmark_matrix.py \
+            -v --no-cov
+
+  # -------------------------------------------------------------------
+  # Nightly cross-vendor matrix.
+  # -------------------------------------------------------------------
+  nightly-matrix:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        vendor: [omniscience, holmesgpt, sourcegraph_mcp, github_mcp]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+
+      - name: Read pinned vendor versions
+        id: pin
+        run: |
+          {
+            echo "holmes_image=$(jq -r '.vendors.holmesgpt.ref' bench/vendors/versions.json)"
+            echo "sourcegraph_endpoint=$(jq -r '.vendors.sourcegraph_mcp.endpoint_default' bench/vendors/versions.json)"
+            echo "github_endpoint=$(jq -r '.vendors.github_mcp.endpoint_default' bench/vendors/versions.json)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Start HolmesGPT (Docker) for live calls
+        if: matrix.vendor == 'holmesgpt'
+        run: |
+          docker pull "${{ steps.pin.outputs.holmes_image }}"
+          docker run -d --name holmes -p 8090:8080 \
+            -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
+            "${{ steps.pin.outputs.holmes_image }}" server
+          # Wait for /health (max 60s)
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8090/health > /dev/null; then break; fi
+            sleep 2
+          done
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+
+      - name: Start Omniscience via docker compose (for omniscience vendor only)
+        if: matrix.vendor == 'omniscience'
+        run: |
+          docker compose up -d
+          for _ in $(seq 1 60); do
+            if curl -sf http://localhost:8000/health > /dev/null; then break; fi
+            sleep 2
+          done
+
+      - name: Run benchmark for ${{ matrix.vendor }}
+        env:
+          BENCH_LIVE_VENDORS: "1"
+          SOURCEGRAPH_ACCESS_TOKEN: ${{ secrets.SOURCEGRAPH_ACCESS_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          uv run python bench/runner_matrix.py \
+            --vendor "${{ matrix.vendor }}" --json > "bench-${{ matrix.vendor }}.json"
+          cat "bench-${{ matrix.vendor }}.json"
+
+      - name: Upload per-vendor artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-nightly-${{ matrix.vendor }}-${{ github.run_id }}
+          path: bench-${{ matrix.vendor }}.json
+          retention-days: 90
+
+  # -------------------------------------------------------------------
+  # Roll up the per-vendor artifacts into one matrix.json after nightly.
+  # -------------------------------------------------------------------
+  nightly-rollup:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: nightly-matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-nightly-*-${{ github.run_id }}
+          path: ./_artifacts
+          merge-multiple: true
+      - name: Merge per-vendor JSON into matrix.json
+        run: |
+          jq -s '
+            {
+              as_of: (.[0].as_of // (now | todate)),
+              live: true,
+              results: (map(.results) | add)
+            }
+          ' ./_artifacts/bench-*.json > matrix.json
+          cat matrix.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bench-matrix-${{ github.run_id }}
+          path: matrix.json
+          retention-days: 365

@@ -1,0 +1,30 @@
+id: bench-0031
+category: deploy-rollback
+description: >
+  HPA was edited to minReplicas=0 by a cost-saving PR meant only for a
+  staging overlay; the same change leaked into prod base. Off-hours
+  scale-to-zero meant a cold-start storm at the next traffic ramp.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-cold-start-storm-checkout-2026-05-01
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-01T08:00:00+00:00"
+  summary: "checkout p99 90s during 08:00 ramp — 0 ready pods until 08:02"
+  target_entity: "deployment/checkout"
+
+expected_root_cause:
+  summary: >
+    PR #6601 set HPA minReplicas=0 in 'overlays/staging' but kustomize
+    base patch leaked to prod overlay.
+  canonical_entities:
+    - "https://github.com/acme/gitops/pull/6601"
+    - "horizontalpodautoscaler/checkout"
+    - "deployment/checkout"
+
+expected_runbook_step: >
+  Patch HPA to minReplicas=3 in prod overlay; redeploy; remove the bad base patch from PR #6601.
+
+expected_blast_radius:
+  - "service/checkout"
+  - "deployment/checkout"

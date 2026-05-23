@@ -1,0 +1,29 @@
+id: bench-0039
+category: dependency-outage
+description: >
+  GitHub Actions degraded; PR merges blocked because required CI checks
+  could not run. No runtime impact on production but release pipeline
+  paused — IR triggered because of release-blocking SLA.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-09-051
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-09T14:02:00+00:00"
+  summary: "release-train stalled — 0/4 required CI checks reporting for 45m"
+  target_entity: "github-action/required-ci"
+
+expected_root_cause:
+  summary: >
+    GitHub status page incident — Actions degraded in us-east; queue depth
+    >100k; our self-hosted runner fleet was disabled in PR #4011.
+  canonical_entities:
+    - "statuspage://www.githubstatus.com/incidents/2026-05-09-actions-degraded"
+    - "https://github.com/acme/infra/pull/4011"
+    - "github-action/required-ci"
+
+expected_runbook_step: >
+  Re-enable self-hosted runner fleet (revert PR #4011); rerun pending checks; resume release train.
+
+expected_blast_radius:
+  - "github-action/required-ci"

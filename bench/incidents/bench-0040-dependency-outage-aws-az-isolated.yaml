@@ -1,0 +1,31 @@
+id: bench-0040
+category: dependency-outage
+description: >
+  AWS us-east-1 AZ usw1-az2 isolated; our multi-AZ deployments should
+  have failed over but a single-AZ NAT Gateway took out egress for one
+  subnet's pods. Architectural drift, not a regional outage failure.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-10-088
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-10T16:45:00+00:00"
+  summary: "1 of 3 AZs unreachable; 1/3 pods can't reach external APIs"
+  target_entity: "nat-gateway/nat-usw1-az2"
+
+expected_root_cause:
+  summary: >
+    AWS AZ isolation event AWS-USW1-2026-05-10-1; our NAT GW was
+    single-AZ per PR #3399 (cost optimization).
+  canonical_entities:
+    - "statuspage://health.aws.amazon.com/USW1-2026-05-10-1"
+    - "https://github.com/acme/infra/pull/3399"
+    - "nat-gateway/nat-usw1-az2"
+
+expected_runbook_step: >
+  Cordon affected AZ nodes; failover NAT GW to AZ-1 (manual route-table swap); revisit PR #3399 to add per-AZ NAT.
+
+expected_blast_radius:
+  - "subnet/private-usw1-az2"
+  - "service/orders"
+  - "service/payments"

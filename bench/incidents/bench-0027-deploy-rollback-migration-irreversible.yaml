@@ -1,0 +1,31 @@
+id: bench-0027
+category: deploy-rollback
+description: >
+  A new release was rolled back when 5xx spiked, but the rollback failed
+  because the deploy had run a destructive migration (DROP COLUMN) that
+  the old image's ORM still references.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-27-008
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-27T20:01:00+00:00"
+  summary: "users service 5xx after rollback to v4.12.0 — UndefinedColumn:legacy_username"
+  target_entity: "deployment/users"
+
+expected_root_cause:
+  summary: >
+    PR #7710 (v4.13.0) ran migration 0207 dropping legacy_username; rollback to
+    v4.12.0 still queries it.
+  canonical_entities:
+    - "https://github.com/acme/users/pull/7710"
+    - "migration/0207-drop-legacy-username"
+    - "deployment/users"
+
+expected_runbook_step: >
+  Re-apply v4.13.0 (forward-fix), or run remediation migration 0207b to re-add legacy_username AS GENERATED column.
+
+expected_blast_radius:
+  - "service/users"
+  - "service/auth"
+  - "service/web"

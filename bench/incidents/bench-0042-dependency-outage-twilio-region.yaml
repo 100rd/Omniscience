@@ -1,0 +1,30 @@
+id: bench-0042
+category: dependency-outage
+description: >
+  Twilio SMS outage in EU region took down our 2FA login flow for EU
+  customers; US flow unaffected. Our app's failover-region logic was
+  documented but never tested and the secondary credentials had expired.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-12-040
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-12T11:30:00+00:00"
+  summary: "EU 2FA login failures 100%; Twilio EU region degraded"
+  target_entity: "service/auth-2fa"
+
+expected_root_cause:
+  summary: >
+    Twilio status incident TWILIO-EU-2026-05-12; secondary US Twilio
+    API key in secret/twilio-fallback expired on 2026-04-29 (PR #2240).
+  canonical_entities:
+    - "statuspage://status.twilio.com/incidents/TWILIO-EU-2026-05-12"
+    - "secret/twilio-fallback"
+    - "service/auth-2fa"
+
+expected_runbook_step: >
+  Issue new Twilio US API key, update secret/twilio-fallback, flip auth-2fa to use US endpoint via env TWILIO_REGION=us1; verify EU logins recover.
+
+expected_blast_radius:
+  - "service/auth-2fa"
+  - "service/login-eu"

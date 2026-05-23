@@ -1,0 +1,30 @@
+id: bench-0019
+category: cert-expiry
+description: >
+  cert-manager failed to renew a Let's Encrypt cert because the cluster
+  hit the ACME rate limit after a misconfigured wildcard kept retrying.
+  Existing cert expired before manual intervention.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-cert-expiry-public-2026-04-19
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-19T05:18:00+00:00"
+  summary: "TLS cert for api.acme.com expired 12m ago; cert-manager renewal failing"
+  target_entity: "certificate/api-tls"
+
+expected_root_cause:
+  summary: >
+    PR #909 created a wildcard *.acme.com Certificate that retried 600x in 24h
+    and tripped Let's Encrypt's 5/hour duplicate-cert rate limit.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/909"
+    - "certificate/api-tls"
+    - "deployment/cert-manager"
+
+expected_runbook_step: >
+  Delete certificate/wildcard-acme; wait 1h for rate limit; force renew api-tls via cmctl renew api-tls.
+
+expected_blast_radius:
+  - "ingress/api-public"
+  - "service/api"

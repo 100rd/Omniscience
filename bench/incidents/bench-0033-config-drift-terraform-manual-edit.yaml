@@ -1,0 +1,32 @@
+id: bench-0033
+category: config-drift
+description: >
+  A console-only edit raised an RDS instance's max_connections; Terraform
+  apply during a routine VPC change reverted it, and connection-pool
+  saturation followed within minutes.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-03-021
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-03T13:20:00+00:00"
+  summary: "orders db connection pool exhausted — PG FATAL: remaining connection slots"
+  target_entity: "rds-parameter-group/orders-prod"
+
+expected_root_cause:
+  summary: >
+    On 2026-04-12 SRE bumped rds-parameter-group max_connections 500 -> 2000
+    via AWS console; never landed in Terraform. PR #4901 (VPC change) ran
+    terraform apply, snapped value back to module default 500.
+  canonical_entities:
+    - "https://github.com/acme/infra/pull/4901"
+    - "rds-parameter-group/orders-prod"
+    - "rds-instance/orders-prod"
+
+expected_runbook_step: >
+  Land Terraform PR setting max_connections=2000 on the parameter group; apply; reboot RDS to pick up dynamic-param change.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/checkout"
+  - "rds-instance/orders-prod"

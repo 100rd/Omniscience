@@ -1,0 +1,29 @@
+id: bench-0018
+category: oom
+description: >
+  Go service OOMKilled after long-running pprof heap profile was
+  accidentally left enabled by a debugging PR; the runtime kept the heap
+  snapshot pinned and refused to release memory to the OS.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-oom-search-go-2026-04-18
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-18T14:10:00+00:00"
+  summary: "search service OOMKilled — RSS climbing 50Mi/min after deploy"
+  target_entity: "deployment/search"
+
+expected_root_cause:
+  summary: >
+    PR #2902 enabled runtime.SetBlockProfileRate(1) and an indefinite
+    heap profile for a debugging session; never disabled before merge.
+  canonical_entities:
+    - "https://github.com/acme/search/pull/2902"
+    - "deployment/search"
+
+expected_runbook_step: >
+  Revert PR #2902 (disable block + heap profiling); rollout restart deployment/search.
+
+expected_blast_radius:
+  - "service/search"
+  - "deployment/search"

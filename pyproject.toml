@@ -91,6 +91,9 @@ ignore = [
 "bench/runner.py" = [
     "T201",  # print is the standard CLI output mechanism for the bench runner
 ]
+"bench/runner_matrix.py" = [
+    "T201",  # print is the standard CLI output mechanism for the matrix runner
+]
 "helm/**/tests/**" = [
     "S101",  # assert is the standard pytest assertion mechanism
     "S603",  # subprocess call — helm template invocations in controlled CI

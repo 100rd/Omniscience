@@ -1,0 +1,30 @@
+id: bench-0015
+category: oom
+description: >
+  Celery worker OOMKilled after Redis broker fell behind; the worker
+  prefetched 200 large jobs into memory because CELERYD_PREFETCH_MULTIPLIER
+  was never tuned for the new job size after a payload schema migration.
+
+alert_payload:
+  provider: sentry
+  alert_id: sentry-issue-2026-04-15-WorkerLostError
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-15T11:02:00+00:00"
+  summary: "celery worker OOMKilled — backlog 22k jobs, RSS 4Gi"
+  target_entity: "deployment/celery-worker-reports"
+
+expected_root_cause:
+  summary: >
+    PR #3301 grew report payload 10x; default prefetch multiplier=4 with
+    concurrency=50 = 200 large jobs in memory per worker.
+  canonical_entities:
+    - "https://github.com/acme/reports/pull/3301"
+    - "deployment/celery-worker-reports"
+    - "configmap/celery-config"
+
+expected_runbook_step: >
+  Set CELERYD_PREFETCH_MULTIPLIER=1 in configmap/celery-config; rollout restart workers.
+
+expected_blast_radius:
+  - "service/reports"
+  - "deployment/celery-worker-reports"

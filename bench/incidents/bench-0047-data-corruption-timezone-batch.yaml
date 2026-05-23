@@ -1,0 +1,30 @@
+id: bench-0047
+category: data-corruption
+description: >
+  Daily reports double-counted events from 23:00-00:00 UTC because a
+  scheduling change set the batch job's tz from UTC to America/Los_Angeles;
+  the job ran twice on DST-spring-forward day.
+
+alert_payload:
+  provider: sentry
+  alert_id: sentry-issue-2026-05-17-DoubleCountAlarm
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-17T18:22:00+00:00"
+  summary: "daily revenue dashboard: 2026-03-13 row 2x expected; tripped guardrail"
+  target_entity: "table/daily_revenue"
+
+expected_root_cause:
+  summary: >
+    PR #1407 changed CronJob.spec.timeZone from 'Etc/UTC' to
+    'America/Los_Angeles'; DST spring-forward caused a duplicate run.
+  canonical_entities:
+    - "https://github.com/acme/analytics/pull/1407"
+    - "cronjob/daily-revenue-rollup"
+    - "table/daily_revenue"
+
+expected_runbook_step: >
+  Revert PR #1407 (timezone back to Etc/UTC); manually re-run idempotent backfill for 2026-03-13 with DELETE+INSERT.
+
+expected_blast_radius:
+  - "table/daily_revenue"
+  - "service/reporting"

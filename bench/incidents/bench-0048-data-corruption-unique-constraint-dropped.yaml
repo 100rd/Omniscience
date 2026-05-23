@@ -1,0 +1,32 @@
+id: bench-0048
+category: data-corruption
+description: >
+  Duplicate user accounts appeared because a migration dropped a unique
+  index it was supposed to rebuild concurrently; the rebuild silently
+  failed and was retried-but-skipped on the next deploy.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-18-066
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-18T13:40:00+00:00"
+  summary: "user signup duplicate-email rate 0.4% (was 0%); 14 duplicate accounts/h"
+  target_entity: "table/users"
+
+expected_root_cause:
+  summary: >
+    Migration 0309 dropped uniq_users_email and tried CREATE INDEX
+    CONCURRENTLY which failed at 80% (deadlock); PR #2207 marked it
+    'applied' anyway.
+  canonical_entities:
+    - "migration/0309-rebuild-uniq-users-email"
+    - "https://github.com/acme/users/pull/2207"
+    - "table/users"
+
+expected_runbook_step: >
+  Pause new signups; dedupe duplicate emails (merge to oldest user_id); CREATE UNIQUE INDEX CONCURRENTLY; verify and re-enable signups.
+
+expected_blast_radius:
+  - "table/users"
+  - "service/users"
+  - "service/auth"

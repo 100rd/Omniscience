@@ -1,0 +1,29 @@
+id: bench-0037
+category: config-drift
+description: >
+  A typo (RETRY_BACKOFF_MS -> RETRY_BACKOF_MS) in a Deployment env section
+  meant the app silently used its hard-coded 100ms default instead of the
+  intended 2000ms, causing retry storms against the payments upstream.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-retry-storm-checkout-2026-05-07
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-07T11:08:00+00:00"
+  summary: "checkout outbound RPS to payments 14k (normal 800); upstream returning 429"
+  target_entity: "deployment/checkout"
+
+expected_root_cause:
+  summary: >
+    PR #2018 introduced env var name RETRY_BACKOF_MS (missing F); app
+    fell back to in-binary default backoff=100ms — 20x retry rate.
+  canonical_entities:
+    - "https://github.com/acme/checkout/pull/2018"
+    - "deployment/checkout"
+
+expected_runbook_step: >
+  Fix env var name to RETRY_BACKOFF_MS in deployment/checkout; rollout restart; verify outbound RPS drops to baseline.
+
+expected_blast_radius:
+  - "service/checkout"
+  - "service/payments"

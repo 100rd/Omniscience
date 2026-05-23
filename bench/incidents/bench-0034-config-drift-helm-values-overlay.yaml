@@ -1,0 +1,29 @@
+id: bench-0034
+category: config-drift
+description: >
+  A staging-only Helm values overlay was unintentionally merged into the
+  base values.yaml, lowering prod replica count and resource requests to
+  staging levels at next release.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-throughput-drop-api-2026-05-04
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-04T10:50:00+00:00"
+  summary: "api throughput 12k -> 3k rps; CPU saturated on 2 of 12 pods"
+  target_entity: "deployment/api"
+
+expected_root_cause:
+  summary: >
+    PR #2105 was supposed to update charts/api/values-staging.yaml only;
+    a rebase collapsed values-staging.yaml diff into values.yaml.
+  canonical_entities:
+    - "https://github.com/acme/api/pull/2105"
+    - "deployment/api"
+
+expected_runbook_step: >
+  Revert PR #2105; reapply staging overlay correctly; helm upgrade api on prod.
+
+expected_blast_radius:
+  - "service/api"
+  - "deployment/api"

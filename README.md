@@ -113,7 +113,8 @@ Then ask your AI assistant a question — it will call `omniscience.search` and 
 
 ## Benchmarks
 
-MCP retrieval-quality benchmark suite under [bench/](bench/) (scaffolding subset of issue #241).
+MCP retrieval-quality benchmark suite under [bench/](bench/) — 50-incident corpus + cross-vendor matrix.
+Latest results: [bench/results/2026-Q2.md](bench/results/2026-Q2.md).
 
 ## License
 

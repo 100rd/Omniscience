@@ -1,0 +1,31 @@
+id: bench-0049
+category: data-corruption
+description: >
+  Customers saw stale pricing because a CDN cache invalidation hook was
+  removed in a refactor; price updates wrote to the DB and search index
+  but the CDN-cached product pages stayed fresh-as-of-yesterday for ~12h.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-19-029
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-19T15:55:00+00:00"
+  summary: "support tickets spike: 'price changed at checkout' — 220 tickets in 1h"
+  target_entity: "deployment/catalog"
+
+expected_root_cause:
+  summary: >
+    PR #4404 refactored catalog write-path; accidentally deleted the
+    on_price_update CDN purge hook (was inline in the old method).
+  canonical_entities:
+    - "https://github.com/acme/catalog/pull/4404"
+    - "deployment/catalog"
+    - "cdn-distribution/cdn-storefront"
+
+expected_runbook_step: >
+  Restore the on_price_update CDN purge hook (re-add the purge_paths(/p/*) call); deploy; full CDN purge of /p/*.
+
+expected_blast_radius:
+  - "cdn-distribution/cdn-storefront"
+  - "service/catalog"
+  - "service/web"
