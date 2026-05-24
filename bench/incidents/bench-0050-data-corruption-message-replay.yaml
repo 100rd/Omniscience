@@ -1,0 +1,33 @@
+id: bench-0050
+category: data-corruption
+description: >
+  An at-least-once Kafka consumer began re-processing events from offset
+  0 after a deploy that accidentally reset the consumer-group offsets;
+  downstream orders system credited shipments twice until idempotency
+  guard caught it.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-consumer-offset-reset-orders-2026-05-20
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-20T21:08:00+00:00"
+  summary: "consumer group orders-shipments offset jumped 1.2M -> 0; replay in progress"
+  target_entity: "consumergroup/orders-shipments"
+
+expected_root_cause:
+  summary: >
+    PR #3030 changed auto.offset.reset from 'latest' to 'earliest'
+    AND set group.instance.id to a value that did not match the previous
+    one — consumer treated as new group, started from offset 0.
+  canonical_entities:
+    - "https://github.com/acme/orders/pull/3030"
+    - "consumergroup/orders-shipments"
+    - "deployment/orders-shipments-consumer"
+
+expected_runbook_step: >
+  Stop consumer; kafka-consumer-groups.sh --reset-offsets --to-datetime <before-replay> --group orders-shipments; revert PR #3030; redeploy.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/shipments"
+  - "topic/orders-events"

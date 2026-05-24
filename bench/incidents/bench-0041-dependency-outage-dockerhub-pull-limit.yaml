@@ -1,0 +1,31 @@
+id: bench-0041
+category: dependency-outage
+description: >
+  Pods stuck in ImagePullBackOff after a node-pool rotation because
+  Docker Hub's anonymous pull-rate limit hit (100/6h). The mirror Secret
+  was rotated 10 days ago and never re-attached to the service account.
+
+alert_payload:
+  provider: argocd
+  alert_id: argocd-app-progressing-many-2026-05-11
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-11T05:11:00+00:00"
+  summary: "32 deployments stuck ImagePullBackOff — toomanyrequests: rate limit"
+  target_entity: "serviceaccount/default"
+
+expected_root_cause:
+  summary: >
+    PR #1207 rotated dockerhub-mirror Secret but only attached it to
+    'platform' SA, not 'default' SA where most workloads run.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/1207"
+    - "secret/dockerhub-mirror"
+    - "serviceaccount/default"
+
+expected_runbook_step: >
+  Patch serviceaccount/default in all workload namespaces to imagePullSecrets[] include dockerhub-mirror; recreate stuck pods.
+
+expected_blast_radius:
+  - "namespace/default"
+  - "namespace/api"
+  - "namespace/orders"

@@ -1,0 +1,30 @@
+id: bench-0043
+category: noisy-neighbor
+description: >
+  Postgres replica p99 read latency spiked after a co-tenant analytics
+  query burst depleted the EBS gp3 burst credits on the underlying
+  volume; not a query plan regression but storage contention.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-iops-throttle-pg-replica-2026-05-13
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-13T22:14:00+00:00"
+  summary: "postgres-replica-2 p99 read 12ms -> 380ms; EBSIOBalance% = 0"
+  target_entity: "rds-instance/postgres-replica-2"
+
+expected_root_cause:
+  summary: >
+    Analytics PR #5503 added a Looker job pinned to replica-2; sustained
+    3000 IOPS exhausted gp3 baseline; volume throttled.
+  canonical_entities:
+    - "https://github.com/acme/analytics/pull/5503"
+    - "rds-instance/postgres-replica-2"
+
+expected_runbook_step: >
+  Route Looker jobs to dedicated reporting replica (set analytics.PG_HOST=postgres-reporting); bump replica-2 to gp3 provisioned 6000 IOPS.
+
+expected_blast_radius:
+  - "service/web"
+  - "service/api"
+  - "rds-instance/postgres-replica-2"

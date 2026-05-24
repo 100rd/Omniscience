@@ -1,0 +1,29 @@
+id: bench-0016
+category: oom
+description: >
+  Slow memory growth in api over 4 days terminated in OOMKill. Cause was
+  unbounded-cardinality Prometheus label: a per-request UUID was added to
+  http_request_duration_seconds, blowing up the local metrics registry.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-16-031
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-16T03:55:00+00:00"
+  summary: "api OOMKilled after 96h uptime — slow heap growth"
+  target_entity: "deployment/api"
+
+expected_root_cause:
+  summary: >
+    PR #4321 added 'trace_id' (per-request UUID) to a Prometheus Histogram
+    label set; local registry held ~12M unique series after 4 days.
+  canonical_entities:
+    - "https://github.com/acme/api/pull/4321"
+    - "deployment/api"
+
+expected_runbook_step: >
+  Revert PR #4321 (drop trace_id label); rollout restart to flush registry; backfill trace_id into structured logs instead.
+
+expected_blast_radius:
+  - "service/api"
+  - "deployment/api"

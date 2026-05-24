@@ -1,0 +1,30 @@
+id: bench-0044
+category: noisy-neighbor
+description: >
+  Redis cache hit-rate collapsed when one tenant began writing 200MiB
+  hash keys; LRU evicted the bulk of small keys other services rely on.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-redis-hit-rate-collapse-2026-05-14
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-14T06:32:00+00:00"
+  summary: "redis hit-rate 98% -> 41%; evictions 0 -> 12k/s"
+  target_entity: "service/redis-shared"
+
+expected_root_cause:
+  summary: >
+    PR #2118 in reports service started caching full PDF render buffers
+    (~200MiB) in shared redis with key prefix 'reports:render:*'.
+  canonical_entities:
+    - "https://github.com/acme/reports/pull/2118"
+    - "service/redis-shared"
+
+expected_runbook_step: >
+  Move reports:render:* keys to a dedicated redis instance; set a maxsize 10MiB cap on the shared instance via ACL.
+
+expected_blast_radius:
+  - "service/api"
+  - "service/web"
+  - "service/orders"
+  - "service/redis-shared"

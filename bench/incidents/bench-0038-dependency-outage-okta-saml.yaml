@@ -1,0 +1,30 @@
+id: bench-0038
+category: dependency-outage
+description: >
+  Okta SSO degraded; SAML logins failed across internal tools. Affected
+  surface area is dictated by our own auth design — only services routing
+  through SSO impacted; service-account paths fine.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-08-002
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-08T07:55:00+00:00"
+  summary: "internal portal login failures — Okta /sso/saml 5xx >60%"
+  target_entity: "service/internal-portal"
+
+expected_root_cause:
+  summary: >
+    Okta status page incident OKTA-2026-05-08-1 — SAML token issuance
+    degraded; our internal-portal has no cached-session fallback.
+  canonical_entities:
+    - "statuspage://status.okta.com/incidents/OKTA-2026-05-08-1"
+    - "service/internal-portal"
+
+expected_runbook_step: >
+  Enable break-glass local-admin auth on internal-portal (toggle BREAKGLASS_LOGIN=true); wait for Okta recovery; revert.
+
+expected_blast_radius:
+  - "service/internal-portal"
+  - "service/admin-dash"
+  - "service/grafana"

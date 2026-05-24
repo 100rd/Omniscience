@@ -1,0 +1,30 @@
+id: bench-0013
+category: oom
+description: >
+  JVM-based billing service OOMKilled because a container memory bump
+  was applied without raising -Xmx; the JVM kept its default heap and
+  native+code-cache growth pushed the container past the cgroup limit.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-13-007
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-13T08:22:00+00:00"
+  summary: "billing pod OOMKilled — RSS 2.0Gi vs limit 2.0Gi"
+  target_entity: "deployment/billing"
+
+expected_root_cause:
+  summary: >
+    PR #5510 raised container memory limit 1Gi -> 2Gi but JVM args still pin
+    -Xmx512m; native + Metaspace + code cache crossed 1.5Gi and tripped cgroup.
+  canonical_entities:
+    - "https://github.com/acme/billing/pull/5510"
+    - "deployment/billing"
+    - "configmap/billing-jvm-opts"
+
+expected_runbook_step: >
+  Update configmap/billing-jvm-opts to -Xmx1500m and -XX:MaxRAMPercentage=75; rollout restart deployment.
+
+expected_blast_radius:
+  - "service/billing"
+  - "deployment/billing"

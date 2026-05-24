@@ -1,0 +1,29 @@
+id: bench-0017
+category: oom
+description: >
+  Pod stuck in OOMKilled init loop after the init-container was given a
+  huge ML model file to copy at startup; init-container memory request was
+  never raised when the model grew 4x.
+
+alert_payload:
+  provider: argocd
+  alert_id: argocd-app-degraded-ml-inference-2026-04-17
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-17T07:33:00+00:00"
+  summary: "ml-inference pods stuck — init:OOMKilled, 0/3 ready"
+  target_entity: "statefulset/ml-inference"
+
+expected_root_cause:
+  summary: >
+    PR #1180 replaced model.bin (800MiB) with model-v3.bin (3.2GiB);
+    init-container memory limit still 1Gi — copy step OOMs.
+  canonical_entities:
+    - "https://github.com/acme/ml-inference/pull/1180"
+    - "statefulset/ml-inference"
+
+expected_runbook_step: >
+  Bump init-container resources.limits.memory to 4Gi (and request to 2Gi) in statefulset/ml-inference; redeploy.
+
+expected_blast_radius:
+  - "service/ml-inference"
+  - "statefulset/ml-inference"

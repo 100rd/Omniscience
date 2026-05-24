@@ -1,0 +1,29 @@
+id: bench-0032
+category: deploy-rollback
+description: >
+  Node drain for a rolling cluster upgrade hung because a PodDisruptionBudget
+  with minAvailable=100% was introduced; eviction was blocked and the
+  upgrade rolled back, leaving the cluster in a half-upgraded state.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-02-013
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-02T14:25:00+00:00"
+  summary: "cluster upgrade rolled back — 6 of 12 nodes stuck draining for >1h"
+  target_entity: "poddisruptionbudget/redis-cluster-pdb"
+
+expected_root_cause:
+  summary: >
+    PR #1820 added redis-cluster PDB with minAvailable: 100% — blocks any voluntary eviction.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/1820"
+    - "poddisruptionbudget/redis-cluster-pdb"
+    - "statefulset/redis-cluster"
+
+expected_runbook_step: >
+  Edit PDB to minAvailable=N-1 (here, 4 of 5); resume node drain; complete upgrade.
+
+expected_blast_radius:
+  - "statefulset/redis-cluster"
+  - "service/cache"

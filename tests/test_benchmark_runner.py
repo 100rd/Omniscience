@@ -273,17 +273,16 @@ class TestBundleToResponse:
 
 
 class TestCorpusLoading:
-    def test_scaffolding_corpus_loads_and_covers_min_categories(self) -> None:
+    def test_full_corpus_loads_and_covers_all_categories(self) -> None:
         fixtures = load_corpus(DEFAULT_CORPUS_DIR)
-        assert 10 <= len(fixtures) <= 20, (
-            "scaffolding PR ships 10-15 fixtures; follow-up grows to 50"
-        )
+        # Issue #241 deliverable: 50-incident corpus.
+        assert len(fixtures) == 50, f"published corpus is 50 incidents; got {len(fixtures)}"
         # All ids unique.
         ids = [f.id for f in fixtures]
         assert len(set(ids)) == len(ids)
-        # At least 6 distinct categories represented (out of 8 declared).
+        # All 8 declared categories must be covered for the published leaderboard.
         cats = {f.category for f in fixtures}
-        assert len(cats) >= 6, f"too few categories covered: {cats}"
+        assert len(cats) == 8, f"too few categories covered: {cats}"
 
     def test_load_corpus_rejects_duplicate_ids(self, tmp_path: Path) -> None:
         for name in ("a.yaml", "b.yaml"):

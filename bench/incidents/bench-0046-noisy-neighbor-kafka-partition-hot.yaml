@@ -1,0 +1,31 @@
+id: bench-0046
+category: noisy-neighbor
+description: >
+  One Kafka partition became a hotspot after a producer change keyed
+  events by tenant_id with a skewed distribution; consumer lag on that
+  partition climbed while siblings stayed flat.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-kafka-partition-lag-orders-events-7-2026-05-16
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-16T09:18:00+00:00"
+  summary: "topic orders-events partition 7 lag 1.2M; other 15 partitions <100"
+  target_entity: "topic/orders-events"
+
+expected_root_cause:
+  summary: >
+    PR #6080 in orders changed event key from order_id to tenant_id;
+    tenant 'acme-megacorp' represents 60% of volume -> single partition.
+  canonical_entities:
+    - "https://github.com/acme/orders/pull/6080"
+    - "topic/orders-events"
+    - "deployment/orders"
+
+expected_runbook_step: >
+  Revert PR #6080 (restore order_id key); or add salt to key (tenant_id + hash16(order_id)) to spread writes.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/fulfillment"
+  - "topic/orders-events"

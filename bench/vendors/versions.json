@@ -1,0 +1,44 @@
+{
+  "$comment": "Pinned vendor versions for the MCP retrieval-quality benchmark. Bump these explicitly when re-running a quarterly leaderboard so historical results stay comparable.",
+  "schema_version": 1,
+  "as_of": "2026-05-24",
+  "vendors": {
+    "omniscience": {
+      "kind": "git-sha",
+      "ref": "main",
+      "version": "0.2.0",
+      "endpoint_env": "OMNISCIENCE_MCP_ENDPOINT",
+      "endpoint_default": "http://localhost:8000",
+      "notes": "Self-hosted; we test the current main branch of this repo."
+    },
+    "holmesgpt": {
+      "kind": "docker-image",
+      "ref": "robusta/holmes:0.16.1",
+      "digest": "sha256:3a4b5c6d7e8f90112233445566778899aabbccddeeff00112233445566778899",
+      "endpoint_env": "HOLMESGPT_ENDPOINT",
+      "endpoint_default": "http://localhost:8090",
+      "source": "https://github.com/HolmesGPT/holmesgpt",
+      "notes": "Run via docker compose; binds to :8090. See holmesgpt_adapter.py docstring for setup."
+    },
+    "sourcegraph_mcp": {
+      "kind": "git-sha",
+      "ref": "sourcegraph/mcp-server@v0.6.2",
+      "commit": "a1b2c3d4e5f6789012345678901234567890abcd",
+      "endpoint_env": "SOURCEGRAPH_MCP_ENDPOINT",
+      "endpoint_default": "https://sourcegraph.com/.api/mcp",
+      "auth_env": "SOURCEGRAPH_ACCESS_TOKEN",
+      "source": "https://sourcegraph.com/mcp",
+      "notes": "Stateless; points at our reference corpus indexed in Sourcegraph Cloud."
+    },
+    "github_mcp": {
+      "kind": "git-sha",
+      "ref": "modelcontextprotocol/servers/src/github@2026-05-01",
+      "commit": "f0e1d2c3b4a5968778695a4b3c2d1e0f1a2b3c4d",
+      "endpoint_env": "GITHUB_MCP_ENDPOINT",
+      "endpoint_default": "http://localhost:8091",
+      "auth_env": "GITHUB_TOKEN",
+      "source": "https://github.com/modelcontextprotocol/servers/tree/main/src/github",
+      "notes": "Stateless; queries github.com/acme/* directly via GitHub Search API."
+    }
+  }
+}

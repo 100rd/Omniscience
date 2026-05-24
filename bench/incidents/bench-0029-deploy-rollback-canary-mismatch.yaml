@@ -1,0 +1,30 @@
+id: bench-0029
+category: deploy-rollback
+description: >
+  A canary deploy was promoted to 100% while a feature flag still gated
+  the new behavior to 5%; users hit inconsistent results until the flag
+  was flipped to match.
+
+alert_payload:
+  provider: sentry
+  alert_id: sentry-issue-2026-04-29-StateMismatchError
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-29T09:47:00+00:00"
+  summary: "search results inconsistent — StateMismatchError 4% of queries"
+  target_entity: "deployment/search"
+
+expected_root_cause:
+  summary: >
+    PR #3220 promoted search v6.1 from 5% canary to 100%; feature flag
+    'unified-index-v2' was never flipped, so v6.1 sometimes hit legacy index.
+  canonical_entities:
+    - "https://github.com/acme/search/pull/3220"
+    - "featureflag/unified-index-v2"
+    - "deployment/search"
+
+expected_runbook_step: >
+  Flip featureflag/unified-index-v2 to on at 100%; or roll search back to v6.0 until flag is updated.
+
+expected_blast_radius:
+  - "service/search"
+  - "service/web"

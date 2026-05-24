@@ -1,0 +1,30 @@
+id: bench-0035
+category: config-drift
+description: >
+  An AWS IAM policy update shadowed an existing allow with a deny on the
+  same action; nightly batch job started failing on S3 ListBucket after
+  the change was applied during the day with no test traffic.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-05-05-061
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-05T02:14:00+00:00"
+  summary: "nightly-etl Job AccessDenied on s3:ListBucket arn:aws:s3:::acme-events-raw"
+  target_entity: "iam-role/nightly-etl"
+
+expected_root_cause:
+  summary: >
+    PR #5512 added an explicit Deny for s3:ListBucket on acme-events-raw
+    to limit a misbehaving CI account; same role inherits the Deny via OU SCP.
+  canonical_entities:
+    - "https://github.com/acme/iam/pull/5512"
+    - "iam-role/nightly-etl"
+    - "iam-policy/acme-events-raw-restrict"
+
+expected_runbook_step: >
+  Scope PR #5512 Deny to a condition matching the CI account only (aws:PrincipalAccount); reapply via Terraform.
+
+expected_blast_radius:
+  - "job/nightly-etl"
+  - "service/analytics"

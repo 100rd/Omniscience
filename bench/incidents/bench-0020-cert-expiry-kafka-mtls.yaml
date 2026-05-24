@@ -1,0 +1,31 @@
+id: bench-0020
+category: cert-expiry
+description: >
+  Kafka client certs expired during a holiday; the renewal CronJob was
+  silently failing for 60 days because its ServiceAccount lost the
+  required Secret RBAC after a namespace migration.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-20-005
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-20T01:44:00+00:00"
+  summary: "kafka producers failing SSL handshake — consumer lag >2M"
+  target_entity: "secret/kafka-client-mtls"
+
+expected_root_cause:
+  summary: >
+    PR #2401 moved cert-rotator into 'platform' namespace; its
+    ServiceAccount lost 'secrets/update' RBAC in 'kafka' namespace.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/2401"
+    - "cronjob/kafka-cert-rotator"
+    - "secret/kafka-client-mtls"
+
+expected_runbook_step: >
+  Create RoleBinding granting platform:cert-rotator secrets/update on kafka namespace; trigger CronJob manually.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/payments"
+  - "service/inventory"

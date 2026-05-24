@@ -1,0 +1,30 @@
+id: bench-0045
+category: noisy-neighbor
+description: >
+  A nightly object-store sync saturated node ENI bandwidth; co-located
+  latency-sensitive pods saw tail-latency spikes. Root cause is missing
+  bandwidth annotation, not the sync job itself.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-eni-saturated-node-ip-10-0-3-91-2026-05-15
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-05-15T03:00:00+00:00"
+  summary: "node ip-10-0-3-91 NetworkOutBytes 24Gbps cap saturated; co-tenant p99 +900ms"
+  target_entity: "node/ip-10-0-3-91"
+
+expected_root_cause:
+  summary: >
+    PR #4017 added s3-sync CronJob with parallelism=16 and no
+    kubernetes.io/egress-bandwidth annotation; co-scheduled with api pods.
+  canonical_entities:
+    - "https://github.com/acme/data-platform/pull/4017"
+    - "node/ip-10-0-3-91"
+    - "cronjob/s3-sync-nightly"
+
+expected_runbook_step: >
+  Add kubernetes.io/egress-bandwidth=2Gi annotation to cronjob/s3-sync-nightly pod template; reduce parallelism to 4; reapply.
+
+expected_blast_radius:
+  - "service/api"
+  - "node/ip-10-0-3-91"

@@ -148,3 +148,4 @@ backing graph produces the same numbers.
 The follow-up PR will pin vendor versions (HolmesGPT image digest,
 Sourcegraph MCP commit SHA, GitHub MCP server commit SHA) in
 `bench/vendors/versions.json` so historical results stay comparable.
+

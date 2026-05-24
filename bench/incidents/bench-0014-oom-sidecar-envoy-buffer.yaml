@@ -1,0 +1,31 @@
+id: bench-0014
+category: oom
+description: >
+  Envoy sidecar OOMKilled under a traffic spike after a config change
+  raised per-connection buffer size 32KiB -> 1MiB; main app container
+  unaffected but the pod restarted, breaking sticky sessions.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-oom-envoy-sidecar-2026-04-14
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-14T16:48:00+00:00"
+  summary: "envoy sidecar OOMKilled in 38 pods under load test"
+  target_entity: "container/envoy"
+
+expected_root_cause:
+  summary: >
+    Mesh-config PR #2210 raised per_connection_buffer_limit_bytes from 32768
+    to 1048576; 5k concurrent connections per pod pushed sidecar past 256Mi limit.
+  canonical_entities:
+    - "https://github.com/acme/mesh-config/pull/2210"
+    - "container/envoy"
+    - "configmap/envoy-bootstrap"
+
+expected_runbook_step: >
+  Revert PR #2210 (restore 32KiB buffer); or raise envoy sidecar memory request/limit to 1Gi.
+
+expected_blast_radius:
+  - "service/api"
+  - "service/checkout"
+  - "service/web"

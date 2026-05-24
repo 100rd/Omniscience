@@ -1,0 +1,30 @@
+id: bench-0026
+category: dns
+description: >
+  Sporadic DNS timeouts traced to conntrack table exhaustion on a node
+  with a new high-fanout service; nf_conntrack_max was at the kernel
+  default and pod-level UDP DNS entries filled it.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-conntrack-full-node-ip-10-0-2-17-2026-04-26
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-26T19:14:00+00:00"
+  summary: "node ip-10-0-2-17 nf_conntrack_count == nf_conntrack_max (262144); DNS timeouts"
+  target_entity: "node/ip-10-0-2-17"
+
+expected_root_cause:
+  summary: >
+    PR #1402 deployed the new event-fanout Job at concurrency 5000 onto a
+    node whose kernel nf_conntrack_max was 262144; cap reached -> packets dropped.
+  canonical_entities:
+    - "https://github.com/acme/events/pull/1402"
+    - "node/ip-10-0-2-17"
+    - "daemonset/kube-proxy"
+
+expected_runbook_step: >
+  Raise nf_conntrack_max to 1048576 via kube-proxy DaemonSet sysctl; cordon ip-10-0-2-17 until applied; spread event-fanout across nodes.
+
+expected_blast_radius:
+  - "service/events"
+  - "node/ip-10-0-2-17"

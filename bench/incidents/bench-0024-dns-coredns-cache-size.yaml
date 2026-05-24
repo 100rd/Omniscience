@@ -1,0 +1,32 @@
+id: bench-0024
+category: dns
+description: >
+  CoreDNS p99 spiked from 1ms to 400ms after a Corefile change reduced
+  the cache plugin from 10000 -> 1000 entries; cluster-wide DNS QPS
+  pushed it into constant evict/refetch.
+
+alert_payload:
+  provider: prometheus
+  alert_id: prom-coredns-cache-miss-2026-04-24
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-24T17:21:00+00:00"
+  summary: "CoreDNS cache hit-rate 98% -> 22%; cluster p99 dns latency 400ms"
+  target_entity: "deployment/coredns"
+
+expected_root_cause:
+  summary: >
+    PR #2511 to coredns ConfigMap reduced 'cache 30' default-keys param
+    from 10000 to 1000 by mistake during a Corefile lint pass.
+  canonical_entities:
+    - "https://github.com/acme/cluster-config/pull/2511"
+    - "configmap/coredns"
+    - "deployment/coredns"
+
+expected_runbook_step: >
+  Revert PR #2511 (restore 'cache 30 . 10000'); rollout restart deployment/coredns.
+
+expected_blast_radius:
+  - "service/api"
+  - "service/orders"
+  - "service/web"
+  - "service/checkout"

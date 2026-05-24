@@ -1,0 +1,32 @@
+id: bench-0021
+category: cert-expiry
+description: >
+  Istio root CA expired (10-year cert from initial install). Workload-level
+  certs rotated fine but the root signing them did not. mTLS broke
+  cluster-wide once leaf certs rotated against the new (mismatched) root.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-21-099
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-21T22:30:00+00:00"
+  summary: "cluster-wide mTLS handshake failures — istiod root CA expired"
+  target_entity: "secret/istio-ca-secret"
+
+expected_root_cause:
+  summary: >
+    istio-ca-secret minted on 2016-04-21 with 10y validity expired today;
+    runbook-doc #ops-istio-ca-rotation was never executed.
+  canonical_entities:
+    - "runbook://ops/istio-ca-rotation"
+    - "secret/istio-ca-secret"
+    - "deployment/istiod"
+
+expected_runbook_step: >
+  Follow runbook ops/istio-ca-rotation: generate new offline root, distribute as cacerts Secret, rolling restart istiod and all sidecars.
+
+expected_blast_radius:
+  - "namespace/default"
+  - "namespace/payments"
+  - "namespace/orders"
+  - "namespace/web"

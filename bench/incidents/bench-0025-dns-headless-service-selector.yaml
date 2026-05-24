@@ -1,0 +1,31 @@
+id: bench-0025
+category: dns
+description: >
+  Headless service for postgres-replicas resolved to zero addresses after
+  a label-selector typo in a PR; readers fell back to the writer and
+  saturated it.
+
+alert_payload:
+  provider: pagerduty
+  alert_id: INC-2026-04-25-014
+  workspace_id: aaaaaaaa-1111-2222-3333-4444aa000241
+  fired_at: "2026-04-25T08:42:00+00:00"
+  summary: "writer postgres CPU 95%; reader DNS returns NXDOMAIN"
+  target_entity: "service/postgres-replicas"
+
+expected_root_cause:
+  summary: >
+    PR #1907 renamed pod label role=replica -> role=reader on the
+    StatefulSet but forgot to update Service spec.selector — endpoints empty.
+  canonical_entities:
+    - "https://github.com/acme/postgres-operator/pull/1907"
+    - "service/postgres-replicas"
+    - "statefulset/postgres"
+
+expected_runbook_step: >
+  Patch service/postgres-replicas spec.selector.role to 'reader'; verify endpoints populate.
+
+expected_blast_radius:
+  - "service/orders"
+  - "service/reporting"
+  - "statefulset/postgres"
