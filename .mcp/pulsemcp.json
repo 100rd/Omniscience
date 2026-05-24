@@ -1,0 +1,91 @@
+{
+  "$schema": "https://www.pulsemcp.com/schemas/server-submission.schema.json",
+  "name": "Omniscience",
+  "slug": "omniscience",
+  "short_description": "Self-hosted MCP retrieval with bitemporal replay and audit.",
+  "long_description": "Omniscience is a self-hosted, MCP-first knowledge retrieval service. It indexes your sources (code, docs, infra configs, tickets, wikis, Datadog, PagerDuty, runbooks) and exposes them as MCP tools to any AI client - Claude Code, Cursor, Gemini, custom agents. Retrieval-only: returns chunks with citations, letting the calling LLM synthesize the answer. Bitemporal storage means every fact is queryable as-of any past timestamp, enabling deterministic replay for incident review and AI-action auditing. Includes blast-radius and runbook-suggestion tools tuned for SRE and platform teams.",
+  "homepage": "https://github.com/100rd/Omniscience",
+  "repository": "https://github.com/100rd/Omniscience",
+  "license": "Apache-2.0",
+  "categories": [
+    "devtools",
+    "observability",
+    "knowledge-management",
+    "audit",
+    "retrieval"
+  ],
+  "tags": [
+    "rag",
+    "self-hosted",
+    "bitemporal",
+    "replay",
+    "audit",
+    "k8s",
+    "kubernetes",
+    "sre",
+    "incident-response",
+    "datadog",
+    "pagerduty",
+    "citations",
+    "fastapi",
+    "python"
+  ],
+  "languages": ["python"],
+  "transports": ["stdio", "streamable-http"],
+  "icon_url": "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/icon-256.png",
+  "screenshots": [
+    {
+      "url": "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/search.png",
+      "caption": "search() MCP tool returning chunks with citations"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/replay.png",
+      "caption": "replay() tool — what the agent saw at time T"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/blast-radius.png",
+      "caption": "blast_radius() — incident impact graph"
+    }
+  ],
+  "install": {
+    "one_line": "curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash",
+    "docker": "docker run -d -p 8000:8000 -e POSTGRES_PASSWORD=change-me -e OMNISCIENCE_SECRET_KEY=change-me-32-chars ghcr.io/100rd/omniscience:latest",
+    "uvx": "uvx --from omniscience-cli omniscience mcp serve --transport stdio",
+    "config_writer": "uvx --from omniscience-cli omniscience init --client claude-code"
+  },
+  "mcp_config_example": {
+    "mcpServers": {
+      "omniscience": {
+        "command": "uvx",
+        "args": [
+          "--from",
+          "omniscience-cli",
+          "omniscience",
+          "mcp",
+          "serve",
+          "--transport",
+          "stdio"
+        ],
+        "env": {
+          "OMNISCIENCE_URL": "http://localhost:8000",
+          "OMNISCIENCE_TOKEN": "sk_live_..."
+        }
+      }
+    }
+  },
+  "tools": [
+    {"name": "search", "description": "Hybrid retrieval across all indexed sources; returns chunks with citations and freshness metadata."},
+    {"name": "fetch", "description": "Fetch a specific document/chunk by ID."},
+    {"name": "list_sources", "description": "List configured connectors and their freshness state."},
+    {"name": "describe_source", "description": "Describe a connector's schema, throughput, and last-sync time."},
+    {"name": "replay", "description": "Replay the retrieval result an agent would have seen at a past timestamp T."},
+    {"name": "blast_radius", "description": "Given an incident or change, return the impacted resources via the topology graph."},
+    {"name": "suggest_runbook", "description": "Match an incident signature against indexed runbooks and return the top candidates with confidence."},
+    {"name": "timeline", "description": "Bitemporal timeline of changes for an entity, queryable as-of any past timestamp."}
+  ],
+  "tested_os": ["macos", "linux"],
+  "maintainer": {
+    "name": "100rd",
+    "github": "100rd"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cline/mcp-marketplace/main/schema/entry.schema.json",
+  "mcpId": "omniscience",
+  "name": "Omniscience",
+  "githubUrl": "https://github.com/100rd/Omniscience",
+  "author": "100rd",
+  "description": "Self-hosted MCP retrieval over your code, docs, infra, tickets and wikis. Bitemporal storage gives you deterministic replay and audit for AI-driven incident response and SRE workflows.",
+  "codiconIcon": "search",
+  "logoUrl": "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/icon-256.png",
+  "category": "developer-tools",
+  "tags": [
+    "retrieval",
+    "rag",
+    "self-hosted",
+    "observability",
+    "audit",
+    "bitemporal",
+    "sre",
+    "k8s"
+  ],
+  "requiresApiKey": true,
+  "readmeUrl": "https://raw.githubusercontent.com/100rd/Omniscience/main/README.md",
+  "llmsInstallationContent": "Install Omniscience for Cline:\n\n1. Start the server (Docker):\n\n```bash\ncurl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash\n```\n\n2. Mint a token:\n\n```bash\ndocker compose exec app omniscience tokens create --name cline --scopes search,sources:read\n# -> sk_live_...\n```\n\n3. Add to Cline's MCP settings (`cline_mcp_settings.json`):\n\n```json\n{\n  \"mcpServers\": {\n    \"omniscience\": {\n      \"command\": \"uvx\",\n      \"args\": [\"--from\", \"omniscience-cli\", \"omniscience\", \"mcp\", \"serve\", \"--transport\", \"stdio\"],\n      \"env\": {\n        \"OMNISCIENCE_URL\": \"http://localhost:8000\",\n        \"OMNISCIENCE_TOKEN\": \"sk_live_...\"\n      },\n      \"disabled\": false,\n      \"autoApprove\": [\"search\", \"fetch\", \"list_sources\"]\n    }\n  }\n}\n```\n\nOr run the one-shot config writer:\n\n```bash\nuvx --from omniscience-cli omniscience init --client cline\n```\n\nAfter restart, Cline will see tools: search, fetch, list_sources, describe_source, replay, blast_radius, suggest_runbook, timeline."
+}
