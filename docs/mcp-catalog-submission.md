@@ -137,6 +137,8 @@ The `1-line install` advertised everywhere is:
 curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash
 ```
 
+Public installs use the GHCR-image variant **`docker-compose.prod.yml`** (no local build context required); images are published from tag `v*` by `.github/workflows/release.yml` to `ghcr.io/100rd/omniscience-{app,admin}`. Pin a specific image tag with `OMNISCIENCE_VERSION=v0.5.0 bash install.sh`; default is `:latest`. The dev compose (`docker-compose.yml`) still uses `build:` for local hot-reload and is not consumed by the installer.
+
 It must pass on **both** macOS and Linux. Validation procedure:
 
 1. **macOS** (Intel + Apple Silicon): fresh shell, fresh `$PWD`:

@@ -8,11 +8,23 @@
 #   1. Checks prerequisites (docker, docker compose).
 #   2. Creates ./omniscience/ working directory if missing.
 #   3. Writes a .env with generated secrets (idempotent — never overwrites).
-#   4. Fetches docker-compose.yml from the repo at the pinned ref.
+#   4. Fetches docker-compose.prod.yml from the repo at the pinned ref.
+#      The prod variant references pre-built GHCR images
+#      (ghcr.io/100rd/omniscience-app, ghcr.io/100rd/omniscience-admin)
+#      so no source checkout / local build is required.
 #   5. Starts the stack with `docker compose up -d`.
-#   6. Waits for /health to return 200 (up to 120s).
+#   6. Waits for /health to return 200 (up to 300s — first run must
+#      pull ~4 images and Neo4j start_period alone is ~30s).
 #   7. Prints next-step instructions: how to mint a token and run
 #      `omniscience init --client <ide>`.
+#
+# Environment overrides:
+#   OMNISCIENCE_REF       git ref of the published compose file. default: main
+#   OMNISCIENCE_VERSION   GHCR image tag to pin. default: latest
+#                         (set to e.g. v0.5.0 for reproducibility)
+#   OMNISCIENCE_DIR       working dir. default: $PWD/omniscience
+#   OMNISCIENCE_REPO      raw.githubusercontent.com base URL
+#   OMNISCIENCE_HEALTH_URL  app /health URL. default: http://localhost:8000/health
 #
 # Supported: macOS (Intel + Apple Silicon), Linux (x86_64, arm64).
 # Re-runnable: safe to invoke repeatedly; never destroys existing data.
@@ -20,9 +32,11 @@
 set -euo pipefail
 
 OMNISCIENCE_REF="${OMNISCIENCE_REF:-main}"
+OMNISCIENCE_VERSION="${OMNISCIENCE_VERSION:-latest}"
 OMNISCIENCE_DIR="${OMNISCIENCE_DIR:-$PWD/omniscience}"
 OMNISCIENCE_REPO="${OMNISCIENCE_REPO:-https://raw.githubusercontent.com/100rd/Omniscience}"
 HEALTH_URL="${OMNISCIENCE_HEALTH_URL:-http://localhost:8000/health}"
+COMPOSE_FILE="docker-compose.prod.yml"
 
 c_red() { printf '\033[31m%s\033[0m\n' "$*"; }
 c_grn() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -64,29 +78,85 @@ main() {
 
   if [ ! -f .env ]; then
     step "Generating .env (with fresh secrets)"
-    pw="$(gen_secret)"
+    pg_pw="$(gen_secret)"
+    neo4j_pw="$(gen_secret)"
+    qdrant_key="$(gen_secret)"
     sk="$(gen_secret)"
     umask 077
+    # All ${VAR:?...} hard-validated entries from docker-compose.prod.yml
+    # are written here (POSTGRES_PASSWORD, NEO4J_PASSWORD), plus the
+    # service-discovery hostnames the app needs to reach each backing
+    # service inside the compose network. OMNISCIENCE_VERSION pins the
+    # GHCR image tag (ghcr.io/100rd/omniscience-*:${OMNISCIENCE_VERSION}).
     cat > .env <<EOF
 # Omniscience environment — generated $(date -u +%Y-%m-%dT%H:%M:%SZ)
-POSTGRES_PASSWORD=${pw}
+
+# === Image pin ===
+# Override to e.g. v0.5.0 for reproducible installs (default: latest).
+OMNISCIENCE_VERSION=${OMNISCIENCE_VERSION}
+
+# === Required secrets (hard-validated by docker-compose.prod.yml) ===
+POSTGRES_PASSWORD=${pg_pw}
+NEO4J_PASSWORD=${neo4j_pw}
 OMNISCIENCE_SECRET_KEY=${sk}
+
+# === Postgres (operational metadata) ===
+DATABASE_URL=postgresql+asyncpg://omniscience:${pg_pw}@postgres:5432/omniscience
+
+# === NATS ===
+NATS_URL=nats://nats:4222
+
+# === Neo4j (graph store) ===
+NEO4J_URI=bolt://neo4j:7687
+NEO4J_USERNAME=neo4j
+NEO4J_DATABASE=neo4j
+
+# === Qdrant (vector store) ===
+QDRANT_HOST=qdrant
+QDRANT_GRPC_PORT=6334
+QDRANT_HTTP_PORT=6333
+QDRANT_API_KEY=${qdrant_key}
+QDRANT_HTTPS=false
+QDRANT_PREFER_GRPC=true
+
+# === Storage backend selection (v0.2+: only neo4j + qdrant supported) ===
+STORAGE_GRAPH_BACKEND=neo4j
+STORAGE_VECTOR_BACKEND=qdrant
+
+# === Application ===
+ENVIRONMENT=production
+APP_NAME=omniscience
+LOG_LEVEL=info
 EOF
     ok "wrote $OMNISCIENCE_DIR/.env (chmod 600)"
   else
     ok ".env already present — leaving untouched"
+    # Ensure OMNISCIENCE_VERSION is present in older .env files (back-compat).
+    if ! grep -q '^OMNISCIENCE_VERSION=' .env; then
+      umask 077
+      printf '\nOMNISCIENCE_VERSION=%s\n' "$OMNISCIENCE_VERSION" >> .env
+      ok "appended OMNISCIENCE_VERSION=$OMNISCIENCE_VERSION to existing .env"
+    fi
+    # Backfill NEO4J_PASSWORD on .env files written by older installer versions.
+    if ! grep -q '^NEO4J_PASSWORD=' .env; then
+      neo4j_pw="$(gen_secret)"
+      umask 077
+      printf 'NEO4J_PASSWORD=%s\n' "$neo4j_pw" >> .env
+      ok "appended NEO4J_PASSWORD to existing .env (was missing — pre-#261 install)"
+    fi
   fi
 
-  step "Fetching docker-compose.yml @ ${OMNISCIENCE_REF}"
-  curl -fsSL "${OMNISCIENCE_REPO}/${OMNISCIENCE_REF}/docker-compose.yml" -o docker-compose.yml
-  ok "wrote docker-compose.yml"
+  step "Fetching $COMPOSE_FILE @ ${OMNISCIENCE_REF}"
+  curl -fsSL "${OMNISCIENCE_REPO}/${OMNISCIENCE_REF}/${COMPOSE_FILE}" -o "$COMPOSE_FILE"
+  ok "wrote $COMPOSE_FILE"
 
-  step "Starting stack (docker compose up -d)"
-  docker compose up -d
+  step "Starting stack (docker compose -f $COMPOSE_FILE up -d) — image pull may take a few minutes on first run"
+  docker compose -f "$COMPOSE_FILE" up -d
   ok "containers started"
 
-  step "Waiting for $HEALTH_URL"
-  deadline=$(( $(date +%s) + 120 ))
+  step "Waiting for $HEALTH_URL (up to 300s)"
+  set +o pipefail
+  deadline=$(( $(date +%s) + 300 ))
   while [ "$(date +%s)" -lt "$deadline" ]; do
     if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
       ok "/health is responding"
@@ -94,8 +164,9 @@ EOF
     fi
     sleep 2
   done
+  set -o pipefail
   if ! curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
-    warn "/health did not respond within 120s — check 'docker compose logs app'"
+    warn "/health did not respond within 300s — check 'docker compose -f $COMPOSE_FILE logs app'"
   fi
 
   cat <<EOF
@@ -107,7 +178,7 @@ Next steps:
   1) Mint an API token:
 
      cd "$OMNISCIENCE_DIR"
-     docker compose exec app omniscience tokens create \\
+     docker compose -f $COMPOSE_FILE exec app omniscience tokens create \\
        --name my-client --scopes search,sources:read
 
   2) Wire it into your IDE in one shot:
