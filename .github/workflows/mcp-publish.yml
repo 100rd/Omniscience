@@ -1,0 +1,59 @@
+# Re-publishes the Omniscience MCP server entry to the official
+# modelcontextprotocol.io registry on every git tag (vX.Y.Z).
+#
+# Authentication: GitHub OIDC. The registry validates the OIDC token
+# against the repository slug `100rd/Omniscience`, so no long-lived
+# secrets are required for the publish call itself.
+#
+# Secrets:
+#   OMNISCIENCE_MCP_REGISTRY_ID  (optional)
+#     Server ID returned by the *first* successful publish. Once it
+#     exists, subsequent runs update the existing registry entry
+#     instead of creating duplicates. To obtain it:
+#       1. Run this workflow once (tag v0.5.0 -> first publish).
+#       2. Inspect the job log; the publisher CLI prints
+#          `published server id=<uuid>`.
+#       3. Add it as a repo secret named OMNISCIENCE_MCP_REGISTRY_ID.
+#     The workflow tolerates the secret being absent (creates new entry
+#     each run, which the registry will dedupe by repo slug + version).
+#
+# See docs/mcp-catalog-submission.md (step 8) for the rest of the
+# distribution checklist.
+
+name: MCP registry publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  # Required for OIDC authentication against modelcontextprotocol.io.
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish to modelcontextprotocol.io
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install MCP registry publisher
+        run: npm install -g @modelcontextprotocol/registry-publisher
+
+      - name: Publish to registry
+        env:
+          # When this secret is unset GitHub Actions exposes it as an
+          # empty string, which the publisher CLI interprets as
+          # "create a new entry". Once OMNISCIENCE_MCP_REGISTRY_ID is
+          # set in repo secrets the CLI updates the existing entry.
+          OMNISCIENCE_MCP_REGISTRY_ID: ${{ secrets.OMNISCIENCE_MCP_REGISTRY_ID }}
+        run: |
+          mcp-publisher publish --file .mcp/registry.json
