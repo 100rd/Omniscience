@@ -877,3 +877,86 @@ async def find_similar_incidents(
 
 
 __all__ = ["mcp_server", "set_fastapi_app"]
+
+
+# ---------------------------------------------------------------------------
+# Tool: generate_postmortem (issue #232)
+# ---------------------------------------------------------------------------
+
+
+# Late imports keep the module's import-time fast path unchanged and
+# avoid widening the import graph for tools that don't need the post-
+# mortem surface.
+from omniscience_server.postmortem import (  # noqa: E402
+    SUPPORTED_TEMPLATES as POSTMORTEM_SUPPORTED_TEMPLATES,
+)
+from omniscience_server.postmortem import (  # noqa: E402
+    PostmortemError,
+    generate_postmortem,
+    render,
+)
+
+
+@mcp_server.tool(
+    name="generate_postmortem",
+    description=(
+        "Generate a templated post-mortem from the bitemporal graph "
+        "timeline for an incident. alert_id MUST be 'alert://{provider}/"
+        "{provider_alert_id}'. template is one of "
+        + ", ".join(POSTMORTEM_SUPPORTED_TEMPLATES)
+        + " (default 'blameless'). format is one of 'markdown' (default), "
+        "'html', or 'json'. Each timeline entry cites its entity with the "
+        "as-of timestamp per ADR-0008 5. Action items are extracted into "
+        "FollowUp entities. Requires a workspace-scoped token."
+    ),
+)
+async def generate_postmortem_tool(
+    incident_id: str,
+    alert_id: str,
+    ctx: Context[Any, Any, Any],
+    template: str = "blameless",
+    format: str = "markdown",  # noqa: A002 — MCP wire convention
+    incident_start: str | None = None,
+    incident_end: str | None = None,
+) -> dict[str, Any]:
+    """generate_postmortem tool — requires scope 'search' + workspace token."""
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="generate_postmortem", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_generate_postmortem_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Post-mortem generation requires a workspace-scoped token")
+
+    parsed_start = _parse_as_of(incident_start)
+    parsed_end = _parse_as_of(incident_end)
+
+    try:
+        report = await generate_postmortem(
+            app=_get_app(),
+            incident_id=incident_id,
+            alert_id=alert_id,
+            workspace_id=workspace_id,
+            template=template,
+            incident_start=parsed_start,
+            incident_end=parsed_end,
+        )
+        rendered = render(report, fmt=format)
+    except PostmortemError as exc:
+        # Re-raise as a ValueError with the structured 'code:message'
+        # envelope FastMCP serialises into a tool-error response.
+        raise ValueError(str(exc)) from exc
+
+    return {
+        "incident_id": report.incident_id,
+        "alert_id": report.alert_id,
+        "template": report.template_id,
+        "format": format,
+        "rendered": rendered,
+        "report": report.model_dump(mode="json"),
+    }

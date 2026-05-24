@@ -1,0 +1,95 @@
+{
+  "_comment": "Post-mortem fixture (issue #232). Seven entity state changes (alert + six neighbours) inside an incident window 2026-04-12T19:25Z..2026-04-12T20:30Z. One TODO trigger phrase to exercise the FollowUp extractor.",
+  "workspace_id": "aaaaaaaa-1111-2222-3333-4444aa000232",
+  "incident_id": "INC-2026-04-12-001",
+  "incident_start": "2026-04-12T19:25:00+00:00",
+  "incident_end": "2026-04-12T20:30:00+00:00",
+  "alert": {
+    "name": "alert://pagerduty/INC-2026-04-12-001",
+    "kind": "alert",
+    "source": "src-alerts-ws-pm",
+    "chunk_text": "PagerDuty: api pod 5xx spike (TODO: investigate latent retry-storm risk)",
+    "depth": 0,
+    "edge_type": null,
+    "valid_from": "2026-04-12T19:30:00+00:00"
+  },
+  "neighbours": [
+    {
+      "_role": "target_pod_created",
+      "name": "pod/api-7f9b9d4c-xj4kp",
+      "kind": "k8s_pod",
+      "source": "src-k8s-ws-pm",
+      "chunk_text": "Pod entered Ready state",
+      "depth": 1,
+      "edge_type": "FIRES_AGAINST",
+      "valid_from": "2026-04-12T19:28:00+00:00"
+    },
+    {
+      "_role": "responsible_pr",
+      "name": "https://github.com/acme/api/pull/4242",
+      "kind": "pull_request",
+      "source": "src-github-ws-pm",
+      "chunk_text": "PR #4242: Bump api request timeout to 5s",
+      "depth": 2,
+      "edge_type": "DEPLOYED_BY",
+      "valid_from": "2026-04-12T19:32:00+00:00"
+    },
+    {
+      "_role": "slack_thread",
+      "name": "slack://channel/C0INCIDENTS/thread/1744486200.001100",
+      "kind": "slack_thread",
+      "source": "src-slack-ws-pm",
+      "chunk_text": "alice: throttling pod 5xx — rolling back PR #4242",
+      "depth": 2,
+      "edge_type": "DISCUSSED_IN",
+      "valid_from": "2026-04-12T19:45:00+00:00"
+    },
+    {
+      "_role": "trace",
+      "name": "trace://4bf92f3577b34da6a3ce929d0e0e4736",
+      "kind": "otel_trace",
+      "source": "src-otel-ws-pm",
+      "chunk_text": "Trace recorded p99=2.3s",
+      "depth": 1,
+      "edge_type": "OBSERVED_IN",
+      "valid_from": "2026-04-12T19:29:55+00:00"
+    },
+    {
+      "_role": "deployment_event",
+      "name": "deploy://argocd/api/rollback-4099",
+      "kind": "deployment",
+      "source": "src-argocd-ws-pm",
+      "chunk_text": "Rollback to PR #4099 completed",
+      "depth": 2,
+      "edge_type": "REMEDIATED_BY",
+      "valid_from": "2026-04-12T20:05:00+00:00"
+    }
+  ],
+  "edges": [
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "pod/api-7f9b9d4c-xj4kp", "edge_type": "FIRES_AGAINST"},
+    {"from_entity": "pod/api-7f9b9d4c-xj4kp", "to_entity": "https://github.com/acme/api/pull/4242", "edge_type": "DEPLOYED_BY"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "slack://channel/C0INCIDENTS/thread/1744486200.001100", "edge_type": "DISCUSSED_IN"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "trace://4bf92f3577b34da6a3ce929d0e0e4736", "edge_type": "OBSERVED_IN"},
+    {"from_entity": "alert://pagerduty/INC-2026-04-12-001", "to_entity": "deploy://argocd/api/rollback-4099", "edge_type": "REMEDIATED_BY"}
+  ],
+  "runbook_steps": [
+    {
+      "alert_id": "alert://pagerduty/INC-2026-04-12-001",
+      "runbook_name": "runbook://acme-ops/db-connections-exhausted.md",
+      "step_id": "step-1-check-connections",
+      "outcome": "executed",
+      "actor": "alice",
+      "note": "Confirmed no connection-pool exhaustion",
+      "valid_from": "2026-04-12T19:40:00+00:00"
+    },
+    {
+      "alert_id": "alert://pagerduty/INC-2026-04-12-001",
+      "runbook_name": "runbook://acme-ops/db-connections-exhausted.md",
+      "step_id": "step-2-restart-pool",
+      "outcome": "failed",
+      "actor": "alice",
+      "note": "Pool restart raised connection-refused for 30s",
+      "valid_from": "2026-04-12T19:55:00+00:00"
+    }
+  ]
+}
