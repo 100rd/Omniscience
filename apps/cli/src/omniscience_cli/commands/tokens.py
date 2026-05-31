@@ -42,7 +42,7 @@ def tokens_create(
         except OmniscienceClientError as exc:
             abort(exc.message, exc.code)
             return
-    plaintext = result.get("token", result.get("plaintext", ""))
+    plaintext = result.get("secret", "")
     print_success(f"Token '{name}' created.")
     if plaintext:
         console.print(f"\n  [bold yellow]Token (shown once):[/bold yellow]  {plaintext}\n")

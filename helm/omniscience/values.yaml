@@ -1,219 +1,57 @@
-# Default values for omniscience.
-# Override per environment: helm upgrade --install omniscience ./helm/omniscience -f values-prod.yaml
-
-# ── Image ─────────────────────────────────────────────────────────────────────
-image:
-  repository: ghcr.io/100rd/omniscience
-  pullPolicy: IfNotPresent
-  # Overridden by CI: --set image.tag=$GIT_SHA
-  tag: "latest"
-
-imagePullSecrets: []
-
-# ── Replicas ──────────────────────────────────────────────────────────────────
+# Global settings
 replicaCount: 1
 
-# ── Resources ─────────────────────────────────────────────────────────────────
-resources:
-  requests:
-    cpu: 250m
-    memory: 512Mi
-  limits:
-    cpu: 1000m
-    memory: 1Gi
+image:
+  repository: omniscience
+  pullPolicy: IfNotPresent
+  tag: "latest"
 
-# ── Service ───────────────────────────────────────────────────────────────────
 service:
   type: ClusterIP
   port: 8000
 
-# ── Ingress ───────────────────────────────────────────────────────────────────
 ingress:
   enabled: false
   className: ""
   annotations: {}
   hosts:
-    - host: omniscience.example.com
+    - host: omniscience.local
       paths:
         - path: /
-          pathType: Prefix
-  tls: []
-  # - secretName: omniscience-tls
-  #   hosts:
-  #     - omniscience.example.com
+          pathType: ImplementationSpecific
 
-# ── Application config (non-secret) ──────────────────────────────────────────
-config:
-  # Log level: DEBUG, INFO, WARNING, ERROR
-  logLevel: INFO
-  # Ollama endpoint (used when embeddings.provider=ollama)
-  ollamaUrl: ""
-  # OpenAI/Voyage endpoint override (optional)
-  openaiBaseUrl: ""
-  # Embeddings provider: ollama | openai | voyage
-  embeddingsProvider: ollama
-  # Embedding model name
-  embeddingModel: nomic-embed-text
-  # MCP server transport: stdio | streamable-http
-  mcpTransport: streamable-http
-  # Freshness SLO default (seconds)
-  freshnessSloSeconds: 3600
-  # CORS origins (comma-separated)
-  corsOrigins: ""
-
-# ── Retention worker (ADR-0009, issue #135) ──────────────────────────────────
-# Tier boundaries are global-only in v1 per ADR-0009 §10.  Per-tenant
-# overrides are out of scope; the migration path is documented in the
-# ADR for the first customer ask.
-retention:
-  # Hot tier retention boundary in days (ADR-0009 §1).  EntityState rows,
-  # edges, and chunks with `recorded_at < now - hotDays` are evicted to
-  # warm.
-  hotDays: 90
-  # Warm tier retention boundary in days, cumulative (ADR-0009 §1).
-  # EntitySnapshot:Daily rows older than warmDays are archived to S3.
-  warmDays: 365
-  # Archive horizon in years.  Beyond this the bucket lifecycle rule
-  # deletes objects; the worker does NOT enforce archive expiry.
-  archiveYears: 7
-  # Worker tick interval in seconds (default 6 hours per ADR-0009 §3).
-  tickSeconds: 21600
-  # Dry-run mode.  REQUIRED before first live activation per deployment
-  # (ADR-0009 §3): operators review the dry-run report via
-  # GET /api/v1/admin/retention/report, then flip this to false.
-  dryRun: false
-  # Master switch for the worker.  Set false only for environments
-  # where retention is intentionally deferred (CI fixtures, etc).
+# Built-in dependencies (sub-charts)
+postgresql:
   enabled: true
-  # S3-compatible bucket for archive parquet writes (ADR-0009 §7).
-  # REQUIRED in non-dev — when empty, warm-to-archive is skipped and
-  # warm rows remain queryable until configured.
-  archiveBucket: ""
-  # KMS key ARN for archive encryption (ADR-0009 §1: KMS-managed keys
-  # mandatory in non-dev).  When empty, falls back to SSE-S3 (AES256),
-  # which is acceptable in dev only.
-  archiveKmsKeyArn: ""
-  # Custom S3 endpoint URL for MinIO / Ceph / etc.  Empty = AWS S3.
-  archiveS3EndpointUrl: ""
-  # Region for the archive S3 client.
-  archiveS3Region: "us-east-1"
-  # Rows touched per Neo4j transaction (ADR-0009 §3).
-  batchSize: 500
-  # Sample size for the dry-run report.
-  sampleSize: 20
+  auth:
+    database: omniscience
+    username: omniscience
+    password: "change-me"
 
-# ── Secrets (values are base64-encoded by default in Secret template) ─────────
-secrets:
-  # PostgreSQL password — REQUIRED; override via --set secrets.postgresPassword=...
-  postgresPassword: ""
-  # API bearer token for REST + MCP auth
-  apiToken: ""
-  # OpenAI / Voyage API key (leave empty if using Ollama)
-  openaiApiKey: ""
-
-# ── PostgreSQL (operational metadata only — v0.2 cutover, see ADR-0005/0006) ─
-postgres:
-  # Set to false to use an external managed database (RDS, CloudSQL, etc.)
-  enabled: true
-  # v0.2 no longer requires the pgvector extension — a stock Postgres
-  # image is sufficient.  The previous default ``pgvector/pgvector:pg16``
-  # has been retired; operators upgrading from a pre-v0.2 install should
-  # run ``scripts/migrate_to_hybrid.py`` before re-deploying with this
-  # image change.
-  image: postgres:16-alpine
-  database: omniscience
-  user: omniscience
-  # Storage size for the PostgreSQL PVC
-  storageSize: 20Gi
-  storageClass: ""
-  # Override full DATABASE_URL (disables the internal postgres service)
-  externalUrl: ""
-
-# ── Neo4j (graph store — required as of v0.2) ────────────────────────────────
-# Required sub-chart dependency: the graph store is no longer optional.
-# Operators using an external managed Neo4j set ``enabled: false`` and
-# point ``externalUri`` at their cluster.
 neo4j:
   enabled: true
-  image: neo4j:5.19-community
-  storageSize: 20Gi
-  storageClass: ""
-  # Bolt URI override — takes precedence over the in-cluster service
-  externalUri: ""
-  # Credentials — REQUIRED; override via --set neo4j.password=...
-  username: "neo4j"
-  password: ""
+  neo4j:
+    password: "change-me"
 
-# ── Qdrant (vector store — required as of v0.2) ───────────────────────────────
-# Required sub-chart dependency: the vector store is no longer optional.
 qdrant:
   enabled: true
-  image: qdrant/qdrant:v1.12.4
-  storageSize: 50Gi
-  storageClass: ""
-  # gRPC is the primary transport per ADR-0006; HTTP is the fallback.
-  grpcPort: 6334
-  httpPort: 6333
-  preferGrpc: true
-  https: false
-  # REQUIRED in every non-dev environment — override via
-  # --set qdrant.apiKey=... (or wire a Secret in the deployment template).
-  apiKey: ""
-  # Connection override — takes precedence over the in-cluster service
-  externalHost: ""
 
-# ── NATS ──────────────────────────────────────────────────────────────────────
 nats:
-  # Set to false to use an external NATS cluster
   enabled: true
-  image: nats:2.10-alpine
-  # Storage size for the NATS JetStream PVC
-  storageSize: 5Gi
-  storageClass: ""
-  # Override full NATS_URL (disables the internal nats service)
-  externalUrl: ""
+  nats:
+    jetstream:
+      enabled: true
 
-# ── Pod settings ──────────────────────────────────────────────────────────────
-serviceAccount:
-  create: true
-  name: ""
-  annotations: {}
-
-podAnnotations: {}
-podLabels: {}
-
-podSecurityContext:
-  fsGroup: 1000
-
-securityContext:
-  runAsNonRoot: true
-  runAsUser: 1000
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop:
-      - ALL
-
-# ── Probes ────────────────────────────────────────────────────────────────────
-livenessProbe:
-  httpGet:
-    path: /health
-    port: 8000
-  initialDelaySeconds: 10
-  periodSeconds: 10
-  timeoutSeconds: 5
-  failureThreshold: 5
-
-readinessProbe:
-  httpGet:
-    path: /health
-    port: 8000
-  initialDelaySeconds: 5
-  periodSeconds: 5
-  timeoutSeconds: 3
-  failureThreshold: 3
-
-# ── Node placement ────────────────────────────────────────────────────────────
-nodeSelector: {}
-tolerations: []
-affinity: {}
+# Application Config
+config:
+  logLevel: "INFO"
+  environment: "production"
+  storage:
+    graph: "neo4j"
+    vector: "qdrant"
+  retention:
+    enabled: true
+    hotDays: 90
+    warmDays: 365
+  discovery:
+    intervalSeconds: 3600

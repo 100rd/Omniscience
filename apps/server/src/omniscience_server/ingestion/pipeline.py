@@ -62,8 +62,6 @@ from uuid import UUID
 
 import structlog
 from omniscience_connectors.base import Connector, DocumentRef, FetchedDocument
-from omniscience_core.storage.graph import GraphStore
-from omniscience_core.storage.vector import ChunkPayload, VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
 
 from omniscience_server.ingestion.events import DocumentChangeEvent, ProcessResult
@@ -85,10 +83,6 @@ log = structlog.get_logger(__name__)
 # segment results by extraction strategy.
 _PARSER_VERSION: str = "placeholder-v0"
 _CHUNKER_STRATEGY: str = "full-content-v0"
-
-# Stage label used in metrics for the new Qdrant write.  Kept distinct
-# from the existing ``index`` label (which means "Postgres index").
-_STAGE_VECTOR: str = "vector"
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +146,26 @@ class IndexWriterProtocol(Protocol):
         content_hash: str,
         metadata: dict[str, Any],
         chunks: list[Any],
-        ingestion_run_id: UUID | None,
+        workspace_id: UUID | None = None,
+        ingestion_run_id: UUID | None = None,
     ) -> Any: ...
 
-    async def tombstone(self, source_id: UUID, external_id: str) -> bool: ...
+    async def upsert_graph(
+        self,
+        source_id: UUID,
+        document_id: UUID,
+        entities: list[Any],
+        edges: list[Any],
+        workspace_id: UUID | None = None,
+        snapshot_at: Any | None = None,
+    ) -> None: ...
+
+    async def tombstone(
+        self, 
+        source_id: UUID, 
+        external_id: str,
+        workspace_id: UUID | None = None,
+    ) -> bool: ...
 
 
 # ---------------------------------------------------------------------------
@@ -206,42 +216,6 @@ class _RawChunk:
         self.chunker_strategy = _CHUNKER_STRATEGY
 
 
-def _chunk_to_payload(chunk: _RawChunk) -> ChunkPayload:
-    """Translate a pipeline ``_RawChunk`` into a Qdrant ``ChunkPayload``.
-
-    Mirrors the migration runner's ``_chunk_to_payload`` so the live
-    ingestion path produces the exact same payload shape as a one-off
-    backfill.  Lineage fields are propagated per ADR-0006 §Schema.
-    """
-    return {
-        "ord": int(chunk.ord),
-        "text": str(chunk.text),
-        "embedding": [float(x) for x in chunk.embedding],
-        "symbol": chunk.symbol,
-        "metadata": dict(chunk.metadata),
-        "embedding_model": str(chunk.embedding_model),
-        "embedding_provider": str(chunk.embedding_provider),
-        "parser_version": str(chunk.parser_version),
-        "chunker_strategy": str(chunk.chunker_strategy),
-    }
-
-
-def _build_vector_metadata(
-    *,
-    workspace_id: uuid.UUID,
-    fetched_metadata: dict[str, Any],
-) -> dict[str, Any]:
-    """Build the document-level metadata dict for the Qdrant adapter.
-
-    The ``workspace_id`` key is mandatory — it is the ACL enforcement
-    point inside ``QdrantVectorStore._extract_workspace_id`` (ADR-0006
-    §ACL).  Mirrors ``migration.runner._build_document_metadata``.
-    """
-    metadata: dict[str, Any] = dict(fetched_metadata)
-    metadata["workspace_id"] = str(workspace_id)
-    return metadata
-
-
 # ---------------------------------------------------------------------------
 # Pipeline
 # ---------------------------------------------------------------------------
@@ -271,16 +245,12 @@ class IngestionPipeline:
         connector: Connector,
         embedding_provider: EmbeddingProvider,
         index_writer: IndexWriterProtocol,
-        graph_store: GraphStore,
-        vector_store: VectorStore,
         graph_extractor: Any | None = None,
         entity_linker: EntityLinkerProtocol | None = None,
     ) -> None:
         self._connector = connector
         self._embedding_provider = embedding_provider
         self._index_writer = index_writer
-        self._graph_store = graph_store
-        self._vector_store = vector_store
         # Optional callable:
         #   graph_extractor(parsed_doc, source_bytes) -> (entities, edges)
         # Matches the signature of omniscience_parsers.code.graph.extract_symbol_graph
@@ -367,22 +337,11 @@ class IngestionPipeline:
         chunks = self._build_chunks(chunks_text, embeddings)
 
         upsert_action, document_id = await self._stage_index(
-            event, fetched, content_text, chunks, ingestion_run_id, bound
-        )
-
-        # Vector write (Qdrant) — hard failure propagates to caller.
-        await self._stage_vector(
-            event=event,
-            fetched=fetched,
-            content_hash=_compute_content_hash(content_text),
-            chunks=chunks,
-            workspace_id=workspace_id,
-            ingestion_run_id=ingestion_run_id,
-            bound=bound,
+            event, fetched, content_text, chunks, workspace_id, ingestion_run_id, bound
         )
 
         # Symbol graph extraction — parser/extractor errors swallowed,
-        # adapter errors propagate.
+        # orchestrated write via index_writer handles Neo4j.
         await self._stage_graph(
             event=event,
             content_bytes=fetched.content_bytes,
@@ -392,7 +351,7 @@ class IngestionPipeline:
         )
 
         # Cross-source entity linking — optional, best-effort
-        await self._stage_link(event, bound)
+        await self._stage_link(event, workspace_id, bound)
 
         return ProcessResult(
             source_id=event.source_id,
@@ -526,10 +485,11 @@ class IngestionPipeline:
         fetched: FetchedDocument,
         content_text: str,
         chunks: list[_RawChunk],
+        workspace_id: uuid.UUID,
         ingestion_run_id: UUID | None,
         bound: Any,
     ) -> tuple[str, UUID]:
-        """Write chunks to the Postgres index.  Returns (action, document_id)."""
+        """Write chunks to the hybrid index (Postgres + Qdrant)."""
         t0 = time.monotonic()
         try:
             content_hash = _compute_content_hash(content_text)
@@ -541,6 +501,7 @@ class IngestionPipeline:
                 content_hash=content_hash,
                 metadata=dict(fetched.ref.metadata),
                 chunks=chunks,
+                workspace_id=workspace_id,
                 ingestion_run_id=ingestion_run_id,
             )
             action: str = result.action
@@ -557,50 +518,6 @@ class IngestionPipeline:
         finally:
             INGESTION_STAGE_DURATION_SECONDS.labels(stage="index").observe(time.monotonic() - t0)
 
-    async def _stage_vector(
-        self,
-        *,
-        event: DocumentChangeEvent,
-        fetched: FetchedDocument,
-        content_hash: str,
-        chunks: list[_RawChunk],
-        workspace_id: uuid.UUID,
-        ingestion_run_id: UUID | None,
-        bound: Any,
-    ) -> None:
-        """Push chunk embeddings to Qdrant.  Hard failure propagates."""
-        t0 = time.monotonic()
-        try:
-            payloads = [_chunk_to_payload(c) for c in chunks]
-            metadata = _build_vector_metadata(
-                workspace_id=workspace_id,
-                fetched_metadata=dict(fetched.ref.metadata),
-            )
-            outcome = await self._vector_store.upsert_chunks(
-                source_id=event.source_id,
-                external_id=event.external_id,
-                uri=event.uri,
-                title=None,
-                content_hash=content_hash,
-                metadata=metadata,
-                chunks=payloads,
-                ingestion_run_id=ingestion_run_id,
-            )
-            bound.debug(
-                "stage_vector_ok",
-                action=outcome.action,
-                chunks_written=outcome.chunks_written,
-                document_id=str(outcome.document_id),
-            )
-        except Exception as exc:
-            INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage=_STAGE_VECTOR).inc()
-            bound.error("stage_vector_error", error=str(exc))
-            raise
-        finally:
-            INGESTION_STAGE_DURATION_SECONDS.labels(stage=_STAGE_VECTOR).observe(
-                time.monotonic() - t0
-            )
-
     async def _stage_graph(
         self,
         *,
@@ -610,13 +527,11 @@ class IngestionPipeline:
         workspace_id: uuid.UUID,
         bound: Any,
     ) -> None:
-        """Extract and persist the symbol graph.
+        """Extract and persist the symbol graph via orchestrated index_writer.
 
         Two-tier failure handling:
         - Parser / extractor problems are best-effort (logged + swallowed).
-        - Adapter problems on ``GraphStore.upsert_graph`` propagate up so
-          the broker NAKs the message.  Idempotent MERGE on the Neo4j
-          side makes redelivery safe.
+        - Adapter problems on Neo4j propagate up so the broker NAKs.
         """
         if self._graph_extractor is None:
             return
@@ -627,14 +542,21 @@ class IngestionPipeline:
             if extracted is None:
                 return
             entities, edges = extracted
-            await self._upsert_graph_with_acl(
-                event=event,
+            
+            # Orchestrated write: index_writer handles the workspace-tagging 
+            # and Neo4j call.
+            await self._index_writer.upsert_graph(
+                source_id=event.source_id,
                 document_id=document_id,
-                workspace_id=workspace_id,
                 entities=entities,
                 edges=edges,
-                bound=bound,
+                workspace_id=workspace_id,
             )
+            bound.debug("stage_graph_ok", entities=len(entities), edges=len(edges))
+        except Exception as exc:
+            INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="graph").inc()
+            bound.error("stage_graph_adapter_error", error=str(exc))
+            raise
         finally:
             INGESTION_STAGE_DURATION_SECONDS.labels(stage="graph").observe(time.monotonic() - t0)
 
@@ -644,13 +566,7 @@ class IngestionPipeline:
         content_bytes: bytes,
         bound: Any,
     ) -> tuple[list[Any], list[Any]] | None:
-        """Run the parser + extractor.  Best-effort: returns ``None`` on miss.
-
-        Failures here are NOT propagated — extraction is non-critical
-        (the document is still queryable via Postgres + Qdrant even
-        without a symbol graph).  Returning ``None`` tells the caller
-        to skip the adapter call.
-        """
+        """Run the parser + extractor.  Best-effort: returns ``None`` on miss."""
         try:
             from omniscience_parsers import TreeSitterParser
 
@@ -671,42 +587,10 @@ class IngestionPipeline:
             return None
         return list(entities), list(edges)
 
-    async def _upsert_graph_with_acl(
-        self,
-        *,
-        event: DocumentChangeEvent,
-        document_id: UUID,
-        workspace_id: uuid.UUID,
-        entities: list[Any],
-        edges: list[Any],
-        bound: Any,
-    ) -> None:
-        """Tag entities with ``workspace_id`` and call the Neo4j adapter.
-
-        The adapter's :meth:`Neo4jGraphStore.upsert_graph` reads the
-        workspace from the first entity (or its metadata) — see
-        ``_workspace_from_entities`` in the adapter.  We tag every
-        entity defensively so the adapter's lookup is unambiguous.
-
-        Adapter errors propagate so the worker NAKs the message.
-        """
-        try:
-            tagged = [_tag_entity_workspace(ent, workspace_id) for ent in entities]
-            await self._graph_store.upsert_graph(
-                source_id=event.source_id,
-                document_id=document_id,
-                entities=tagged,
-                edges=edges,
-            )
-            bound.debug("stage_graph_ok", entities=len(entities), edges=len(edges))
-        except Exception as exc:
-            INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="graph").inc()
-            bound.error("stage_graph_adapter_error", error=str(exc))
-            raise
-
     async def _stage_link(
         self,
         event: DocumentChangeEvent,
+        workspace_id: uuid.UUID,
         bound: Any,
     ) -> None:
         """Create cross-source entity links.  Best-effort: never raises."""
@@ -715,7 +599,10 @@ class IngestionPipeline:
 
         t0 = time.monotonic()
         try:
-            new_edges = await self._entity_linker.link_entities(event.source_id)
+            new_edges = await self._entity_linker.link_entities(
+                source_id=event.source_id,
+                workspace_id=workspace_id,
+            )
             bound.debug("stage_link_ok", new_edges=new_edges)
         except Exception as exc:
             INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="link").inc()
@@ -730,29 +617,14 @@ class IngestionPipeline:
         workspace_id: uuid.UUID,
         bound: Any,
     ) -> ProcessResult:
-        """Tombstone the document in Postgres and Qdrant.
-
-        Neo4j entities are not actively tombstoned per-document — the
-        next re-ingestion of any document for the same source replaces
-        the source's graph slice via :meth:`Neo4jGraphStore.upsert_graph`
-        (DETACH DELETE by source_id).  This matches the migration
-        runner's semantics.
-        """
+        """Tombstone the document in Postgres and Qdrant via orchestrated writer."""
         t0 = time.monotonic()
         try:
-            found = await self._index_writer.tombstone(event.source_id, event.external_id)
-            try:
-                await self._vector_store.delete_by_document(  # type: ignore[call-arg]
-                    source_id=event.source_id,
-                    external_id=event.external_id,
-                    workspace_id=workspace_id,
-                )
-            except Exception as exc:
-                INGESTION_ERRORS_TOTAL.labels(
-                    source_type=event.source_type, stage=_STAGE_VECTOR
-                ).inc()
-                bound.error("stage_delete_vector_error", error=str(exc))
-                raise
+            found = await self._index_writer.tombstone(
+                event.source_id, 
+                event.external_id,
+                workspace_id=workspace_id,
+            )
             action = "deleted" if found else "unchanged"
             bound.info("stage_delete_ok", found=found)
             return ProcessResult(
@@ -772,27 +644,6 @@ class IngestionPipeline:
 # ---------------------------------------------------------------------------
 # Free helpers (small + pure)
 # ---------------------------------------------------------------------------
-
-
-def _tag_entity_workspace(entity: Any, workspace_id: uuid.UUID) -> Any:
-    """Stamp ``workspace_id`` onto an extracted entity's ``metadata``.
-
-    The Neo4j adapter resolves the workspace via the first entity's
-    ``metadata['workspace_id']`` (see
-    ``Neo4jGraphStore._workspace_from_entities``).  The parser's
-    ``ExtractedEntity`` does not carry a ``workspace_id`` natively, so
-    we set it on every entity defensively.  Mutating the existing
-    ``metadata`` dict is safe — extraction is per-document and the
-    caller does not retain a reference to the originals after this
-    point.
-    """
-    metadata: dict[str, Any] | None = getattr(entity, "metadata", None)
-    if metadata is None:
-        # Some duck-typed shapes may not own a metadata attribute; raise
-        # so the bug is visible rather than silently dropping ACL.
-        raise ValueError("entity_missing_metadata_attribute")
-    metadata["workspace_id"] = str(workspace_id)
-    return entity
 
 
 __all__ = ["EntityLinkerProtocol", "IndexWriterProtocol", "IngestionPipeline"]

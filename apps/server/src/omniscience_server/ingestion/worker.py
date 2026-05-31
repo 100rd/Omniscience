@@ -44,8 +44,6 @@ from omniscience_connectors.registry import ConnectorRegistry
 from omniscience_core.db.models import Source
 from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.secrets import SecretsResolver
-from omniscience_core.storage.graph import GraphStore
-from omniscience_core.storage.vector import VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_index.workspace import MissingWorkspaceError, resolve_source_workspace
 from sqlalchemy import select
@@ -104,8 +102,6 @@ class IngestionWorker:
         connector_registry: ConnectorRegistry,
         embedding_provider: EmbeddingProvider,
         index_writer: IndexWriterProtocol,
-        graph_store: GraphStore,
-        vector_store: VectorStore,
         session_factory: async_sessionmaker[AsyncSession],
         secrets_resolver: SecretsResolver | None = None,
         dedup_gate: DedupGate | None = None,
@@ -114,8 +110,6 @@ class IngestionWorker:
         self._connector_registry = connector_registry
         self._embedding_provider = embedding_provider
         self._index_writer = index_writer
-        self._graph_store = graph_store
-        self._vector_store = vector_store
         self._session_factory = session_factory
         self._run_tracker = RunTracker(session_factory)
         self._secrets_resolver = secrets_resolver or SecretsResolver()
@@ -257,8 +251,6 @@ class IngestionWorker:
             connector=connector,
             embedding_provider=self._embedding_provider,
             index_writer=self._index_writer,
-            graph_store=self._graph_store,
-            vector_store=self._vector_store,
         )
         result = await pipeline.run(
             event=event,

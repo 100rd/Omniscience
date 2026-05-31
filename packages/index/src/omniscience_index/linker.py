@@ -1,41 +1,24 @@
-"""Cross-source entity linker.
+"""Cross-source entity linker (Neo4j-native).
 
-:class:`EntityLinker` finds entities from different sources that refer to
-the same real-world concept and creates ``"cross_ref"`` edges in the
-``edges`` table to make the connections explicit.
+As of Epic #96 and ADR-0012, this module links entities directly in 
+Neo4j using the GraphStore adapter. SQL-side linking is deprecated.
 
-Matching strategy (applied in priority order):
-
-1. **Exact name match** — entities whose normalised names are identical
-   across *different* sources are linked unconditionally (score == 1.0).
-
-2. **ARN match** — when one entity is ``tfstate_instance`` kind and the
-   other is ``aws_live`` kind, ARNs are compared.  Score 1.0 on exact ARN
-   match; score 0.8 on id-only match (without account/region prefix).
-
-3. **Resource name match** — Terraform resources ↔ Kubernetes resources
-   are compared with :func:`~omniscience_index.matchers.resource_name_match`.
-   Pairs scoring above :data:`RESOURCE_MATCH_THRESHOLD` are linked.
-
-4. **Service name match** — a Kubernetes ``Service`` entity ↔ a Grafana
-   dashboard entity are fuzzy-matched on their normalised names.
-   Pairs scoring above :data:`SERVICE_MATCH_THRESHOLD` are linked.
-
-Idempotency is achieved by a ``(source_entity_id, target_entity_id,
-edge_type)`` uniqueness check before inserting: if a ``"cross_ref"`` edge
-already exists for the pair it is not duplicated.
+Matching strategy (priority order):
+1. Exact name match (score 1.0)
+2. ARN match (score 0.8 - 1.0)
+3. Resource name match (Terraform <-> K8s)
+4. Service name match (K8s <-> Grafana)
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import structlog
-from omniscience_core.db.models import Edge, Entity
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from omniscience_core.storage.graph import EdgeUpsert, EntityNodeView, GraphStore
 
 from omniscience_index.matchers import (
     exact_name_match,
@@ -45,372 +28,126 @@ from omniscience_index.matchers import (
 log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Thresholds
+# Constants
 # ---------------------------------------------------------------------------
 
-#: Minimum score from :func:`~omniscience_index.matchers.resource_name_match`
-#: to create a cross-ref edge between Terraform and K8s entities.
 RESOURCE_MATCH_THRESHOLD: float = 0.5
-
-#: Minimum score for a service name match (K8s Service ↔ Grafana dashboard).
 SERVICE_MATCH_THRESHOLD: float = 0.5
-
-#: Edge type used for all cross-source links created by this module.
 CROSS_REF_EDGE_TYPE: str = "cross_ref"
 
-# ---------------------------------------------------------------------------
-# ARN matching constants
-# ---------------------------------------------------------------------------
-
-#: Entity kind used by AwsConnector for all live-resource entities.
 _AWS_LIVE_KIND: str = "aws_live"
-
-#: Entity kind used by Terraform state entities representing real resources.
 _TFSTATE_KIND: str = "tfstate_instance"
+_JIRA_KIND: str = "jira_issue"
 
-
-# ---------------------------------------------------------------------------
-# EntityLinker
-# ---------------------------------------------------------------------------
+# Regex for Jira keys like PROJ-123
+_JIRA_KEY_RE = re.compile(r"\b([A-Z][A-Z0-9]+-[0-9]+)\b")
 
 
 class EntityLinker:
-    """Links entities across sources by matching names and types.
+    """Links entities across sources within a workspace using Neo4j."""
 
-    Args:
-        session_factory: An :class:`~sqlalchemy.ext.asyncio.async_sessionmaker`
-            that yields :class:`~sqlalchemy.ext.asyncio.AsyncSession` objects.
-    """
+    def __init__(self, graph_store: GraphStore) -> None:
+        self._graph_store = graph_store
+async def link_entities(self, source_id: uuid.UUID, workspace_id: uuid.UUID) -> int:
+    """Find and create cross-source edges for entities in *source_id*."""
+    all_entities = await self._graph_store.get_all_entities(workspace_id=workspace_id)
+    if not all_entities:
+        return 0
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._session_factory = session_factory
+    source_entities = [e for e in all_entities if str(e.source) == str(source_id)]
+    other_entities = [e for e in all_entities if str(e.source) != str(source_id)]
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    if not source_entities:
+        return 0
 
-    async def link_entities(self, source_id: uuid.UUID) -> int:
-        """Find and create cross-source edges for entities in *source_id*.
-
-        Loads all entities belonging to *source_id*, then queries every
-        other source for candidate matches using the three matching
-        strategies.  New ``"cross_ref"`` edges are inserted; existing
-        ones are skipped (idempotent).
-
-        Args:
-            source_id: UUID of the source whose entities are being linked.
-
-        Returns:
-            Number of new edges created during this call.
-        """
-        async with self._session_factory() as session, session.begin():
-            # Load entities from the target source
-            source_entities = await self._fetch_entities_for_source(session, source_id)
-            if not source_entities:
-                return 0
-
-            # Load entities from all *other* sources
-            other_entities = await self._fetch_entities_excluding_source(session, source_id)
-            if not other_entities:
-                return 0
-
-            # Load existing cross-ref edges to avoid duplicates
-            existing_pairs = await self._fetch_existing_cross_ref_pairs(session)
-
-            new_edges = self._compute_links(source_entities, other_entities, existing_pairs)
-
-            for edge in new_edges:
-                session.add(edge)
-
-            await session.flush()
-
-        count = len(new_edges)
-        log.debug(
-            "entity_linker.link_entities",
-            source_id=str(source_id),
-            new_edges=count,
-        )
-        return count
-
-    async def resolve_cross_references(self) -> int:
-        """Global pass: resolve all unlinked cross-source references.
-
-        Loads *all* entities from *all* sources and runs the full
-        matching pipeline over every pair of distinct sources.  Designed
-        for post-bulk-ingestion reconciliation or periodic background jobs.
-
-        Returns:
-            Total number of new edges created.
-        """
-        async with self._session_factory() as session, session.begin():
-            all_entities = await self._fetch_all_entities(session)
-            if not all_entities:
-                return 0
-
-            existing_pairs = await self._fetch_existing_cross_ref_pairs(session)
-
-            # Group by source for efficient cross-source iteration
-            by_source: dict[uuid.UUID, list[Entity]] = {}
-            for ent in all_entities:
-                by_source.setdefault(ent.source_id, []).append(ent)
-
-            source_ids = list(by_source.keys())
-            new_edges: list[Edge] = []
-
-            for i, sid_a in enumerate(source_ids):
-                for sid_b in source_ids[i + 1 :]:
-                    links = self._compute_links(
-                        by_source[sid_a],
-                        by_source[sid_b],
-                        existing_pairs,
-                    )
-                    # Update existing_pairs so later iterations don't re-add
-                    for edge in links:
-                        existing_pairs.add((edge.source_entity_id, edge.target_entity_id))
-                        existing_pairs.add((edge.target_entity_id, edge.source_entity_id))
-                    new_edges.extend(links)
-
-            for edge in new_edges:
-                session.add(edge)
-
-            await session.flush()
-
-        count = len(new_edges)
-        log.debug("entity_linker.resolve_cross_references", new_edges=count)
-        return count
-
-    # ------------------------------------------------------------------
-    # Matching logic
-    # ------------------------------------------------------------------
-
-    def _compute_links(
-        self,
-        source_entities: list[Entity],
-        candidate_entities: list[Entity],
-        existing_pairs: set[tuple[uuid.UUID, uuid.UUID]],
-    ) -> list[Edge]:
-        """Run all matching strategies and return new edges to create."""
-        new_edges: list[Edge] = []
-        now = datetime.now(UTC)
-
-        for ent_a in source_entities:
-            for ent_b in candidate_entities:
-                # Never link entities from the same source
-                if ent_a.source_id == ent_b.source_id:
-                    continue
-
-                pair = (ent_a.id, ent_b.id)
-                reverse = (ent_b.id, ent_a.id)
-                if pair in existing_pairs or reverse in existing_pairs:
-                    continue
-
-                score, strategy = self._match_score(ent_a, ent_b)
-                if score <= 0.0:
-                    continue
-
-                edge = Edge(
-                    id=uuid.uuid4(),
+    # 1. Intra-workspace linking (Exact match, ARN, etc.)
+    created = 0
+    if other_entities:
+        new_links = self._compute_links(source_entities, other_entities)
+        for ent_a, ent_b, score, strategy in new_links:
+            await self._graph_store.upsert_edge(
+                edge=EdgeUpsert(
                     source_entity_id=ent_a.id,
                     target_entity_id=ent_b.id,
                     edge_type=CROSS_REF_EDGE_TYPE,
-                    edge_metadata={
+                    metadata={
                         "score": score,
                         "strategy": strategy,
-                        "linked_source_id": str(ent_b.source_id),
+                        "linked_source_id": str(ent_b.source),
                     },
-                    created_at=now,
-                )
-                new_edges.append(edge)
-                # Track immediately so the inner loop doesn't add a duplicate
-                existing_pairs.add(pair)
-                existing_pairs.add(reverse)
+                ),
+                workspace_id=workspace_id,
+            )
+            created += 1
 
-        return new_edges
+    # 2. Stub Resolution pass (Global cross-file linking)
+    await self.resolve_stubs(workspace_id)
 
-    def _match_score(self, ent_a: Entity, ent_b: Entity) -> tuple[float, str]:
-        """Return ``(score, strategy_name)`` for the best match between two entities.
+    return created
 
-        Returns ``(0.0, "")`` when no strategy produces a positive score.
-        """
-        # Strategy 1: exact name match (highest priority)
+    async def resolve_stubs(self, workspace_id: uuid.UUID) -> int:
+        """Merge stub nodes with real entities in the same workspace."""
+        # Use the storage-native resolution (Cypher batch) for efficiency.
+        resolved = await self._graph_store.resolve_pending_stubs(workspace_id=workspace_id)
+        if resolved > 0:
+            log.info(
+                "entity_linker_stubs_resolved",
+                workspace_id=str(workspace_id),
+                count=resolved,
+            )
+        return resolved
+
+
+    def _compute_links(
+        self,
+        source_entities: list[EntityNodeView],
+        candidate_entities: list[EntityNodeView],
+    ) -> list[tuple[EntityNodeView, EntityNodeView, float, str]]:
+        """Run all matching strategies and return candidate pairs."""
+        new_links = []
+        for ent_a in source_entities:
+            for ent_b in candidate_entities:
+                score, strategy = self._match_score(ent_a, ent_b)
+                if score > 0.0:
+                    new_links.append((ent_a, ent_b, score, strategy))
+        return new_links
+
+    def _match_score(self, ent_a: EntityNodeView, ent_b: EntityNodeView) -> tuple[float, str]:
+        """Best match score between two entities."""
+        # 1. Exact name match
         if exact_name_match(ent_a.name, ent_b.name) == 1.0:
             return 1.0, "exact_name"
 
-        if exact_name_match(ent_a.display_name, ent_b.display_name) == 1.0:
-            return 1.0, "exact_display_name"
+        # 2. Jira Ticket ID match (Code/Commit -> Jira Issue)
+        is_jira_a = ent_a.kind == _JIRA_KIND
+        is_jira_b = ent_b.kind == _JIRA_KIND
+        
+        if (is_jira_a or is_jira_b) and (ent_a.kind != ent_b.kind):
+            jira_issue = ent_a if is_jira_a else ent_b
+            other = ent_b if is_jira_a else ent_a
+            
+            # Look for Jira Key in 'other' entity's text or name
+            text_to_scan = f"{other.name} {other.chunk_text or ''}"
+            matches = _JIRA_KEY_RE.findall(text_to_scan)
+            
+            # Jira entity name is typically the ticket key (PROJ-123)
+            if jira_issue.display_name in matches:
+                return 1.0, "jira_ticket_match"
 
-        # Strategy 2: ARN match — tfstate_instance ↔ aws_live
-        arn_score, arn_strategy = _arn_match_score(ent_a, ent_b)
-        if arn_score > 0.0:
-            return arn_score, arn_strategy
+        # 3. Resource name match (Terraform <-> K8s)
+        tf_types = {"terraform_resource", "terraform_module", "resource", "tfstate_instance"}
+        k8s_types = {"k8s_resource", "service", "deployment", "pod"}
 
-        # Strategy 3: Terraform resource ↔ K8s resource
-        tf_types = {"terraform_resource", "terraform_module", "resource"}
-        k8s_types = {"k8s_resource", "service", "deployment"}
-
-        is_tf_a = ent_a.entity_type in tf_types
-        is_k8s_a = ent_a.entity_type in k8s_types
-        is_tf_b = ent_b.entity_type in tf_types
-        is_k8s_b = ent_b.entity_type in k8s_types
+        is_tf_a = ent_a.kind in tf_types
+        is_k8s_a = ent_a.kind in k8s_types
+        is_tf_b = ent_b.kind in tf_types
+        is_k8s_b = ent_b.kind in k8s_types
 
         if (is_tf_a and is_k8s_b) or (is_k8s_a and is_tf_b):
             score = resource_name_match(ent_a.name, ent_b.name)
             if score >= RESOURCE_MATCH_THRESHOLD:
                 return score, "resource_name"
 
-        # Strategy 4: K8s Service ↔ Grafana dashboard
-        grafana_types = {"dashboard", "grafana_dashboard"}
-        is_k8s_service_a = is_k8s_a and _is_service_entity(ent_a)
-        is_grafana_a = ent_a.entity_type in grafana_types
-        is_k8s_service_b = is_k8s_b and _is_service_entity(ent_b)
-        is_grafana_b = ent_b.entity_type in grafana_types
-
-        if (is_k8s_service_a and is_grafana_b) or (is_grafana_a and is_k8s_service_b):
-            # Use resource_name_match: same Dice-coefficient on normalised tokens
-            score = resource_name_match(ent_a.name, ent_b.name)
-            if score >= SERVICE_MATCH_THRESHOLD:
-                return score, "service_name"
-
         return 0.0, ""
 
-    # ------------------------------------------------------------------
-    # Database helpers
-    # ------------------------------------------------------------------
-
-    async def _fetch_entities_for_source(
-        self, session: AsyncSession, source_id: uuid.UUID
-    ) -> list[Entity]:
-        stmt = select(Entity).where(Entity.source_id == source_id)
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
-
-    async def _fetch_entities_excluding_source(
-        self, session: AsyncSession, source_id: uuid.UUID
-    ) -> list[Entity]:
-        stmt = select(Entity).where(Entity.source_id != source_id)
-        result = await session.execute(stmt)
-        return list(result.scalars().all())
-
-    async def _fetch_all_entities(self, session: AsyncSession) -> list[Entity]:
-        result = await session.execute(select(Entity))
-        return list(result.scalars().all())
-
-    async def _fetch_existing_cross_ref_pairs(
-        self, session: AsyncSession
-    ) -> set[tuple[uuid.UUID, uuid.UUID]]:
-        """Return a set of (source_id, target_id) for existing cross_ref edges."""
-        stmt = select(Edge.source_entity_id, Edge.target_entity_id).where(
-            Edge.edge_type == CROSS_REF_EDGE_TYPE
-        )
-        result = await session.execute(stmt)
-        pairs: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        for row in result:
-            pairs.add((row[0], row[1]))
-        return pairs
-
-
-# ---------------------------------------------------------------------------
-# Module-private helpers
-# ---------------------------------------------------------------------------
-
-
-def _is_service_entity(entity: Entity) -> bool:
-    """Return True if the entity looks like a Kubernetes Service."""
-    meta: dict[str, Any] = entity.entity_metadata
-    k8s_kind = str(meta.get("k8s_kind", "")).lower()
-    return k8s_kind == "service" or entity.entity_type.lower() in {"service"}
-
-
-def _extract_arn(entity: Entity) -> str:
-    """Extract the ARN from an entity's extra/metadata dict.
-
-    Checks ``entity_metadata["arn"]``, ``entity_metadata["extra"]["arn"]``,
-    and falls back to ``entity.name`` when the entity type looks like an ARN.
-    """
-    meta: dict[str, Any] = entity.entity_metadata
-
-    # Direct arn key in metadata
-    arn = meta.get("arn", "")
-    if arn:
-        return str(arn)
-
-    # Nested under "extra"
-    extra: dict[str, Any] = meta.get("extra", {})
-    arn = extra.get("arn", "")
-    if arn:
-        return str(arn)
-
-    # entity.name may itself be an ARN (starts with "arn:")
-    if entity.name.startswith("arn:"):
-        return entity.name
-
-    return ""
-
-
-def _arn_id_segment(arn: str) -> str:
-    """Return the last path segment of an ARN — the bare resource id/name.
-
-    For ``arn:aws:s3:::my-bucket`` this returns ``my-bucket``.
-    For ``arn:aws:ec2:us-east-1:123:instance/i-abc`` this returns ``i-abc``.
-    Returns empty string when *arn* is empty or cannot be parsed.
-    """
-    if not arn:
-        return ""
-    # ARN format: arn:partition:service:region:account-id:resource
-    # resource may be "type/id" or just "id"
-    parts = arn.split(":", 5)
-    if len(parts) < 6:
-        return ""
-    resource = parts[5]
-    # Strip type prefix if present (e.g. "instance/i-abc" → "i-abc")
-    if "/" in resource:
-        resource = resource.rsplit("/", 1)[-1]
-    return resource
-
-
-def _arn_match_score(ent_a: Entity, ent_b: Entity) -> tuple[float, str]:
-    """Return ``(score, "arn_match")`` when a tfstate_instance ↔ aws_live ARN match fires.
-
-    Returns ``(0.0, "")`` when the strategy does not apply.
-
-    Scoring:
-    - 1.0 — exact ARN match
-    - 0.8 — id-only match (last path segment matches, ignoring account/region)
-    """
-    kind_a: str = str(ent_a.entity_metadata.get("kind", ""))
-    kind_b: str = str(ent_b.entity_metadata.get("kind", ""))
-
-    # Strategy applies only when one is tfstate_instance and other is aws_live
-    is_tf_a = kind_a == _TFSTATE_KIND or ent_a.entity_type == _TFSTATE_KIND
-    is_live_a = kind_a == _AWS_LIVE_KIND or ent_a.entity_type == _AWS_LIVE_KIND
-    is_tf_b = kind_b == _TFSTATE_KIND or ent_b.entity_type == _TFSTATE_KIND
-    is_live_b = kind_b == _AWS_LIVE_KIND or ent_b.entity_type == _AWS_LIVE_KIND
-
-    if not ((is_tf_a and is_live_b) or (is_live_a and is_tf_b)):
-        return 0.0, ""
-
-    arn_a = _extract_arn(ent_a)
-    arn_b = _extract_arn(ent_b)
-
-    if not arn_a or not arn_b:
-        return 0.0, ""
-
-    # Exact ARN match
-    if arn_a == arn_b:
-        return 1.0, "arn_match"
-
-    # Id-only match: compare the bare resource identifier
-    id_a = _arn_id_segment(arn_a)
-    id_b = _arn_id_segment(arn_b)
-    if id_a and id_b and id_a == id_b:
-        return 0.8, "arn_match"
-
-    return 0.0, ""
-
-
-__all__ = [
-    "CROSS_REF_EDGE_TYPE",
-    "RESOURCE_MATCH_THRESHOLD",
-    "SERVICE_MATCH_THRESHOLD",
-    "EntityLinker",
-]
+__all__ = ["EntityLinker", "CROSS_REF_EDGE_TYPE"]

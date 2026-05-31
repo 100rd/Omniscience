@@ -71,7 +71,7 @@ services:
   admin:
     build: ./apps/admin
     ports:
-      - "3001:80"
+      - "13001:80"
     depends_on:
       app:
         condition: service_healthy
@@ -84,9 +84,9 @@ services:
   # of v0.2 (#105 cutover); the pgvector extension is no longer required.
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16-alpine
+    image: ankane/pgvector:v0.5.1
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:15432:5432"
     environment:
       POSTGRES_DB: omniscience
       POSTGRES_USER: omniscience
@@ -127,8 +127,8 @@ services:
     image: nats:2.10-alpine
     command: --jetstream --store_dir /data --http_port 8222
     ports:
-      - "127.0.0.1:4222:4222"
-      - "127.0.0.1:8222:8222"
+      - "127.0.0.1:14222:4222"
+      - "127.0.0.1:18222:8222"
     volumes:
       - natsdata:/data
     healthcheck:
@@ -153,7 +153,7 @@ services:
     profiles:
       - monitoring
     ports:
-      - "127.0.0.1:9090:9090"
+      - "127.0.0.1:19090:9090"
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheusdata:/prometheus
@@ -169,7 +169,7 @@ services:
     profiles:
       - monitoring
     ports:
-      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:13000:3000"
     environment:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
@@ -190,6 +190,7 @@ services:
       - "443:443"
     environment:
       CADDY_DOMAIN: ${CADDY_DOMAIN:-localhost}
+      CADDY_UPSTREAM: app:8000
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile
       - caddy_data:/data
@@ -212,8 +213,8 @@ services:
   neo4j:
     image: neo4j:5.19-community
     ports:
-      - "127.0.0.1:7474:7474"
-      - "127.0.0.1:7687:7687"
+      - "127.0.0.1:17474:7474"
+      - "127.0.0.1:17687:7687"
     environment:
       NEO4J_AUTH: ${NEO4J_USERNAME:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set in .env}
       NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-1G}
@@ -246,8 +247,8 @@ services:
   qdrant:
     image: qdrant/qdrant:v1.12.4
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
+      - "127.0.0.1:16333:6333"
+      - "127.0.0.1:16334:6334"
     environment:
       QDRANT__SERVICE__API_KEY: ${QDRANT_API_KEY:-}
       QDRANT__SERVICE__GRPC_PORT: "6334"

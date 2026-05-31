@@ -9,6 +9,7 @@ interface LayoutProps {
 const NAV_ITEMS = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/sources", label: "Sources" },
+  { to: "/graph", label: "Graph Explorer" },
   { to: "/freshness", label: "Freshness" },
   { to: "/retention", label: "Retention" },
   { to: "/incidents", label: "Incidents" },
