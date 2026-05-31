@@ -186,7 +186,7 @@ async def _plant_legacy_entity(
         name: $name,
         display_name: $name,
         chunk_id: null,
-        metadata: {},
+        metadata: '{}',
         created_at: $now,
         updated_at: $now
     })
@@ -221,7 +221,7 @@ async def _plant_legacy_edge(
         workspace_id: $workspace_id,
         source_id: $source_id,
         edge_type: 'CALLS',
-        metadata: {},
+        metadata: '{}',
         created_at: $now,
         updated_at: $now
     }]->(b)
@@ -289,7 +289,7 @@ async def test_backfill_creates_initial_entity_state_node_per_identity() -> None
             store,
             "MATCH (n:Entity {workspace_id: $ws, id: $id})-[:HAD_STATE]->(s:EntityState) "
             "RETURN count(s) AS state_count, "
-            "       any(x IN collect(s.valid_to) WHERE x IS NULL) AS has_open_state",
+            "       any(x IN collect(s) WHERE x.valid_to IS NULL) AS has_open_state",
             {"ws": str(_WORKSPACE_A), "id": a_id},
         )
         assert int(row.get("state_count", 0)) == 1

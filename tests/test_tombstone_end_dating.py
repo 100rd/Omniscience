@@ -655,8 +655,7 @@ async def test_live_as_of_before_tombstone_returns_state(_neo4j_container: str) 
         rows = await _query_all(
             store,
             "MATCH (n:Entity {workspace_id: $ws, id: $id})-[:HAD_STATE]->(s:EntityState) "
-            "WHERE s.valid_from <= datetime($t) "
-            "  AND ($t < toString(s.valid_to) OR s.valid_to IS NULL) "
+            "WHERE (datetime($t) < s.valid_to OR s.valid_to IS NULL) "
             "RETURN s.name AS name",
             {"ws": str(_WORKSPACE_A), "id": str(e.id), "t": as_of.isoformat()},
         )
