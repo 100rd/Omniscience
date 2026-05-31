@@ -1,4 +1,13 @@
-// API client wrapping fetch() with Bearer token auth.
+// API client using httpOnly cookie auth + CSRF double-submit pattern.
+//
+// Auth strategy:
+//   - All requests include `credentials: 'include'` so the browser sends the
+//     httpOnly `omniscience_admin_session` cookie automatically.
+//   - For mutating methods (POST/PUT/PATCH/DELETE) the client reads the
+//     non-httpOnly `csrf_token` cookie and forwards it as `X-CSRF-Token`.
+//   - No Authorization header is sourced from localStorage or any JS storage.
+//   - The `createSession` / `deleteSession` methods are the only callers that
+//     touch session lifecycle; all other methods are auth-agnostic.
 
 export type SourceType =
   | "git"
@@ -321,7 +330,7 @@ export type ReplayRequest = ReplayInlineRequest | ReplayByAuditIdRequest;
 export interface Workspace {
   id: string;
   name: string;
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
 }
 
 export class ApiError extends Error {
@@ -334,23 +343,29 @@ export class ApiError extends Error {
   }
 }
 
+const _MUTATING_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+
+/** Read the csrf_token cookie value (non-httpOnly, set by the backend). */
+function _readCsrfCookie(): string | null {
+  const match = document.cookie
+    .split(";")
+    .map((c) => c.trim())
+    .find((c) => c.startsWith("csrf_token="));
+  return match ? decodeURIComponent(match.slice("csrf_token=".length)) : null;
+}
+
 export class ApiClient {
-  private token: string | null;
+  constructor() {}
 
-  constructor(token: string | null = null) {
-    this.token = token;
-  }
-
-  setToken(token: string | null): void {
-    this.token = token;
-  }
-
-  private headers(): HeadersInit {
+  private headers(method: string): HeadersInit {
     const h: Record<string, string> = {
       "Content-Type": "application/json",
     };
-    if (this.token) {
-      h["Authorization"] = `Bearer ${this.token}`;
+    if (_MUTATING_METHODS.has(method.toUpperCase())) {
+      const csrf = _readCsrfCookie();
+      if (csrf) {
+        h["X-CSRF-Token"] = csrf;
+      }
     }
     return h;
   }
@@ -363,7 +378,8 @@ export class ApiClient {
   ): Promise<T> {
     const res = await fetch(path, {
       method,
-      headers: this.headers(),
+      headers: this.headers(method),
+      credentials: "include",
       body: body !== undefined ? JSON.stringify(body) : undefined,
       signal,
     });
@@ -385,6 +401,18 @@ export class ApiClient {
     }
 
     return data as T;
+  }
+
+  // Session management (admin SPA auth)
+
+  /** POST /api/v1/admin/session — validate token, receive httpOnly cookie. */
+  async createSession(token: string): Promise<void> {
+    return this.request<void>("POST", "/api/v1/admin/session", { token });
+  }
+
+  /** DELETE /api/v1/admin/session — clear session + CSRF cookies. */
+  async deleteSession(): Promise<void> {
+    return this.request<void>("DELETE", "/api/v1/admin/session");
   }
 
   // Health
@@ -478,7 +506,7 @@ export class ApiClient {
     return this.request<Workspace>("GET", "/api/v1/workspace");
   }
 
-  async updateWorkspace(metadata: Record<string, any>): Promise<Workspace> {
+  async updateWorkspace(metadata: Record<string, unknown>): Promise<Workspace> {
     return this.request<Workspace>("PATCH", "/api/v1/workspace", { metadata });
   }
 
@@ -599,9 +627,13 @@ export class ApiClient {
       for (const t of query.entity_types) qs.append("entity_types", t);
     }
     const path = `/api/v1/incidents/${encodeURIComponent(alertId)}/timeline?${qs}`;
+    const h: Record<string, string> = {};
+    const csrf = _readCsrfCookie();
+    if (csrf) h["X-CSRF-Token"] = csrf;
     const res = await fetch(path, {
       method: "GET",
-      headers: this.token ? { Authorization: `Bearer ${this.token}` } : undefined,
+      headers: Object.keys(h).length > 0 ? h : undefined,
+      credentials: "include",
       signal,
     });
     if (!res.ok) {
@@ -619,11 +651,7 @@ export class ApiClient {
 
   // Replay
   async replay(payload: ReplayRequest): Promise<ReplayEnvelope> {
-    return this.request<ReplayEnvelope>(
-      "POST",
-      "/api/v1/replay",
-      payload
-    );
+    return this.request<ReplayEnvelope>("POST", "/api/v1/replay", payload);
   }
 
   async replayByAuditId(auditLogId: string): Promise<ReplayEnvelope> {

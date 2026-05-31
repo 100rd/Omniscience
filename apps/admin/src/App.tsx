@@ -16,10 +16,10 @@ import { IncidentTimelinePage } from "./pages/IncidentTimelinePage";
 import { ReplayPage } from "./pages/ReplayPage";
 
 function AppInner() {
-  const { token } = useTokenContext();
+  const { authenticated } = useTokenContext();
   const { toasts, addToast, removeToast } = useToast();
 
-  if (!token) {
+  if (!authenticated) {
     return <LoginScreen />;
   }
 

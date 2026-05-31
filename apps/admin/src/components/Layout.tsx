@@ -54,7 +54,7 @@ export function Layout({ children }: LayoutProps) {
 
         <div className="px-4 py-4 border-t border-border">
           <button
-            onClick={logout}
+            onClick={() => void logout()}
             className="w-full text-left text-xs text-text-muted hover:text-text transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
           >
             Sign out
