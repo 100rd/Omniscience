@@ -272,6 +272,7 @@ async def test_get_entity_returns_view_when_row_present() -> None:
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
                 "name": "svc.auth",
                 "kind": "service",
                 "source_id": str(source_uuid),
@@ -309,6 +310,7 @@ async def test_find_related_passes_workspace_id_and_clamps_depth() -> None:
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),

@@ -142,6 +142,7 @@ class _BitemporalGraphStore:
                     valid_from,
                     valid_to,
                     EntityNodeView(
+                        id=uuid.uuid4(),
                         name=name,
                         kind=kind,
                         source=f"src-{name}-v{idx}",

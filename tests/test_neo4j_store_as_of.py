@@ -237,6 +237,8 @@ async def test_find_related_default_uses_latest_template() -> None:
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
+
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),
@@ -264,6 +266,8 @@ async def test_find_related_as_of_routes_to_bitemporal_template() -> None:
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
+
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),
@@ -300,6 +304,8 @@ async def test_traverse_passes_as_of_through_to_find_related() -> None:
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
+
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),
@@ -364,6 +370,7 @@ async def test_get_entity_view_populates_bitemporal_triple_when_present() -> Non
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
                 "name": "svc.auth",
                 "kind": "service",
                 "source_id": str(uuid.uuid4()),
@@ -390,6 +397,7 @@ async def test_get_entity_view_legacy_row_leaves_bitemporal_fields_none() -> Non
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
                 "name": "svc.legacy",
                 "kind": "service",
                 "source_id": str(uuid.uuid4()),
@@ -429,12 +437,15 @@ async def test_find_related_legacy_3_tuple_edges_still_parse() -> None:
     driver_mock._session_mock.execute_read = AsyncMock(
         return_value=[
             {
+                "id": str(uuid.uuid4()),
+
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(src),
                 "seed_chunk_text": None,
                 "neighbours": [
                     {
+                        "id": str(uuid.uuid4()),
                         "name": "svc.db",
                         "kind": "service",
                         "source_id": str(src),

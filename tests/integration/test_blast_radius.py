@@ -101,6 +101,7 @@ class _BlastGraphStore:
         recorded_at: datetime | None = None,
     ) -> None:
         self._entities[(workspace_id, name)] = EntityNodeView(
+            id=uuid.uuid4(),
             name=name,
             kind=kind,
             source="src-test",
@@ -197,6 +198,7 @@ class _BlastGraphStore:
                 continue
             related.append(
                 EntityNodeView(
+                    id=uuid.uuid4(),
                     name=base.name,
                     kind=base.kind,
                     source=base.source,

@@ -55,7 +55,10 @@ _DISSIMILAR_ID = "alert://datadog/past-099"
 
 _TARGET_SERVICE = "service://api"
 
-_NOW = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
+# Anchored to the wall clock: the production since_days window filters against
+# the real current time, so fixture offsets must be relative to *now* (a
+# hardcoded date drifts out of any narrow window once enough days pass).
+_NOW = datetime.now(UTC)
 
 # Recency: similar #1 fired 3 days ago, similar #2 fired 14 days ago,
 # dissimilar fired 1 day ago.  Recency alone would favour the
@@ -153,6 +156,7 @@ def _alert(
     summary: str,
 ) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=name,
         kind="alert",
         source="src-datadog",
@@ -165,6 +169,7 @@ def _alert(
 
 def _service(*, name: str, depth: int = 1) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=name,
         kind="service",
         source="src-datadog",
@@ -182,6 +187,7 @@ def _peer_alert(
     depth: int = 2,
 ) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=name,
         kind="alert",
         source="src-datadog",

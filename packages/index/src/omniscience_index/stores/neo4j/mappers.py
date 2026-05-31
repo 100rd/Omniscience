@@ -279,6 +279,7 @@ def _edge_tuple_to_view(triplet: list[Any]) -> GraphEdgeView:
 def _rows_to_graph_result(row: dict[str, Any]) -> GraphResultView:
     """Assemble a :class:`GraphResultView` from a single traversal row."""
     seed = EntityNodeView(
+        id=uuid.UUID(str(row["id"])),
         name=str(row["seed_name"]),
         kind=str(row["seed_kind"]),
         source=str(row["seed_source_id"]),

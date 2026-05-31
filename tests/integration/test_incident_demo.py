@@ -112,6 +112,7 @@ def _node_from_dict(payload: dict[str, Any]) -> EntityNodeView:
     Drops the ``_role`` annotation (fixture-only metadata for reviewers).
     """
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=payload["name"],
         kind=payload["kind"],
         source=payload["source"],

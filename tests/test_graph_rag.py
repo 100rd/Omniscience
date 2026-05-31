@@ -205,6 +205,7 @@ def _make_graph_result(
 ) -> GraphResultView:
     """Build a ``GraphResultView`` with given seed/related source ids."""
     seed = EntityNodeView(
+        id=uuid.uuid4(),
         name="seed-entity",
         kind="service",
         source=str(seed_source),
@@ -214,6 +215,7 @@ def _make_graph_result(
     )
     related_nodes = [
         EntityNodeView(
+            id=uuid.uuid4(),
             name=f"rel-{i}",
             kind="service",
             source=str(src),
