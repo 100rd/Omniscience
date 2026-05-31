@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
+from omniscience_server.rest.admin_session import router as admin_session_router
 from omniscience_server.rest.blast_radius import router as blast_radius_router
 from omniscience_server.rest.documents import router as documents_router
 from omniscience_server.rest.entities import router as entities_router
@@ -27,6 +28,7 @@ from omniscience_server.rest.workspace import router as workspace_router
 
 api_v1_router = APIRouter(prefix="/api/v1")
 
+api_v1_router.include_router(admin_session_router)
 api_v1_router.include_router(search_router)
 api_v1_router.include_router(sources_router)
 api_v1_router.include_router(workspace_router)
