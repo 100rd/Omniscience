@@ -39,6 +39,7 @@ Two layers
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from collections.abc import AsyncIterator
@@ -538,7 +539,7 @@ async def test_first_upsert_creates_one_entity_one_state_one_relation() -> None:
             "OPTIONAL MATCH (n)-[h:HAD_STATE]->(s:EntityState) "
             "RETURN count(DISTINCT n) AS n_count, count(DISTINCT s) AS s_count, "
             "       count(DISTINCT h) AS h_count, "
-            "       any(x IN collect(s.valid_to) WHERE x IS NULL) AS has_open",
+            "       any(x IN collect(s) WHERE x.valid_to IS NULL) AS has_open",
             {"ws": str(_WORKSPACE_A), "id": str(ent.id)},
         )
         assert int(row.get("n_count", 0)) == 1
@@ -625,7 +626,7 @@ async def test_changed_upsert_end_dates_previous_state_and_creates_new() -> None
             {"ws": str(_WORKSPACE_A), "id": str(ent_v1.id)},
         )
         assert mirror.get("vt") is None
-        assert dict(mirror.get("md") or {}).get("version") == "v2"
+        assert json.loads(mirror.get("md") or "{}").get("version") == "v2"
     finally:
         async for _ in gen:
             break
@@ -659,7 +660,7 @@ async def test_n_changes_produce_n_versions_one_open() -> None:
             store,
             "MATCH (n:Entity {workspace_id: $ws, id: $id})-[:HAD_STATE]->(s:EntityState) "
             "RETURN count(s) AS total, "
-            "       size([x IN collect(s.valid_to) WHERE x IS NULL]) AS open_count",
+            "       size([x IN collect(s) WHERE x.valid_to IS NULL]) AS open_count",
             {"ws": str(_WORKSPACE_A), "id": str(base.id)},
         )
         assert int(row.get("total", 0)) == n_changes
@@ -754,7 +755,7 @@ async def test_atomicity_on_simulated_mid_tx_failure_no_half_versioned_state() -
             await original_run_write(tx, cypher, params)
             raise RuntimeError("simulated_mid_tx_failure")
 
-        with patch("omniscience_index.stores.neo4j_store._run_write_stmt", _explode):
+        with patch("omniscience_index.stores.neo4j.store._run_write_stmt", _explode):
             ent_v2 = EntityUpsert(
                 id=ent_v1.id,
                 source_id=ent_v1.source_id,
@@ -774,14 +775,14 @@ async def test_atomicity_on_simulated_mid_tx_failure_no_half_versioned_state() -
             store,
             "MATCH (n:Entity {workspace_id: $ws, id: $id})-[:HAD_STATE]->(s:EntityState) "
             "RETURN count(s) AS s_count, n.metadata AS md, "
-            "       size([x IN collect(s.valid_to) WHERE x IS NULL]) AS open_count",
+            "       size([x IN collect(s) WHERE x.valid_to IS NULL]) AS open_count",
             {"ws": str(_WORKSPACE_A), "id": str(ent_v1.id)},
         )
         assert int(post.get("s_count", 0)) == 1, (
             "Mid-tx failure must roll back the versioning write — no half-versioned state visible."
         )
         assert int(post.get("open_count", -1)) == 1
-        assert dict(post.get("md") or {}).get("version") == "v1"
+        assert json.loads(post.get("md") or "{}").get("version") == "v1"
     finally:
         async for _ in gen:
             break
@@ -839,7 +840,7 @@ async def test_cross_workspace_isolation_versioned_writer() -> None:
             {"ws": str(_WORKSPACE_B), "id": str(b_ent.id)},
         )
         assert int(b_post.get("s_count", 0)) == 1
-        assert dict(b_post.get("md") or {}).get("v") == 1
+        assert json.loads(b_post.get("md") or "{}").get("v") == 1
 
         # Cross-workspace contract: no :EntityState row in B carries A's id.
         cross = await _query_one(
@@ -977,7 +978,7 @@ async def test_switching_from_disabled_to_enabled_begins_versioning() -> None:
                 store_on,
                 "MATCH (n:Entity {workspace_id: $ws, id: $id})-[:HAD_STATE]->(s:EntityState) "
                 "RETURN count(s) AS sc, "
-                "       size([x IN collect(s.valid_to) WHERE x IS NULL]) AS open_count",
+                "       size([x IN collect(s) WHERE x.valid_to IS NULL]) AS open_count",
                 {"ws": str(workspace_id), "id": str(ent_id)},
             )
             # Exactly one state row materialised by the first enabled write.

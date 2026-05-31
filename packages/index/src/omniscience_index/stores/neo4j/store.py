@@ -288,12 +288,19 @@ class Neo4jGraphStore:
                 {_WRITE_WORKSPACE_PARAM: str(workspace_id), "source_id": str(source_id)},
             )
         elif snapshot_at_iso is not None:
+            # Snapshot-replace: end-date only entities that are NOT in the
+            # incoming batch (i.e. genuinely removed).  Entities present in the
+            # batch are versioned by the per-entity upsert below, so excluding
+            # them here keeps a re-ingest of the same snapshot idempotent
+            # (otherwise they would be closed and never re-opened).
+            batch_entity_ids = [str(e.id) for e in entities]
             ed_result = await tx.run(
                 _END_DATE_BY_SOURCE_CYPHER,
                 {
                     _WRITE_WORKSPACE_PARAM: str(workspace_id),
                     "source_id": str(source_id),
                     "now": snapshot_at_iso,
+                    "batch_entity_ids": batch_entity_ids,
                 },
             )
             ed_record = await ed_result.single()

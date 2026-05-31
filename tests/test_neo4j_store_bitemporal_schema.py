@@ -275,9 +275,11 @@ async def test_connect_creates_all_adr_0008_constraints_and_indexes() -> None:
     """
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
-    with Neo4jContainer("neo4j:5.19-community").with_env(
-        "NEO4J_AUTH", "neo4j/contract_test_password"
-    ) as neo4j:
+    # Pass password through the constructor so _configure() sets NEO4J_AUTH
+    # correctly.  Using .with_env("NEO4J_AUTH", ...) here is silently
+    # overridden by the wrapper's own _configure step (the same trap
+    # documented in tests/integration/test_neo4j_bootstrap_schema.py).
+    with Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j:
         config = Neo4jStoreConfig(
             uri=neo4j.get_connection_url(),
             username="neo4j",
@@ -295,11 +297,11 @@ async def test_connect_creates_all_adr_0008_constraints_and_indexes() -> None:
             async with store._driver.session(database=config.database) as session:
                 cons_rows = [
                     record.data()
-                    async for record in await (await session.run("SHOW CONSTRAINTS YIELD name"))
+                    async for record in await session.run("SHOW CONSTRAINTS YIELD name")
                 ]
                 idx_rows = [
                     record.data()
-                    async for record in await (await session.run("SHOW INDEXES YIELD name"))
+                    async for record in await session.run("SHOW INDEXES YIELD name")
                 ]
         finally:
             await store.close()
@@ -329,9 +331,11 @@ async def test_bootstrap_is_fast_on_empty_container() -> None:
     """
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
-    with Neo4jContainer("neo4j:5.19-community").with_env(
-        "NEO4J_AUTH", "neo4j/contract_test_password"
-    ) as neo4j:
+    # Pass password through the constructor so _configure() sets NEO4J_AUTH
+    # correctly.  Using .with_env("NEO4J_AUTH", ...) here is silently
+    # overridden by the wrapper's own _configure step (the same trap
+    # documented in tests/integration/test_neo4j_bootstrap_schema.py).
+    with Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j:
         config = Neo4jStoreConfig(
             uri=neo4j.get_connection_url(),
             username="neo4j",
