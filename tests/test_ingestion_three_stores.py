@@ -3,13 +3,22 @@
 Coverage map (per the issue's acceptance criteria):
 
 * Pipeline-side three-store fan-out
-    - ``upsert_document`` (Postgres) called with the placeholder chunks.
-    - ``upsert_chunks`` (Qdrant) called with workspace_id in metadata,
+    - ``upsert_document`` (Postgres + Qdrant) called with workspace_id,
       chunk lineage fields populated, embedding present.
     - ``upsert_graph`` (Neo4j) called with workspace_id stamped on
       every entity's metadata.
-    - Call order: Postgres -> Qdrant -> Neo4j (matches the
-      pipeline's documented sequence in the module docstring).
+    - Call order: ``upsert_document`` before ``upsert_graph`` — this is
+      the observable pipeline ordering (the IndexWriter fans out
+      Postgres→Qdrant inside ``upsert_document``; Neo4j is reached via
+      the separate ``upsert_graph`` call that follows).
+
+    NOTE: Qdrant fan-out (``vector_store.upsert_chunks``) and Neo4j fan-out
+    (``graph_store.upsert_graph``) are now internal to the concrete
+    ``IndexWriter`` (packages/index/writer.py), not directly observable at
+    the pipeline layer.  The pipeline tests therefore assert against the
+    orchestrated ``index_writer`` calls (``upsert_document`` and
+    ``upsert_graph``).  Coverage of the concrete IndexWriter's fan-out lives
+    in ``tests/test_index_writer.py``.
 
 * ACL invariant
     - Tenant-less source: worker returns ``action="error"`` with a
@@ -20,13 +29,36 @@ Coverage map (per the issue's acceptance criteria):
       failure; pipeline returns ``action="error"``.
 
 * Partial-failure semantics
-    - Postgres OK + Qdrant raises -> action="error".
-    - Postgres OK + Qdrant OK + Neo4j raises -> action="error".
+    - ``upsert_document`` raises (covers Postgres/Qdrant failure) -> action="error".
+    - ``upsert_document`` OK + ``upsert_graph`` raises -> action="error".
 
 All tests run with in-memory mocks of the protocols; no real Neo4j /
 Qdrant / Postgres is started.  The opt-in integration test lives in
 ``test_ingestion_e2e.py`` and is gated on
 ``OMNISCIENCE_RUN_E2E_INGESTION=1``.
+
+Assertions retargeted from previous store-level mocks
+------------------------------------------------------
+Previously ``test_qdrant_receives_workspace_id_in_metadata`` asserted on
+``vector_store.upsert_chunks(..., metadata={"workspace_id": ...})``.  That
+call is now internal to ``IndexWriter.upsert_document``; the equivalent
+pipeline-layer assertion is that ``index_writer.upsert_document`` receives
+``workspace_id=<target>``.
+
+``test_neo4j_entities_tagged_with_workspace_id`` previously asserted on
+``graph_store.upsert_graph(entities=[...with workspace_id...])``; now
+asserts on ``index_writer.upsert_graph`` receiving those entities
+(the tagging happens in IndexWriter.upsert_graph before the Neo4j call).
+
+``test_call_order_postgres_then_vector_then_graph``: the strict
+Postgres→Qdrant→Neo4j ordering is now partially internal to
+``IndexWriter.upsert_document`` (Postgres first, then Qdrant inside it).
+The pipeline-observable order is ``upsert_document`` then ``upsert_graph``.
+Full three-way ordering coverage lives in ``tests/test_index_writer.py``.
+
+``test_deleted_action_calls_qdrant_delete``: Qdrant delete is internal to
+``IndexWriter.tombstone``. The pipeline-layer assertion is that
+``index_writer.tombstone`` is called with the correct ``workspace_id``.
 """
 
 from __future__ import annotations
@@ -38,7 +70,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 from omniscience_index.workspace import MissingWorkspaceError
 from omniscience_server.ingestion.events import DocumentChangeEvent
-from omniscience_server.ingestion.pipeline import IngestionPipeline
+from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.worker import IngestionWorker
 
 # ---------------------------------------------------------------------------
@@ -86,32 +118,21 @@ def _make_embedding_provider(
 
 
 def _make_index_writer(action: str = "created") -> MagicMock:
+    """Return a mock IndexWriter satisfying IndexWriterProtocol.
+
+    ``upsert_document`` covers the Postgres + Qdrant fan-out path.
+    ``upsert_graph`` covers the Neo4j path.
+    Both are stubbed so individual tests can assert on either.
+    """
     result = MagicMock()
     result.action = action
     result.chunks_written = 1
     result.document_id = uuid.uuid4()
-    writer = MagicMock()
+    writer = MagicMock(spec=IndexWriterProtocol)
     writer.upsert_document = AsyncMock(return_value=result)
+    writer.upsert_graph = AsyncMock(return_value=None)
     writer.tombstone = AsyncMock(return_value=True)
     return writer
-
-
-def _make_graph_store() -> MagicMock:
-    store = MagicMock()
-    store.upsert_graph = AsyncMock(return_value=None)
-    return store
-
-
-def _make_vector_store() -> MagicMock:
-    outcome = MagicMock()
-    outcome.action = "created"
-    outcome.chunks_written = 1
-    outcome.document_id = uuid.uuid4()
-    outcome.doc_version = 1
-    store = MagicMock()
-    store.upsert_chunks = AsyncMock(return_value=outcome)
-    store.delete_by_document = AsyncMock(return_value=True)
-    return store
 
 
 def _make_pipeline(
@@ -119,16 +140,18 @@ def _make_pipeline(
     connector: MagicMock | None = None,
     embedding_provider: MagicMock | None = None,
     index_writer: MagicMock | None = None,
-    graph_store: MagicMock | None = None,
-    vector_store: MagicMock | None = None,
     graph_extractor: Any | None = None,
 ) -> IngestionPipeline:
+    """Build a pipeline with the orchestrated index_writer API.
+
+    graph_store and vector_store are NOT passed here: they are internal
+    to the concrete IndexWriter and are not part of IngestionPipeline's
+    public interface.
+    """
     return IngestionPipeline(
         connector=connector or _make_connector(),
         embedding_provider=embedding_provider or _make_embedding_provider(),
         index_writer=index_writer or _make_index_writer(),
-        graph_store=graph_store or _make_graph_store(),
-        vector_store=vector_store or _make_vector_store(),
         graph_extractor=graph_extractor,
     )
 
@@ -167,10 +190,13 @@ _WORKSPACE_A: uuid.UUID = uuid.uuid4()
 class TestPipelineThreeStoreFanOut:
     @pytest.mark.asyncio
     async def test_postgres_qdrant_neo4j_all_called(self) -> None:
-        """The pipeline writes Postgres + Qdrant + Neo4j when entities exist."""
+        """The pipeline calls upsert_document (Postgres+Qdrant) and
+        upsert_graph (Neo4j) when entities exist.
+
+        Previously this asserted on three separate store mocks.  Under the
+        orchestrated design both calls go through index_writer.
+        """
         index_writer = _make_index_writer()
-        graph_store = _make_graph_store()
-        vector_store = _make_vector_store()
 
         # Stub graph extractor so _stage_graph reaches the adapter call.
         def _extractor(parsed: Any, src_bytes: bytes) -> tuple[list[Any], list[Any]]:
@@ -189,8 +215,6 @@ class TestPipelineThreeStoreFanOut:
 
             pipeline = _make_pipeline(
                 index_writer=index_writer,
-                graph_store=graph_store,
-                vector_store=vector_store,
                 graph_extractor=_extractor,
             )
             event = _make_event()
@@ -202,59 +226,80 @@ class TestPipelineThreeStoreFanOut:
             )
 
         assert result.action == "created"
+        # Postgres+Qdrant fan-out via upsert_document
         index_writer.upsert_document.assert_awaited_once()
-        vector_store.upsert_chunks.assert_awaited_once()
-        graph_store.upsert_graph.assert_awaited_once()
+        # Neo4j fan-out via upsert_graph
+        index_writer.upsert_graph.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_qdrant_receives_workspace_id_in_metadata(self) -> None:
-        """Qdrant upsert metadata always carries ``workspace_id`` (ADR-0006 §ACL)."""
-        vector_store = _make_vector_store()
-        pipeline = _make_pipeline(vector_store=vector_store)
+        """upsert_document is called with workspace_id (ADR-0006 §ACL).
+
+        Previously asserted on vector_store.upsert_chunks metadata.  The
+        orchestrated IndexWriter carries workspace_id into Qdrant internally;
+        the pipeline-layer guarantee is that upsert_document receives the
+        correct workspace_id kwarg.
+        """
+        index_writer = _make_index_writer()
+        pipeline = _make_pipeline(index_writer=index_writer)
         event = _make_event()
         await pipeline.run(event=event, config=None, secrets={}, workspace_id=_WORKSPACE_A)
 
-        kwargs = vector_store.upsert_chunks.call_args.kwargs
-        assert kwargs["metadata"]["workspace_id"] == str(_WORKSPACE_A)
+        kwargs = index_writer.upsert_document.call_args.kwargs
+        assert kwargs["workspace_id"] == _WORKSPACE_A
         assert kwargs["source_id"] == event.source_id
         assert kwargs["external_id"] == event.external_id
 
     @pytest.mark.asyncio
     async def test_qdrant_payload_contains_lineage_and_embedding(self) -> None:
-        """ChunkPayload carries the embedding + ADR-0006 lineage fields."""
-        vector_store = _make_vector_store()
+        """Chunks passed to upsert_document carry embedding + ADR-0006 lineage fields.
+
+        Previously asserted on vector_store.upsert_chunks(..., chunks=[...]).
+        Now asserts on the chunks list passed to index_writer.upsert_document.
+        """
+        index_writer = _make_index_writer()
         provider = _make_embedding_provider(vectors=[[0.5, 0.6, 0.7, 0.8]])
-        pipeline = _make_pipeline(vector_store=vector_store, embedding_provider=provider)
+        pipeline = _make_pipeline(index_writer=index_writer, embedding_provider=provider)
         await pipeline.run(event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A)
 
-        kwargs = vector_store.upsert_chunks.call_args.kwargs
+        kwargs = index_writer.upsert_document.call_args.kwargs
         chunks = kwargs["chunks"]
         assert len(chunks) == 1
         chunk = chunks[0]
-        assert chunk["embedding"] == [0.5, 0.6, 0.7, 0.8]
-        assert chunk["embedding_model"] == "test-model"
-        assert chunk["embedding_provider"] == "test-provider"
-        assert chunk["parser_version"] == "placeholder-v0"
-        assert chunk["chunker_strategy"] == "full-content-v0"
-        assert chunk["ord"] == 0
-        assert "text" in chunk
+        assert chunk.embedding == [0.5, 0.6, 0.7, 0.8]
+        assert chunk.embedding_model == "test-model"
+        assert chunk.embedding_provider == "test-provider"
+        assert chunk.parser_version == "placeholder-v0"
+        assert chunk.chunker_strategy == "full-content-v0"
+        assert chunk.ord == 0
+        assert hasattr(chunk, "text")
 
     @pytest.mark.asyncio
     async def test_qdrant_metadata_includes_content_hash_arg(self) -> None:
-        """``content_hash`` keyword arg passed to Qdrant matches the Postgres hash."""
-        vector_store = _make_vector_store()
+        """content_hash kwarg passed to upsert_document is consistent.
+
+        Previously compared vector_store and index_writer content_hash kwargs.
+        Both are now part of the same upsert_document call.
+        """
         index_writer = _make_index_writer()
-        pipeline = _make_pipeline(vector_store=vector_store, index_writer=index_writer)
+        pipeline = _make_pipeline(index_writer=index_writer)
         await pipeline.run(event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A)
 
-        qdrant_kwargs = vector_store.upsert_chunks.call_args.kwargs
         pg_kwargs = index_writer.upsert_document.call_args.kwargs
-        assert qdrant_kwargs["content_hash"] == pg_kwargs["content_hash"]
+        # content_hash must be a non-empty hex string
+        assert pg_kwargs["content_hash"]
+        assert len(pg_kwargs["content_hash"]) == 64  # SHA-256 hex
 
     @pytest.mark.asyncio
     async def test_neo4j_entities_tagged_with_workspace_id(self) -> None:
-        """Every entity passed to ``upsert_graph`` carries ``workspace_id``."""
-        graph_store = _make_graph_store()
+        """Every entity passed to upsert_graph carries workspace_id (ACL tag).
+
+        Previously asserted on graph_store.upsert_graph entities kwarg.
+        Now asserts on index_writer.upsert_graph which is what the pipeline
+        calls after extraction.  The concrete IndexWriter then stamps
+        workspace_id on entities before forwarding to Neo4j.
+        """
+        index_writer = _make_index_writer()
 
         def _extractor(parsed: Any, src_bytes: bytes) -> tuple[list[Any], list[Any]]:
             entities = []
@@ -271,46 +316,43 @@ class TestPipelineThreeStoreFanOut:
             parser.parse = MagicMock(return_value=MagicMock())
             parser_cls.return_value = parser
 
-            pipeline = _make_pipeline(graph_store=graph_store, graph_extractor=_extractor)
+            pipeline = _make_pipeline(index_writer=index_writer, graph_extractor=_extractor)
             await pipeline.run(
                 event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A
             )
 
-        kwargs = graph_store.upsert_graph.call_args.kwargs
-        for ent in kwargs["entities"]:
-            assert ent.metadata["workspace_id"] == str(_WORKSPACE_A)
+        kwargs = index_writer.upsert_graph.call_args.kwargs
+        # workspace_id must be passed through to upsert_graph for the
+        # IndexWriter to tag entities before forwarding to Neo4j.
+        assert kwargs["workspace_id"] == _WORKSPACE_A
+        assert len(kwargs["entities"]) == 3
 
     @pytest.mark.asyncio
-    async def test_call_order_postgres_then_vector_then_graph(self) -> None:
-        """Pipeline calls Postgres before Qdrant before Neo4j."""
+    async def test_call_order_upsert_document_then_upsert_graph(self) -> None:
+        """Pipeline calls upsert_document before upsert_graph.
+
+        Previously verified three discrete calls (postgres/qdrant/neo4j).
+        Under the orchestrated design: upsert_document (Postgres+Qdrant
+        fan-out, managed by IndexWriter) runs before upsert_graph (Neo4j
+        fan-out).  Full three-way Postgres→Qdrant→Neo4j ordering is tested
+        in tests/test_index_writer.py at the IndexWriter layer.
+        """
         order: list[str] = []
         index_writer = _make_index_writer()
-        graph_store = _make_graph_store()
-        vector_store = _make_vector_store()
 
-        async def _pg_call(**kwargs: Any) -> Any:
-            order.append("postgres")
+        async def _pg_qdrant_call(**kwargs: Any) -> Any:
+            order.append("upsert_document")
             r = MagicMock()
             r.action = "created"
             r.document_id = uuid.uuid4()
             r.chunks_written = 1
             return r
 
-        async def _qdrant_call(**kwargs: Any) -> Any:
-            order.append("qdrant")
-            o = MagicMock()
-            o.action = "created"
-            o.chunks_written = 1
-            o.document_id = uuid.uuid4()
-            o.doc_version = 1
-            return o
-
         async def _neo4j_call(**kwargs: Any) -> None:
-            order.append("neo4j")
+            order.append("upsert_graph")
 
-        index_writer.upsert_document = AsyncMock(side_effect=_pg_call)
-        vector_store.upsert_chunks = AsyncMock(side_effect=_qdrant_call)
-        graph_store.upsert_graph = AsyncMock(side_effect=_neo4j_call)
+        index_writer.upsert_document = AsyncMock(side_effect=_pg_qdrant_call)
+        index_writer.upsert_graph = AsyncMock(side_effect=_neo4j_call)
 
         def _extractor(parsed: Any, src_bytes: bytes) -> tuple[list[Any], list[Any]]:
             e = MagicMock()
@@ -326,15 +368,13 @@ class TestPipelineThreeStoreFanOut:
 
             pipeline = _make_pipeline(
                 index_writer=index_writer,
-                graph_store=graph_store,
-                vector_store=vector_store,
                 graph_extractor=_extractor,
             )
             await pipeline.run(
                 event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A
             )
 
-        assert order == ["postgres", "qdrant", "neo4j"]
+        assert order == ["upsert_document", "upsert_graph"]
 
 
 # ---------------------------------------------------------------------------
@@ -347,13 +387,11 @@ class TestWorkerWorkspaceResolution:
         self,
         *,
         source: Any,
-    ) -> tuple[IngestionWorker, MagicMock, MagicMock, MagicMock]:
+    ) -> tuple[IngestionWorker, MagicMock]:
         from omniscience_connectors.registry import ConnectorRegistry
 
         registry: ConnectorRegistry = MagicMock(spec=ConnectorRegistry)
         registry.get = MagicMock(return_value=_make_connector())
-        graph_store = _make_graph_store()
-        vector_store = _make_vector_store()
         index_writer = _make_index_writer()
 
         worker = IngestionWorker(
@@ -361,17 +399,15 @@ class TestWorkerWorkspaceResolution:
             connector_registry=registry,
             embedding_provider=_make_embedding_provider(),
             index_writer=index_writer,
-            graph_store=graph_store,
-            vector_store=vector_store,
             session_factory=_make_session_factory(source),
         )
-        return worker, graph_store, vector_store, index_writer
+        return worker, index_writer
 
     @pytest.mark.asyncio
     async def test_tenant_less_source_returns_error_result(self) -> None:
         """A source with ``tenant_id is None`` must produce ``action='error'``."""
         source = _make_source(tenant_id=None)
-        worker, graph_store, vector_store, index_writer = self._build_worker(source=source)
+        worker, index_writer = self._build_worker(source=source)
 
         result = await worker.process_document(_make_event())
 
@@ -379,33 +415,31 @@ class TestWorkerWorkspaceResolution:
         assert result.error is not None
         assert "tenant_id" in result.error
         # No adapter should have been touched — fail closed BEFORE any I/O.
-        graph_store.upsert_graph.assert_not_awaited()
-        vector_store.upsert_chunks.assert_not_awaited()
         index_writer.upsert_document.assert_not_awaited()
+        index_writer.upsert_graph.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_missing_source_row_returns_error_result(self) -> None:
         """A source row that no longer exists must be treated as missing workspace."""
-        worker, graph_store, vector_store, index_writer = self._build_worker(source=None)
+        worker, index_writer = self._build_worker(source=None)
 
         result = await worker.process_document(_make_event())
 
         assert result.action == "error"
-        graph_store.upsert_graph.assert_not_awaited()
-        vector_store.upsert_chunks.assert_not_awaited()
         index_writer.upsert_document.assert_not_awaited()
+        index_writer.upsert_graph.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_resolve_workspace_propagates_tenant_id(self) -> None:
         """The resolved workspace_id is exactly ``Source.tenant_id``."""
         target = uuid.uuid4()
         source = _make_source(tenant_id=target)
-        worker, _graph, vector_store, _ = self._build_worker(source=source)
+        worker, index_writer = self._build_worker(source=source)
 
         await worker.process_document(_make_event())
 
-        kwargs = vector_store.upsert_chunks.call_args.kwargs
-        assert kwargs["metadata"]["workspace_id"] == str(target)
+        kwargs = index_writer.upsert_document.call_args.kwargs
+        assert kwargs["workspace_id"] == target
 
     @pytest.mark.asyncio
     async def test_resolve_workspace_raises_on_missing_workspace(self) -> None:
@@ -415,7 +449,7 @@ class TestWorkerWorkspaceResolution:
         process_document call wraps it in an error result.
         """
         source = _make_source(tenant_id=None)
-        worker, _, _, _ = self._build_worker(source=source)
+        worker, _ = self._build_worker(source=source)
 
         with pytest.raises(MissingWorkspaceError):
             await worker._resolve_workspace(uuid.uuid4())
@@ -429,15 +463,20 @@ class TestWorkerWorkspaceResolution:
 class TestAdapterAclRejection:
     @pytest.mark.asyncio
     async def test_qdrant_missing_workspace_propagates(self) -> None:
-        """Qdrant's ValueError on missing workspace_id surfaces as action='error'."""
-        vector_store = _make_vector_store()
-        vector_store.upsert_chunks = AsyncMock(
+        """index_writer.upsert_document raising on missing workspace_id surfaces as action='error'.
+
+        Previously this raised inside vector_store.upsert_chunks.  Now the
+        same error propagates via index_writer.upsert_document (which is
+        where the Qdrant call lives in the concrete IndexWriter).
+        """
+        index_writer = _make_index_writer()
+        index_writer.upsert_document = AsyncMock(
             side_effect=ValueError(
                 "QdrantVectorStore upsert rejected: metadata['workspace_id'] "
                 "is required and must be a non-null UUID (ADR-0006 §ACL)."
             )
         )
-        pipeline = _make_pipeline(vector_store=vector_store)
+        pipeline = _make_pipeline(index_writer=index_writer)
         result = await pipeline.run(
             event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A
         )
@@ -446,9 +485,13 @@ class TestAdapterAclRejection:
 
     @pytest.mark.asyncio
     async def test_neo4j_missing_workspace_propagates(self) -> None:
-        """Neo4j's ValueError on missing workspace_id surfaces as action='error'."""
-        graph_store = _make_graph_store()
-        graph_store.upsert_graph = AsyncMock(
+        """index_writer.upsert_graph raising on missing workspace_id surfaces as action='error'.
+
+        Previously raised inside graph_store.upsert_graph directly.  Now
+        the same error propagates via index_writer.upsert_graph.
+        """
+        index_writer = _make_index_writer()
+        index_writer.upsert_graph = AsyncMock(
             side_effect=ValueError("upsert_graph_missing_workspace_id")
         )
 
@@ -464,7 +507,7 @@ class TestAdapterAclRejection:
             parser.parse = MagicMock(return_value=MagicMock())
             parser_cls.return_value = parser
 
-            pipeline = _make_pipeline(graph_store=graph_store, graph_extractor=_extractor)
+            pipeline = _make_pipeline(index_writer=index_writer, graph_extractor=_extractor)
             result = await pipeline.run(
                 event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A
             )
@@ -480,32 +523,29 @@ class TestAdapterAclRejection:
 
 class TestPartialFailureSemantics:
     @pytest.mark.asyncio
-    async def test_postgres_ok_qdrant_fails_returns_error(self) -> None:
-        """Postgres write succeeds; Qdrant raises -> pipeline returns 'error'.
+    async def test_upsert_document_fails_returns_error(self) -> None:
+        """index_writer.upsert_document raises -> pipeline returns 'error'.
 
-        Re-delivery is safe because both writers are idempotent: Postgres
-        dedups by content_hash, Qdrant does the same in its adapter.
+        This covers the Postgres or Qdrant failure path (both are inside
+        upsert_document in the concrete IndexWriter).  Re-delivery is safe
+        because both writers are idempotent.
         """
         index_writer = _make_index_writer()
-        vector_store = _make_vector_store()
-        vector_store.upsert_chunks = AsyncMock(side_effect=RuntimeError("qdrant down"))
+        index_writer.upsert_document = AsyncMock(side_effect=RuntimeError("index down"))
 
-        pipeline = _make_pipeline(index_writer=index_writer, vector_store=vector_store)
+        pipeline = _make_pipeline(index_writer=index_writer)
         result = await pipeline.run(
             event=_make_event(), config=None, secrets={}, workspace_id=_WORKSPACE_A
         )
 
         assert result.action == "error"
-        index_writer.upsert_document.assert_awaited_once()  # Postgres was hit
-        vector_store.upsert_chunks.assert_awaited_once()  # Qdrant was attempted
+        index_writer.upsert_document.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_postgres_ok_qdrant_ok_neo4j_fails_returns_error(self) -> None:
-        """Two writes succeed; Neo4j fails -> pipeline returns 'error'."""
+    async def test_upsert_document_ok_upsert_graph_fails_returns_error(self) -> None:
+        """upsert_document succeeds; upsert_graph (Neo4j) fails -> pipeline returns 'error'."""
         index_writer = _make_index_writer()
-        vector_store = _make_vector_store()
-        graph_store = _make_graph_store()
-        graph_store.upsert_graph = AsyncMock(side_effect=RuntimeError("neo4j down"))
+        index_writer.upsert_graph = AsyncMock(side_effect=RuntimeError("neo4j down"))
 
         def _extractor(parsed: Any, src_bytes: bytes) -> tuple[list[Any], list[Any]]:
             e = MagicMock()
@@ -521,8 +561,6 @@ class TestPartialFailureSemantics:
 
             pipeline = _make_pipeline(
                 index_writer=index_writer,
-                vector_store=vector_store,
-                graph_store=graph_store,
                 graph_extractor=_extractor,
             )
             result = await pipeline.run(
@@ -531,14 +569,12 @@ class TestPartialFailureSemantics:
 
         assert result.action == "error"
         index_writer.upsert_document.assert_awaited_once()
-        vector_store.upsert_chunks.assert_awaited_once()
-        graph_store.upsert_graph.assert_awaited_once()
+        index_writer.upsert_graph.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_parser_failure_does_not_abort_ingestion(self) -> None:
-        """Parser/extractor errors stay best-effort — Postgres + Qdrant still succeed."""
+        """Parser/extractor errors stay best-effort — upsert_document still succeeds."""
         index_writer = _make_index_writer()
-        vector_store = _make_vector_store()
 
         def _broken_extractor(parsed: Any, src_bytes: bytes) -> tuple[list[Any], list[Any]]:
             raise RuntimeError("extractor blew up")
@@ -551,7 +587,6 @@ class TestPartialFailureSemantics:
 
             pipeline = _make_pipeline(
                 index_writer=index_writer,
-                vector_store=vector_store,
                 graph_extractor=_broken_extractor,
             )
             result = await pipeline.run(
@@ -560,7 +595,8 @@ class TestPartialFailureSemantics:
 
         assert result.action == "created"
         index_writer.upsert_document.assert_awaited_once()
-        vector_store.upsert_chunks.assert_awaited_once()
+        # upsert_graph must NOT have been called (extractor blew up before entities)
+        index_writer.upsert_graph.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -597,8 +633,6 @@ class TestWorkerNakOnResolutionFailure:
             connector_registry=registry,
             embedding_provider=_make_embedding_provider(),
             index_writer=_make_index_writer(),
-            graph_store=_make_graph_store(),
-            vector_store=_make_vector_store(),
             session_factory=_make_session_factory(source),
         )
 
@@ -614,27 +648,31 @@ class TestWorkerNakOnResolutionFailure:
 
 
 # ---------------------------------------------------------------------------
-# Deletion path also targets Qdrant
+# Deletion path — tombstone carries workspace_id through index_writer
 # ---------------------------------------------------------------------------
 
 
 class TestDeletePath:
     @pytest.mark.asyncio
-    async def test_deleted_action_calls_qdrant_delete(self) -> None:
-        """A 'deleted' event tombstones in Postgres AND Qdrant."""
+    async def test_deleted_action_calls_tombstone_with_workspace_id(self) -> None:
+        """A 'deleted' event calls index_writer.tombstone with the correct workspace_id.
+
+        Previously asserted on vector_store.delete_by_document.  The Qdrant
+        deletion is now internal to IndexWriter.tombstone; the pipeline-layer
+        guarantee is that index_writer.tombstone receives the correct
+        workspace_id so the IndexWriter can propagate it to Qdrant.
+        """
         index_writer = _make_index_writer()
-        vector_store = _make_vector_store()
-        pipeline = _make_pipeline(index_writer=index_writer, vector_store=vector_store)
+        pipeline = _make_pipeline(index_writer=index_writer)
 
         event = _make_event(action="deleted")
         result = await pipeline.run(
             event=event, config=None, secrets={}, workspace_id=_WORKSPACE_A
         )
         assert result.action == "deleted"
-        index_writer.tombstone.assert_awaited_once_with(event.source_id, event.external_id)
-        vector_store.delete_by_document.assert_awaited_once()
-        kwargs = vector_store.delete_by_document.call_args.kwargs
-        assert kwargs["workspace_id"] == _WORKSPACE_A
+        index_writer.tombstone.assert_awaited_once_with(
+            event.source_id, event.external_id, workspace_id=_WORKSPACE_A
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -658,8 +696,6 @@ async def test_worker_passes_workspace_to_pipeline_run() -> None:
         connector_registry=registry,
         embedding_provider=_make_embedding_provider(),
         index_writer=_make_index_writer(),
-        graph_store=_make_graph_store(),
-        vector_store=_make_vector_store(),
         session_factory=_make_session_factory(source),
     )
 
@@ -708,8 +744,6 @@ async def test_workspace_resolved_exactly_once_per_document() -> None:
         connector_registry=registry,
         embedding_provider=_make_embedding_provider(),
         index_writer=_make_index_writer(),
-        graph_store=_make_graph_store(),
-        vector_store=_make_vector_store(),
         session_factory=factory,
     )
 

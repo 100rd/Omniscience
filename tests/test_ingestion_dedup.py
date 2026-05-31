@@ -835,8 +835,6 @@ class TestWorkerIntegration:
             connector_registry=registry,
             embedding_provider=embed,
             index_writer=writer,
-            graph_store=graph,
-            vector_store=vector,
             session_factory=sess_factory,
             secrets_resolver=None,
             dedup_gate=gate,
