@@ -533,7 +533,11 @@ def _neo4j_container() -> Any:  # type: ignore[no-untyped-def]
         pytest.skip("contract tests disabled")
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
-    container = Neo4jContainer("neo4j:5.20").with_env("NEO4J_AUTH", "neo4j/testtest1")
+    # Pass password through the constructor so _configure() sets NEO4J_AUTH
+    # correctly.  Using .with_env("NEO4J_AUTH", ...) here is silently
+    # overridden by the wrapper's own _configure step (the same trap
+    # documented in tests/integration/test_neo4j_bootstrap_schema.py).
+    container = Neo4jContainer("neo4j:5.20", password="testtest1")
     container.start()
     try:
         yield container.get_connection_url()
