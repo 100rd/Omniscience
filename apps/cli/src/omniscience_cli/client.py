@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import os
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
 DEFAULT_URL = "http://localhost:8000"
 ENV_URL = "OMNISCIENCE_URL"
 ENV_TOKEN = "OMNISCIENCE_TOKEN"  # noqa: S105 — env var name, not a credential
+
+
+def _json(r: httpx.Response) -> dict[str, Any]:
+    """Cast the untyped httpx ``Response.json()`` return to a typed dict."""
+    return cast("dict[str, Any]", r.json())
 
 
 class OmniscienceClientError(Exception):
@@ -63,7 +68,7 @@ class OmniscienceClient:
     def health(self) -> dict[str, Any]:
         resp = self._client.get("/health")
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     # ------------------------------------------------------------------
     # Search
@@ -87,7 +92,7 @@ class OmniscienceClient:
             payload["filters"] = filters
         resp = self._client.post("/api/v1/search", json=payload)
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     # ------------------------------------------------------------------
     # Sources
@@ -106,17 +111,17 @@ class OmniscienceClient:
             params["status"] = status
         resp = self._client.get("/api/v1/sources", params=params)
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def create_source(self, body: dict[str, Any]) -> dict[str, Any]:
         resp = self._client.post("/api/v1/sources", json=body)
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def get_source(self, source_id: str) -> dict[str, Any]:
         resp = self._client.get(f"/api/v1/sources/{source_id}")
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def delete_source(self, source_id: str) -> None:
         resp = self._client.delete(f"/api/v1/sources/{source_id}")
@@ -125,17 +130,17 @@ class OmniscienceClient:
     def validate_source(self, source_id: str) -> dict[str, Any]:
         resp = self._client.get(f"/api/v1/sources/{source_id}/stats")
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def sync_source(self, source_id: str) -> dict[str, Any]:
         resp = self._client.post(f"/api/v1/sources/{source_id}/sync")
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def get_ingestion_run(self, run_id: str) -> dict[str, Any]:
         resp = self._client.get(f"/api/v1/ingestion-runs/{run_id}")
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     # ------------------------------------------------------------------
     # Tokens
@@ -144,7 +149,7 @@ class OmniscienceClient:
     def list_tokens(self) -> dict[str, Any]:
         resp = self._client.get("/api/v1/tokens")
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def create_token(self, name: str, scopes: list[str]) -> dict[str, Any]:
         resp = self._client.post(
@@ -152,7 +157,7 @@ class OmniscienceClient:
             json={"name": name, "scopes": scopes},
         )
         _raise_for_error(resp)
-        return resp.json()  # type: ignore[no-any-return]
+        return _json(resp)
 
     def revoke_token(self, token_id: str) -> None:
         resp = self._client.delete(f"/api/v1/tokens/{token_id}")

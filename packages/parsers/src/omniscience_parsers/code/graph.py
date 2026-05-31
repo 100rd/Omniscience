@@ -1,7 +1,10 @@
 """Symbol graph extractor (v0.3 Cross-File Resolution).
 
-Transforms a ParsedDocument into entities and edges.
-Now supports basic import-tracking to resolve cross-file calls.
+Transforms a ParsedDocument into entities and edges, with import-tracking to
+resolve cross-file calls and class-inheritance edges.
+
+Supported language: Python (``parsed.language == "python"``). Other languages
+return empty lists so the ingestion pipeline degrades gracefully.
 """
 
 from __future__ import annotations
@@ -11,7 +14,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any
 
-from omniscience_parsers.base import ParsedDocument, Section
+from omniscience_parsers.base import ParsedDocument
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -37,44 +40,68 @@ class ExtractedEdge:
 # Python Logic (AST-aware heuristics)
 # ---------------------------------------------------------------------------
 
+# Compiled patterns for Python import extraction
+_PY_IMPORT_RE = re.compile(r"^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?", re.MULTILINE)
+_PY_FROM_RE = re.compile(
+    r"^\s*from\s+([\w.]+)\s+import\s+([\w*]+)(?:\s+as\s+(\w+))?",
+    re.MULTILINE,
+)
+# `class Name(Base, Mixin, ...)` — captures the base-class list for inheritance.
+_CLASS_DEF_RE = re.compile(r"class\s+\w+\s*\(([^)]*)\)")
+
+
+def _parse_base_classes(text: str) -> list[str]:
+    """Extract base-class names from a class definition's source text."""
+    m = _CLASS_DEF_RE.search(text)
+    if not m:
+        return []
+    bases: list[str] = []
+    for raw in m.group(1).split(","):
+        base = raw.strip()
+        # skip empties, keyword args (metaclass=…), and the implicit `object` base
+        if not base or "=" in base or base == "object":
+            continue
+        bases.append(base)
+    return bases
+
+
 def _extract_python(
     parsed: ParsedDocument,
     source_text: bytes,
 ) -> tuple[list[ExtractedEntity], list[ExtractedEdge]]:
     entities: list[ExtractedEntity] = []
     edges: list[ExtractedEdge] = []
-    
+
     full_text = source_text.decode(errors="replace") if source_text else ""
     module_name = parsed.sections[0].heading_path[0] if parsed.sections else "unknown"
     module_id = uuid.uuid4()
-    
+
     entities.append(ExtractedEntity(module_id, "module", module_name, module_name, module_name))
 
     # 1. Build Import Map (alias -> FQN)
     import_map: dict[str, str] = {}
     # import X as Y
-    for m in re.finditer(r"^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?", full_text, re.MULTILINE):
+    for m in _PY_IMPORT_RE.finditer(full_text):
         fqn = m.group(1)
         alias = m.group(2) or fqn.split(".")[-1]
         import_map[alias] = fqn
         edges.append(ExtractedEdge(module_id, fqn, "imports"))
 
-    # from X import Y as Z
-    for m in re.finditer(r"^\s*from\s+([\w.]+)\s+import\s+([\w*]+)(?:\s+as\s+(\w+))?", full_text, re.MULTILINE):
+    # from X import Y as Z — the import edge targets the module (base_fqn);
+    # the alias map still records the full symbol path for call resolution.
+    for m in _PY_FROM_RE.finditer(full_text):
         base_fqn = m.group(1)
         symbol = m.group(2)
         alias = m.group(3) or symbol
         if symbol != "*":
-            fqn = f"{base_fqn}.{symbol}"
-            import_map[alias] = fqn
-            edges.append(ExtractedEdge(module_id, fqn, "imports"))
-        else:
-            edges.append(ExtractedEdge(module_id, base_fqn, "imports"))
+            import_map[alias] = f"{base_fqn}.{symbol}"
+        edges.append(ExtractedEdge(module_id, base_fqn, "imports"))
 
     # 2. Extract Definitions
     symbol_to_id: dict[str, uuid.UUID] = {}
     for sec in parsed.sections:
-        if not sec.symbol: continue
+        if not sec.symbol:
+            continue
         ent_id = uuid.uuid4()
         etype = "class" if "class " in sec.text else "function"
         entities.append(ExtractedEntity(
@@ -83,22 +110,32 @@ def _extract_python(
             name=sec.symbol,
             display_name=sec.symbol.split(".")[-1],
             symbol=sec.symbol,
-            metadata={"line_start": sec.line_start}
+            metadata={
+                "line_start": sec.line_start,
+                "line_end": sec.line_end,
+                "language": parsed.language,
+            },
         ))
         symbol_to_id[sec.symbol] = ent_id
         edges.append(ExtractedEdge(module_id, sec.symbol, "defines"))
 
+        # Inheritance edges: parse `class Name(Base, ...)` from the section text.
+        if etype == "class":
+            for base in _parse_base_classes(sec.text):
+                edges.append(ExtractedEdge(ent_id, base, "inherits"))
+
     # 3. Extract Calls with Resolution
     for sec in parsed.sections:
         caller_id = symbol_to_id.get(sec.symbol or "")
-        if not caller_id: continue
-        
+        if not caller_id:
+            continue
+
         # Heuristic for calls: name(
         for m in re.finditer(r"(?:^|[^\w.])([\w.]+)\s*\(", sec.text):
             raw_call = m.group(1)
             parts = raw_call.split(".")
             prefix = parts[0]
-            
+
             resolved_target = raw_call
             if prefix in import_map:
                 # It's an external call through an import
@@ -110,53 +147,9 @@ def _extract_python(
                 local_fqn = f"{module_name}.{raw_call}"
                 if local_fqn in symbol_to_id:
                     resolved_target = local_fqn
-            
+
             if resolved_target != sec.symbol:
                 edges.append(ExtractedEdge(caller_id, resolved_target, "calls"))
-
-    return entities, edges
-
-# ---------------------------------------------------------------------------
-# TypeScript Logic (ESM-aware)
-# ---------------------------------------------------------------------------
-
-def _extract_typescript(
-    parsed: ParsedDocument,
-    source_text: bytes,
-) -> tuple[list[ExtractedEntity], list[ExtractedEdge]]:
-    entities: list[ExtractedEntity] = []
-    edges: list[ExtractedEdge] = []
-    
-    full_text = source_text.decode(errors="replace") if source_text else ""
-    module_name = parsed.sections[0].heading_path[0] if parsed.sections else "unknown"
-    module_id = uuid.uuid4()
-    entities.append(ExtractedEntity(module_id, "module", module_name, module_name, module_name))
-
-    # 1. Import Map (simplified for ESM)
-    import_map: dict[str, str] = {}
-    # import { X as Y } from './path'
-    for m in re.finditer(r"import\s+.*\{?([\w\s,]+)\}?\s+from\s+['"](.*)['"]", full_text):
-        path = m.group(2)
-        # For now, we use path as the module FQN
-        edges.append(ExtractedEdge(module_id, path, "imports"))
-
-    # 2. Definitions & Calls (similar to Python logic)
-    for sec in parsed.sections:
-        if not sec.symbol: continue
-        ent_id = uuid.uuid4()
-        entities.append(ExtractedEntity(
-            id=ent_id,
-            entity_type="function" if "(" in sec.text else "class",
-            name=sec.symbol,
-            display_name=sec.symbol.split(".")[-1],
-            symbol=sec.symbol
-        ))
-        edges.append(ExtractedEdge(module_id, sec.symbol, "defines"))
-        # Simplified calls for TS v0.3
-        for cm in re.finditer(r"([\w.]+)\s*\(", sec.text):
-            target = cm.group(1)
-            if target != sec.symbol:
-                edges.append(ExtractedEdge(ent_id, target, "calls"))
 
     return entities, edges
 
@@ -168,10 +161,14 @@ def extract_symbol_graph(
     parsed: ParsedDocument,
     source_text: bytes = b"",
 ) -> tuple[list[ExtractedEntity], list[ExtractedEdge]]:
-    if parsed.language == "python":
-        return _extract_python(parsed, source_text)
-    elif parsed.language in ("typescript", "javascript"):
-        return _extract_typescript(parsed, source_text)
-    return [], []
+    """Extract entities and edges from a parsed document.
+
+    Symbol-graph extraction is Python-only; for any other language (or when
+    ``parsed.language`` is ``None``) the function returns two empty lists so the
+    ingestion pipeline degrades gracefully.
+    """
+    if parsed.language != "python":
+        return [], []
+    return _extract_python(parsed, source_text)
 
 __all__ = ["ExtractedEdge", "ExtractedEntity", "extract_symbol_graph"]
