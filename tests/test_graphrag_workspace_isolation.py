@@ -179,6 +179,7 @@ def _hit(*, source_id: uuid.UUID, text: str, score: float = 0.9) -> SearchHit:
 
 def _graph_result(*, seed_source: uuid.UUID, related_sources: list[uuid.UUID]) -> GraphResultView:
     seed = EntityNodeView(
+        id=uuid.uuid4(),
         name="AuthService",
         kind="service",
         source=str(seed_source),
@@ -188,6 +189,7 @@ def _graph_result(*, seed_source: uuid.UUID, related_sources: list[uuid.UUID]) -
     )
     related = [
         EntityNodeView(
+            id=uuid.uuid4(),
             name=f"rel-{i}",
             kind="service",
             source=str(src),

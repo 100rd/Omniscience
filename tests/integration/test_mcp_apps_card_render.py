@@ -55,6 +55,7 @@ _SLACK_THREAD = "slack://channel/C12345/thread/1716383700.000100"
 
 def _alert_node() -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=_ALERT_ID,
         kind="alert",
         source="pagerduty",
@@ -67,6 +68,7 @@ def _alert_node() -> EntityNodeView:
 
 def _pr_node() -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=_PR_URI,
         kind="pull_request",
         source="github",
@@ -79,6 +81,7 @@ def _pr_node() -> EntityNodeView:
 
 def _resource_node() -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=_RESOURCE,
         kind="k8s_deployment",
         source="kubernetes",
@@ -90,6 +93,7 @@ def _resource_node() -> EntityNodeView:
 
 def _slack_node() -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=_SLACK_THREAD,
         kind="slack_thread",
         source="slack",

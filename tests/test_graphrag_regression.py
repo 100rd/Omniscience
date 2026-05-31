@@ -286,6 +286,7 @@ class _CorpusGraphStore:
             raise ValueError(f"entity_not_found:{entity_name}")
         related_names = self.TOPIC_CLUSTERS.get(entity_name, [])
         seed = EntityNodeView(
+            id=uuid.uuid4(),
             name=entity_name,
             kind="service",
             source=str(self._sources[entity_name]),
@@ -294,6 +295,7 @@ class _CorpusGraphStore:
         )
         related = [
             EntityNodeView(
+                id=uuid.uuid4(),
                 name=n,
                 kind="service",
                 source=str(self._sources[n]),

@@ -184,6 +184,7 @@ class _IncidentGraphStore:
 
 def _alert_node(*, name: str = _ALERT_ID, fired_at: datetime = _ALERT_FIRED_AT) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=name,
         kind="alert",
         source="src-alerts",
@@ -202,6 +203,7 @@ def _pr_node(
     edge_type: str = "DEPLOYED_BY",
 ) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=url,
         kind="pull_request",
         source="src-github",
@@ -214,6 +216,7 @@ def _pr_node(
 
 def _slack_node(thread: str = _SLACK_THREAD, depth: int = 2) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=thread,
         kind="slack_thread",
         source="src-slack",
@@ -230,6 +233,7 @@ def _resource_node(
     edge_type: str = "FIRES_AGAINST",
 ) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=name,
         kind="cross_ref_target",
         source="src-alerts",

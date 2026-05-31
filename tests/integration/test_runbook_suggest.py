@@ -77,6 +77,7 @@ class _SuggestGraphStore:
 
         chunk_text = json.dumps({"tags": tags or [], "severity": severity})
         self._entities[(workspace_id, name)] = EntityNodeView(
+            id=uuid.uuid4(),
             name=name,
             kind="alert",
             source="src-test",

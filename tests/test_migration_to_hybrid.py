@@ -660,6 +660,7 @@ class TestVerificationReport:
 class TestDiffEntityViews:
     def test_matching_views_have_no_diff(self) -> None:
         v = EntityNodeView(
+            id=uuid.uuid4(),
             name="pkg.Thing",
             kind="class",
             source="src",
@@ -668,16 +669,16 @@ class TestDiffEntityViews:
         assert _diff_entity_views(v, v) == []
 
     def test_missing_on_neo4j_detected(self) -> None:
-        v = EntityNodeView(name="n", kind="k", source="s", chunk_text=None)
+        v = EntityNodeView(id=uuid.uuid4(), name="n", kind="k", source="s", chunk_text=None)
         assert _diff_entity_views(v, None) == ["missing_on_neo4j"]
 
     def test_missing_on_pgvector_detected(self) -> None:
-        v = EntityNodeView(name="n", kind="k", source="s", chunk_text=None)
+        v = EntityNodeView(id=uuid.uuid4(), name="n", kind="k", source="s", chunk_text=None)
         assert _diff_entity_views(None, v) == ["missing_on_pgvector"]
 
     def test_field_drift_detected(self) -> None:
-        a = EntityNodeView(name="n", kind="class", source="s", chunk_text=None)
-        b = EntityNodeView(name="n", kind="function", source="s", chunk_text=None)
+        a = EntityNodeView(id=uuid.uuid4(), name="n", kind="class", source="s", chunk_text=None)
+        b = EntityNodeView(id=uuid.uuid4(), name="n", kind="function", source="s", chunk_text=None)
         assert _diff_entity_views(a, b) == ["kind"]
 
 

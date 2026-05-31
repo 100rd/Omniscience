@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 def _node_to_view(node: EntityNode) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=node.name,
         kind=node.kind,
         source=node.source,

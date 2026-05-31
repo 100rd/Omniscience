@@ -63,6 +63,7 @@ def _parse_dt(value: str | None) -> datetime | None:
 
 def _node_from_dict(payload: dict[str, Any]) -> EntityNodeView:
     return EntityNodeView(
+        id=uuid.uuid4(),
         name=payload["name"],
         kind=payload["kind"],
         source=payload["source"],
