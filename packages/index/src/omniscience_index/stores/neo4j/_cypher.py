@@ -301,7 +301,7 @@ _END_DATE_BY_SOURCE_CYPHER: Final[str] = f"""
 // Phase A — end-date entity identity, open [:HAD_STATE], open :EntityState.
 CALL {{
     MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, source_id: $source_id}})
-    WHERE n.valid_to IS NULL
+    WHERE n.valid_to IS NULL AND NOT n.id IN $batch_entity_ids
     OPTIONAL MATCH (n)-[h:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
     WHERE h.valid_to IS NULL AND s.valid_to IS NULL
     SET n.valid_to = datetime($now),
