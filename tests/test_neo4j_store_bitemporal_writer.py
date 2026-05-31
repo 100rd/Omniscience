@@ -469,9 +469,11 @@ async def _live_store(*, bitemporal_enabled: bool) -> AsyncIterator[Neo4jGraphSt
     """Spin up a fresh Neo4j container and yield a connected store."""
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
 
-    with Neo4jContainer("neo4j:5.19-community").with_env(
-        "NEO4J_AUTH", "neo4j/contract_test_password"
-    ) as neo4j:
+    # Pass password through the constructor so _configure() sets NEO4J_AUTH
+    # correctly.  Using .with_env("NEO4J_AUTH", ...) here is silently
+    # overridden by the wrapper's own _configure step (the same trap
+    # documented in tests/integration/test_neo4j_bootstrap_schema.py).
+    with Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j:
         config = Neo4jStoreConfig(
             uri=neo4j.get_connection_url(),
             username="neo4j",
