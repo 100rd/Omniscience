@@ -71,6 +71,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final
 
+import structlog
 from fastapi import FastAPI
 from omniscience_core.storage import EntityNodeView, GraphResultView, GraphStore
 from pydantic import BaseModel, Field, field_validator
@@ -87,6 +88,8 @@ from omniscience_server.incidents_scoring import (
     compute_components,
     load_workspace_config,
 )
+
+log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Module constants — no magic numbers in the algorithm body
@@ -597,8 +600,13 @@ async def _load_scoring_config(
             return await load_workspace_config(session, workspace_id)
     except Exception:
         # A misconfigured DB session must NEVER break live incident
-        # resolution; fall back to v0.1 silently.  Telemetry is wired
-        # at the request-duration histogram layer.
+        # resolution; fall back gracefully.  Log at warning so the issue
+        # surfaces in structured logs without propagating the error to callers.
+        log.warning(
+            "scoring_config_load_failed",
+            workspace_id=str(workspace_id),
+            exc_info=True,
+        )
         return None
 
 
