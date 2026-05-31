@@ -1,17 +1,23 @@
 apiVersion: v2
 name: omniscience
-description: Omniscience — universal context retrieval for AI agents
+description: A Helm chart for Omniscience — Semantic Knowledge Graph for SRE
 type: application
-version: 0.2.0
+version: 0.1.0
 appVersion: "0.2.0"
-keywords:
-  - omniscience
-  - mcp
-  - rag
-  - ai
-  - retrieval
-home: https://github.com/100rd/Omniscience
-sources:
-  - https://github.com/100rd/Omniscience
-maintainers:
-  - name: Omniscience maintainers
+dependencies:
+  - name: postgresql
+    version: 15.5.2
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: neo4j
+    version: 5.19.0
+    repository: https://helm.neo4j.com/
+    condition: neo4j.enabled
+  - name: qdrant
+    version: 0.1.0
+    repository: https://qdrant.github.io/helm-charts
+    condition: qdrant.enabled
+  - name: nats
+    version: 1.2.1
+    repository: https://nats-io.github.io/k8s/helm/charts/
+    condition: nats.enabled

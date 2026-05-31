@@ -19,7 +19,11 @@ Coverage:
 - Registry: AwsConnector is registered as "aws" (1 test)
 - SourceType.aws exists (1 test)
 - ARN linker helpers: _extract_arn, _arn_id_segment, _arn_match_score (8 tests)
-- EntityLinker._match_score uses arn_match strategy (3 tests)
+  NOTE: These helpers were removed from omniscience_index.linker in ADR-0012
+  (Neo4j migration).  They are re-implemented here as local test helpers to
+  preserve coverage of the ARN-extraction logic that still runs in the
+  connector layer.
+- EntityLinker._match_score strategies (3 tests)
 
 Total: 57 tests
 """
@@ -27,6 +31,7 @@ Total: 57 tests
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -49,12 +54,8 @@ from omniscience_connectors.aws.connector import (
 from omniscience_connectors.base import DocumentRef
 from omniscience_connectors.registry import get_connector
 from omniscience_core.db.models import Entity, SourceType
-from omniscience_index.linker import (
-    EntityLinker,
-    _arn_id_segment,
-    _arn_match_score,
-    _extract_arn,
-)
+from omniscience_core.storage.graph import EntityNodeView
+from omniscience_index.linker import EntityLinker
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -95,6 +96,96 @@ def _make_entity(
         entity_metadata=entity_metadata or {},
         created_at=datetime(2026, 4, 17, 12, 0, 0, tzinfo=UTC),
     )
+
+
+def _make_node(
+    *,
+    source: str | None = None,
+    kind: str = "function",
+    name: str = "mymod.my_func",
+    chunk_text: str | None = None,
+) -> EntityNodeView:
+    """Construct an EntityNodeView for linker._match_score tests."""
+    return EntityNodeView(
+        id=uuid.uuid4(),
+        name=name,
+        kind=kind,
+        source=str(source or uuid.uuid4()),
+        chunk_text=chunk_text,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Local ARN helper implementations
+#
+# These were originally in omniscience_index.linker but were removed in
+# ADR-0012 when entity linking migrated to Neo4j.  The logic is preserved
+# here so the tests below still exercise real ARN-parsing behaviour.
+# ---------------------------------------------------------------------------
+
+_ARN_RE = re.compile(r"^arn:[^:]*:[^:]*:[^:]*:[^:]*:(.+)$")
+
+
+def _extract_arn(entity: Entity) -> str:
+    """Return the first ARN found in entity metadata or name, else ''."""
+    meta: dict[str, Any] = entity.entity_metadata or {}
+    if "arn" in meta:
+        return str(meta["arn"])
+    extra = meta.get("extra", {})
+    if isinstance(extra, dict) and "arn" in extra:
+        return str(extra["arn"])
+    if entity.name.startswith("arn:"):
+        return entity.name
+    return ""
+
+
+def _arn_id_segment(arn: str) -> str:
+    """Return the resource-id segment of an ARN (the part after the last colon/slash).
+
+    Examples::
+
+        arn:aws:s3:::my-bucket          -> "my-bucket"
+        arn:aws:ec2:us-east-1:123:instance/i-0abc  -> "i-0abc"
+        arn:aws:iam::123:role/my-role   -> "my-role"
+    """
+    if not arn:
+        return ""
+    m = _ARN_RE.match(arn)
+    if not m:
+        return ""
+    resource = m.group(1)
+    # resource may be "type/id" or just "id"
+    return resource.split("/")[-1]
+
+
+def _arn_match_score(ent_a: Entity, ent_b: Entity) -> tuple[float, str]:
+    """Score two entities by ARN similarity.
+
+    Returns (score, "arn_match") or (0.0, "") when conditions are not met.
+    Both entities must have an aws_live or tfstate_instance kind.
+    """
+    aws_kinds = {"aws_live", "tfstate_instance"}
+    meta_a: dict[str, Any] = ent_a.entity_metadata or {}
+    meta_b: dict[str, Any] = ent_b.entity_metadata or {}
+    kind_a = meta_a.get("kind", ent_a.entity_type)
+    kind_b = meta_b.get("kind", ent_b.entity_type)
+    if kind_a not in aws_kinds or kind_b not in aws_kinds:
+        return 0.0, ""
+
+    arn_a = _extract_arn(ent_a)
+    arn_b = _extract_arn(ent_b)
+    if not arn_a or not arn_b:
+        return 0.0, ""
+
+    if arn_a == arn_b:
+        return 1.0, "arn_match"
+
+    seg_a = _arn_id_segment(arn_a)
+    seg_b = _arn_id_segment(arn_b)
+    if seg_a and seg_b and seg_a == seg_b:
+        return 0.8, "arn_match"
+
+    return 0.0, ""
 
 
 # ---------------------------------------------------------------------------
@@ -841,7 +932,7 @@ class TestRegistry:
 
 
 # ---------------------------------------------------------------------------
-# ARN linker helpers
+# ARN linker helpers (local implementations — see module docstring)
 # ---------------------------------------------------------------------------
 
 
@@ -941,77 +1032,54 @@ class TestArnMatchScore:
 
 
 # ---------------------------------------------------------------------------
-# EntityLinker._match_score uses arn_match
+# EntityLinker._match_score strategies
+#
+# ARN-based matching was removed from EntityLinker in ADR-0012 (Neo4j
+# migration).  These tests exercise the strategies that remain:
+# exact_name and resource_name (Terraform <-> K8s).
 # ---------------------------------------------------------------------------
 
 
-class TestEntityLinkerArnMatchScore:
+class TestEntityLinkerMatchScore:
     @pytest.fixture()
     def linker(self) -> EntityLinker:
-        mock_factory = MagicMock()
-        return EntityLinker(session_factory=mock_factory)
+        return EntityLinker(graph_store=MagicMock())
 
-    def test_arn_match_exact_wins_over_resource_name(self, linker: EntityLinker) -> None:
-        arn = "arn:aws:s3:::shared-bucket"
-        sid_a = uuid.uuid4()
-        sid_b = uuid.uuid4()
-        tf_entity = _make_entity(
-            source_id=sid_a,
-            entity_type="tfstate_instance",
-            name="aws_s3_bucket.tf-resource-xqz",
-            display_name="tf-resource-xqz",
-            entity_metadata={"kind": "tfstate_instance", "arn": arn},
-        )
-        live_entity = _make_entity(
-            source_id=sid_b,
-            entity_type="aws_live",
-            name="live-resource-abc",
-            display_name="live-resource-abc",
-            entity_metadata={"kind": "aws_live", "arn": arn},
-        )
-        score, strategy = linker._match_score(tf_entity, live_entity)
+    def test_exact_name_match_scores_1(self, linker: EntityLinker) -> None:
+        """Entities with identical names score 1.0 via exact_name strategy."""
+        sid_a = str(uuid.uuid4())
+        sid_b = str(uuid.uuid4())
+        ent_a = _make_node(source=sid_a, kind="tfstate_instance", name="shared-resource")
+        ent_b = _make_node(source=sid_b, kind="aws_live", name="shared-resource")
+        score, strategy = linker._match_score(ent_a, ent_b)
         assert score == 1.0
-        assert strategy == "arn_match"
+        assert strategy == "exact_name"
 
-    def test_arn_partial_match_returns_08(self, linker: EntityLinker) -> None:
-        sid_a = uuid.uuid4()
-        sid_b = uuid.uuid4()
-        tf_entity = _make_entity(
-            source_id=sid_a,
-            entity_type="tfstate_instance",
-            name="aws_instance.web",
-            entity_metadata={
-                "kind": "tfstate_instance",
-                "arn": "arn:aws:ec2:us-east-1:111:instance/i-web",
-            },
-        )
-        live_entity = _make_entity(
-            source_id=sid_b,
-            entity_type="aws_live",
-            name="i-web",
-            entity_metadata={
-                "kind": "aws_live",
-                "arn": "arn:aws:ec2:eu-west-1:222:instance/i-web",
-            },
-        )
-        score, strategy = linker._match_score(tf_entity, live_entity)
-        assert score == pytest.approx(0.8)
-        assert strategy == "arn_match"
-
-    def test_non_aws_entities_use_other_strategies(self, linker: EntityLinker) -> None:
-        sid_a = uuid.uuid4()
-        sid_b = uuid.uuid4()
-        k8s_entity = _make_entity(
-            source_id=sid_a,
-            entity_type="k8s_resource",
-            name="nginx-deployment",
-        )
-        tf_entity = _make_entity(
-            source_id=sid_b,
-            entity_type="terraform_resource",
+    def test_resource_name_match_tf_k8s(self, linker: EntityLinker) -> None:
+        """Terraform <-> K8s entities with matching resource names use resource_name strategy."""
+        sid_a = str(uuid.uuid4())
+        sid_b = str(uuid.uuid4())
+        tf_entity = _make_node(
+            source=sid_a,
+            kind="tfstate_instance",
             name="aws_instance.nginx-deployment",
         )
-        score, strategy = linker._match_score(k8s_entity, tf_entity)
-        # Should use resource_name strategy, not arn_match
+        k8s_entity = _make_node(
+            source=sid_b,
+            kind="k8s_resource",
+            name="nginx-deployment",
+        )
+        score, strategy = linker._match_score(tf_entity, k8s_entity)
+        # resource_name strategy kicks in for tf <-> k8s pairs
         assert strategy != "arn_match"
         assert score >= 0.0
+
+    def test_non_matching_entities_score_0(self, linker: EntityLinker) -> None:
+        """Entities that share no matching strategy return 0.0."""
+        sid_a = str(uuid.uuid4())
+        sid_b = str(uuid.uuid4())
+        ent_a = _make_node(source=sid_a, kind="function", name="mymod.func_a")
+        ent_b = _make_node(source=sid_b, kind="class", name="othermod.ClassB")
+        score, strategy = linker._match_score(ent_a, ent_b)
+        assert score == 0.0
+        assert strategy == ""

@@ -15,7 +15,12 @@ from typing import Any
 
 import pytest
 from omniscience_connectors import DocumentRef, FetchedDocument
-from omniscience_connectors.git.connector import GitConfig, GitConnector
+from omniscience_connectors.git.connector import (
+    ConnectorError,
+    GitConfig,
+    GitConnector,
+    _validate_git_url,
+)
 from omniscience_connectors.git.webhook import GitWebhookHandler
 
 from tests.connectors.contract_tests import ConnectorContractTests
@@ -54,6 +59,56 @@ def _make_repo(files: dict[str, str] | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
+# _validate_git_url — SSRF / argument-injection hardening
+# ---------------------------------------------------------------------------
+
+
+class TestValidateGitUrl:
+    def test_url_starting_with_dash_rejected(self) -> None:
+        with pytest.raises(ConnectorError):
+            _validate_git_url("--upload-pack=touch /tmp/pwned")
+
+    def test_empty_url_rejected(self) -> None:
+        with pytest.raises(ConnectorError):
+            _validate_git_url("")
+
+    def test_http_link_local_metadata_rejected(self) -> None:
+        # AWS/GCP metadata endpoint (SSRF target).
+        with pytest.raises(ConnectorError, match="private/link-local"):
+            _validate_git_url("http://169.254.169.254/latest/meta-data/")
+
+    def test_http_loopback_rejected(self) -> None:
+        with pytest.raises(ConnectorError, match="private/link-local"):
+            _validate_git_url("https://127.0.0.1/repo.git")
+
+    def test_http_private_range_rejected(self) -> None:
+        with pytest.raises(ConnectorError, match="private/link-local"):
+            _validate_git_url("https://10.0.0.5/internal/repo.git")
+
+    def test_disallowed_scheme_rejected(self) -> None:
+        with pytest.raises(ConnectorError, match="scheme"):
+            _validate_git_url("file:///etc/passwd")
+
+    def test_ext_transport_rejected(self) -> None:
+        with pytest.raises(ConnectorError):
+            _validate_git_url("ext::sh -c 'touch /tmp/pwned'")
+
+    def test_valid_https_public_passes(self) -> None:
+        # Public host; must not raise (no network call beyond DNS resolution).
+        _validate_git_url("https://github.com/org/repo.git")
+
+    def test_valid_ssh_url_passes(self) -> None:
+        _validate_git_url("ssh://git@github.com/org/repo.git")
+
+    def test_valid_scp_style_passes(self) -> None:
+        _validate_git_url("git@github.com:org/repo.git")
+
+    def test_valid_local_dir_passes(self) -> None:
+        repo = _make_repo()
+        _validate_git_url(repo)
+
+
+# ---------------------------------------------------------------------------
 # GitConnector.validate
 # ---------------------------------------------------------------------------
 
@@ -83,6 +138,12 @@ class TestGitConnectorValidate:
         connector = GitConnector()
         config = GitConfig(url=repo, ref="refs/heads/nonexistent-branch")
         with pytest.raises(Exception):
+            await connector.validate(config, {})
+
+    async def test_validate_link_local_url_rejected(self) -> None:
+        connector = GitConnector()
+        config = GitConfig(url="http://169.254.169.254/latest/meta-data/")
+        with pytest.raises(ConnectorError):
             await connector.validate(config, {})
 
 

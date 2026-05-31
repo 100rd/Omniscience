@@ -123,22 +123,32 @@ export interface SearchResult {
   };
 }
 
+export interface RelatedEntitiesResponse {
+  seed: {
+    name: string;
+    kind: string;
+    source: string;
+    chunk_text: string | null;
+  };
+  related: Array<{
+    name: string;
+    kind: string;
+    source: string;
+    depth: number;
+    edge_type: string;
+  }>;
+  edges: Array<{
+    from: string;
+    to: string;
+    type: string;
+  }>;
+}
+
 export interface HealthResponse {
   status: string;
   version?: string;
 }
 
-/*
- * Wire format for `GET /api/v1/stats/sources` (Issue #111).
- *
- * Mirrors the Pydantic `SourceStatsRow` / `SourcesStatsResponse` defined in
- * `packages/core/src/omniscience_core/stats/models.py`. Notes on fields:
- *   - `last_sync_at` is ISO-8601 or null when the source has never synced.
- *   - `age_seconds` uses a `1e15` sentinel to mean "never synced". Renderers
- *     should special-case that value rather than displaying "11574 days".
- *   - `freshness_sla_seconds` is null when the source has no SLA configured.
- *   - `is_stale` is computed server-side: true when age >= SLA.
- */
 export interface SourceStatsRow {
   id: string;
   name: string;
@@ -158,13 +168,6 @@ export interface SourcesStatsResponse {
   total: number;
 }
 
-/*
- * Wire format for `GET /api/v1/stats/overview` (Issue #111).
- *
- * Mirrors the Pydantic `StatsOverview` defined in
- * `packages/core/src/omniscience_core/stats/models.py`. All counts are
- * scoped to the caller's workspace.
- */
 export interface StatsOverview {
   sources: number;
   active_sources: number;
@@ -180,10 +183,6 @@ export interface StatsOverview {
   documents_tombstoned_24h: number;
 }
 
-/*
- * Wire format for `GET /api/v1/stats/entities-by-kind` (Issue #111).
- * Mirrors `KindHistogramEntry` / `EntitiesByKindResponse`.
- */
 export interface KindHistogramEntry {
   kind: string;
   count: number;
@@ -194,10 +193,6 @@ export interface EntitiesByKindResponse {
   total: number;
 }
 
-/*
- * Wire format for `GET /api/v1/stats/edges-by-type` (Issue #111).
- * Mirrors `EdgeTypeHistogramEntry` / `EdgesByTypeResponse`.
- */
 export interface EdgeTypeHistogramEntry {
   edge_type: string;
   count: number;
@@ -208,14 +203,6 @@ export interface EdgesByTypeResponse {
   total: number;
 }
 
-/*
- * Wire format for `GET /api/v1/stats/clients` (Issue #113).
- *
- * Mirrors the Pydantic `ClientsStatsResponse`. `mcp_sessions_active` and
- * `mcp_sessions_last_hour` are process-global; `tokens` is workspace-scoped.
- * `last_seen_at` is null when the token has been issued but has not made a
- * request since process start.
- */
 export interface TokenClientStats {
   token_id: string;
   name: string;
@@ -236,18 +223,6 @@ export interface ClientsStatsResponse {
   top_tools_last_hour: ToolUsageEntry[];
 }
 
-/*
- * Wire format for `GET /api/v1/admin/retention/status` (Issue #136, ADR-0009 §8).
- *
- * Mirrors the Pydantic `RetentionStatus`. All counts are scoped to the
- * caller's workspace; the response carries IDs and counts only — no
- * entity bodies, no chunk text (ACL invariant from ADR-0009 §Consequences-
- * security).
- *
- * `last_run_at` is null when the worker has not completed its first
- * tick since process start — the admin UI renders that as "never run"
- * rather than displaying a stale value.
- */
 export interface RetentionStatusResponse {
   workspace_id: string;
   neo4j_hot: number;
@@ -259,13 +234,6 @@ export interface RetentionStatusResponse {
   dry_run: boolean;
 }
 
-/*
- * Wire format for the dry-run `GET /api/v1/admin/retention/report`
- * (Issue #135, ADR-0009 §3). Returned when an operator wants to
- * preview what the next worker tick would evict without mutating any
- * store. Sample size is bounded by `Settings.retention_sample_size`
- * (default 20).
- */
 export interface RetentionSampleEntry {
   id: string | null;
   valid_from: string | null;
@@ -285,12 +253,6 @@ export interface RetentionReportResponse {
   lag_seconds: number;
 }
 
-/*
- * Wire format for `POST /api/v1/admin/retention/run-now` (Issue #136).
- * 202 Accepted with a server-generated `run_id`; the run executes
- * synchronously inside the request handler and is scoped to the
- * caller's workspace by the structural ACL invariant on the worker.
- */
 export interface RetentionRunNowResponse {
   run_id: string;
   workspace_id: string;
@@ -301,15 +263,6 @@ export interface RetentionRunNowResponse {
   lag_seconds: number;
 }
 
-/*
- * Wire format for `GET /api/v1/incidents/{id}/timeline` (Issue #235).
- *
- * Mirrors the Pydantic `IncidentTimelineResponse` /  `TimelineEvent`
- * defined in `apps/server/src/omniscience_server/incident_timeline.py`.
- * Each event represents one bitemporal state change for an entity in
- * the alert's blast radius. `change_kind` is "created" when the row's
- * `valid_from` projects forward, or "ended" when its `valid_to` does.
- */
 export type TimelineChangeKind = "created" | "ended";
 
 export interface TimelineEvent {
@@ -340,18 +293,6 @@ export interface IncidentTimelineQuery {
   max_depth?: number;
 }
 
-/*
- * Wire format for `POST /api/v1/replay` and `GET /api/v1/replay/audit/:id`
- * (Issue #243 — ADP replay primitive).  Mirrors the Pydantic
- * `envelope_to_dict` shape from `apps/server/src/omniscience_server/replay.py`.
- *
- *   - `state_fingerprint`           — 64-char lowercase hex (BLAKE2b-256).
- *   - `original_state_fingerprint`  — present iff replayed by audit_log_id.
- *   - `fingerprint_match`           — boolean only when original is set.
- *   - `response`                    — the inner payload the original tool
- *                                     returned, shape-identical to the
- *                                     underlying MCP/REST tool surface.
- */
 export interface ReplayEnvelope {
   tool_name: string;
   at_time: string;
@@ -376,6 +317,12 @@ export interface ReplayByAuditIdRequest {
 }
 
 export type ReplayRequest = ReplayInlineRequest | ReplayByAuditIdRequest;
+
+export interface Workspace {
+  id: string;
+  name: string;
+  metadata: Record<string, any>;
+}
 
 export class ApiError extends Error {
   constructor(
@@ -512,7 +459,30 @@ export class ApiClient {
     return this.request<SearchResult>("POST", "/api/v1/search", payload);
   }
 
-  // Stats (Issue #111)
+  async getRelatedEntities(
+    name: string,
+    params: { depth?: number; as_of?: string } = {}
+  ): Promise<RelatedEntitiesResponse> {
+    const qs = new URLSearchParams();
+    if (params.depth) qs.set("max_depth", String(params.depth));
+    if (params.as_of) qs.set("as_of", params.as_of);
+    const suffix = qs.toString() ? `?${qs}` : "";
+    return this.request<RelatedEntitiesResponse>(
+      "GET",
+      `/api/v1/entities/${encodeURIComponent(name)}/related${suffix}`
+    );
+  }
+
+  // Workspace
+  async getWorkspace(): Promise<Workspace> {
+    return this.request<Workspace>("GET", "/api/v1/workspace");
+  }
+
+  async updateWorkspace(metadata: Record<string, any>): Promise<Workspace> {
+    return this.request<Workspace>("PATCH", "/api/v1/workspace", { metadata });
+  }
+
+  // Stats
   async statsSources(signal?: AbortSignal): Promise<SourcesStatsResponse> {
     return this.request<SourcesStatsResponse>(
       "GET",
@@ -551,7 +521,7 @@ export class ApiClient {
     );
   }
 
-  // Stats (Issue #113)
+  // Clients
   async statsClients(signal?: AbortSignal): Promise<ClientsStatsResponse> {
     return this.request<ClientsStatsResponse>(
       "GET",
@@ -561,7 +531,7 @@ export class ApiClient {
     );
   }
 
-  // Retention admin (Issue #136, ADR-0009)
+  // Retention
   async retentionStatus(
     signal?: AbortSignal
   ): Promise<RetentionStatusResponse> {
@@ -591,7 +561,7 @@ export class ApiClient {
     );
   }
 
-  // Incident timeline (Issue #235)
+  // Incident timeline
   async incidentTimeline(
     alertId: string,
     query: IncidentTimelineQuery = {},
@@ -647,7 +617,7 @@ export class ApiClient {
     return await res.text();
   }
 
-  // Replay (Issue #243 — ADP primitive)
+  // Replay
   async replay(payload: ReplayRequest): Promise<ReplayEnvelope> {
     return this.request<ReplayEnvelope>(
       "POST",

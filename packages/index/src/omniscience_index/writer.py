@@ -11,7 +11,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
-from omniscience_core.db.models import Chunk, Document, Edge, Entity
+from omniscience_core.db.models import Chunk, Document
+from omniscience_core.storage.graph import GraphStore
+from omniscience_core.storage.vector import ChunkPayload, VectorStore
 from sqlalchemy import delete, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -19,17 +21,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 @dataclass
 class ChunkData:
-    """All fields needed to persist a single chunk (Postgres-side metadata).
-
-    As of v0.2 the chunk embedding itself lives in Qdrant, not Postgres;
-    this dataclass no longer carries the vector payload.  The embedding
-    model / provider / parser / chunker identifiers remain on the
-    Postgres row so operational queries ("which model produced this
-    chunk?") still resolve without a Qdrant round-trip.
-    """
+    """All fields needed to persist a single chunk across stores."""
 
     ord: int
     text: str
+    embedding: list[float] = field(default_factory=list)
     symbol: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     embedding_model: str = ""
@@ -40,7 +36,7 @@ class ChunkData:
 
 @dataclass
 class UpsertResult:
-    """Outcome of a single :meth:`IndexWriter.upsert_document` call."""
+    """Outcome of an orchestrated upsert call."""
 
     action: Literal["created", "updated", "unchanged"]
     document_id: uuid.UUID
@@ -49,10 +45,17 @@ class UpsertResult:
 
 
 class IndexWriter:
-    """Write documents and their chunks atomically into the index store."""
+    """Write documents and their chunks atomically into the hybrid store."""
 
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        graph_store: GraphStore | None = None,
+        vector_store: VectorStore | None = None,
+    ) -> None:
         self._session_factory = session_factory
+        self._graph_store = graph_store
+        self._vector_store = vector_store
 
     # ------------------------------------------------------------------
     # Public API
@@ -67,31 +70,14 @@ class IndexWriter:
         content_hash: str,
         metadata: dict[str, Any],
         chunks: list[ChunkData],
+        workspace_id: uuid.UUID | None = None,
         ingestion_run_id: uuid.UUID | None = None,
     ) -> UpsertResult:
-        """Atomically create or update a document and its chunks.
-
-        Decision table (evaluated inside one transaction):
-        - No existing row           → insert document + chunks → action="created"
-        - Existing, same hash       → no-op                    → action="unchanged"
-        - Existing, different hash  → replace chunks, bump version → action="updated"
-        """
+        """Orchestrate document upsert across Postgres and Qdrant."""
         async with self._session_factory() as session, session.begin():
             existing = await self._find_document(session, source_id, external_id)
 
-            if existing is None:
-                doc = await self._insert_document(
-                    session, source_id, external_id, uri, title, content_hash, metadata
-                )
-                await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
-                return UpsertResult(
-                    action="created",
-                    document_id=doc.id,
-                    chunks_written=len(chunks),
-                    doc_version=doc.doc_version,
-                )
-
-            if existing.content_hash == content_hash:
+            if existing is not None and existing.content_hash == content_hash:
                 return UpsertResult(
                     action="unchanged",
                     document_id=existing.id,
@@ -99,27 +85,77 @@ class IndexWriter:
                     doc_version=existing.doc_version,
                 )
 
-            await self._delete_chunks(session, existing.id)
-            await self._update_document(session, existing, uri, title, content_hash, metadata)
-            await self._insert_chunks(session, existing.id, chunks, ingestion_run_id)
+            # 1. Postgres Metadata Write
+            if existing is None:
+                doc = await self._insert_document(
+                    session, source_id, external_id, uri, title, content_hash, metadata
+                )
+                action: Literal["created", "updated"] = "created"
+            else:
+                await self._delete_chunks(session, existing.id)
+                await self._update_document(session, existing, uri, title, content_hash, metadata)
+                doc = existing
+                action = "updated"
+
+            await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
+
+            # 2. Qdrant Vector Write (if adapter provided)
+            if self._vector_store and workspace_id:
+                vector_metadata = dict(metadata)
+                vector_metadata["workspace_id"] = str(workspace_id)
+                
+                payloads: list[ChunkPayload] = [
+                    {
+                        "ord": c.ord,
+                        "text": c.text,
+                        "embedding": c.embedding,
+                        "symbol": c.symbol,
+                        "metadata": c.metadata,
+                        "embedding_model": c.embedding_model,
+                        "embedding_provider": c.embedding_provider,
+                        "parser_version": c.parser_version,
+                        "chunker_strategy": c.chunker_strategy,
+                    }
+                    for c in chunks
+                ]
+                
+                await self._vector_store.upsert_chunks(
+                    source_id=source_id,
+                    external_id=external_id,
+                    uri=uri,
+                    title=title,
+                    content_hash=content_hash,
+                    metadata=vector_metadata,
+                    chunks=payloads,
+                    ingestion_run_id=ingestion_run_id,
+                )
+
             return UpsertResult(
-                action="updated",
-                document_id=existing.id,
+                action=action,
+                document_id=doc.id,
                 chunks_written=len(chunks),
-                doc_version=existing.doc_version,
+                doc_version=doc.doc_version,
             )
 
-    async def tombstone(self, source_id: uuid.UUID, external_id: str) -> bool:
-        """Set ``tombstoned_at`` on the document identified by *(source_id, external_id)*.
-
-        Returns ``True`` when the document existed and was updated; ``False``
-        when no matching active document was found.
-        """
+    async def tombstone(
+        self, 
+        source_id: uuid.UUID, 
+        external_id: str,
+        workspace_id: uuid.UUID | None = None,
+    ) -> bool:
+        """Tombstone document in Postgres and Qdrant."""
         async with self._session_factory() as session, session.begin():
             doc = await self._find_document(session, source_id, external_id)
             if doc is None:
                 return False
             doc.tombstoned_at = datetime.now(UTC)
+            
+            if self._vector_store and workspace_id:
+                await self._vector_store.delete_by_document(
+                    source_id=source_id,
+                    external_id=external_id,
+                    workspace_id=workspace_id,
+                )
             return True
 
     async def purge_tombstones(self, older_than: timedelta) -> int:
@@ -144,84 +180,27 @@ class IndexWriter:
         document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        workspace_id: uuid.UUID | None = None,
         snapshot_at: datetime | None = None,
     ) -> None:
-        """Persist symbol graph entities and edges for a document.
+        """Persist symbol graph into Neo4j (orchestrated)."""
+        if self._graph_store and workspace_id:
+            # Tag entities with workspace_id for Neo4j ACL
+            for ent in entities:
+                if hasattr(ent, "metadata"):
+                    ent.metadata["workspace_id"] = str(workspace_id)
+                elif isinstance(ent, dict):
+                    ent.setdefault("metadata", {})["workspace_id"] = str(workspace_id)
 
-        On re-ingestion of the same document the previous entities/edges for
-        this source are deleted and replaced.  This keeps the graph consistent
-        with the current document content.
-
-        ``entities`` are :class:`~omniscience_parsers.code.graph.ExtractedEntity`
-        instances; ``edges`` are
-        :class:`~omniscience_parsers.code.graph.ExtractedEdge` instances.
-
-        Cross-file edges (where the target entity does not yet exist) are
-        stored with a NULL target — they are resolved lazily in a later
-        graph-linking pass (not yet implemented; placeholder for v0.2).
-
-        ``snapshot_at`` is accepted for signature parity with
-        :meth:`Neo4jGraphStore.upsert_graph` (issue #137).  The Postgres
-        operational tables (``entities`` / ``edges``) are NOT bitemporal
-        per ADR-0007 §7 — operational metadata has its own lifecycle
-        (``tombstoned_at`` on ``documents``, FK cascade for chunks).
-        The argument is therefore accepted but not consumed by this
-        writer; the bitemporal end-dating contract lives on the Neo4j
-        adapter.  Snapshot-mode connectors that already pass
-        ``snapshot_at`` to the Neo4j writer can keep a single
-        ``snapshot_at`` symbol at the call site without branching.
-        """
-        del snapshot_at  # ADR-0007 §7 — Postgres operational, not bitemporal.
-        async with self._session_factory() as session, session.begin():
-            # Delete existing entities for this source (edges cascade via FK)
-            await session.execute(delete(Entity).where(Entity.source_id == source_id))
-
-            if not entities:
-                return
-
-            # Insert entities and build a name → ORM id mapping
-            name_to_orm_id: dict[str, uuid.UUID] = {}
-            for ext_ent in entities:
-                orm_id = ext_ent.id
-                ent = Entity(
-                    id=orm_id,
-                    source_id=source_id,
-                    entity_type=ext_ent.entity_type,
-                    name=ext_ent.name,
-                    display_name=ext_ent.display_name,
-                    chunk_id=None,  # chunk linking deferred to v0.2
-                    entity_metadata=ext_ent.metadata,
-                    created_at=datetime.now(UTC),
-                )
-                session.add(ent)
-                name_to_orm_id[ext_ent.name] = orm_id
-                # Also index by display name for intra-file call resolution
-                name_to_orm_id.setdefault(ext_ent.display_name, orm_id)
-
-            await session.flush()
-
-            # Insert edges — resolve target by name, drop unresolvable ones
-            for ext_edge in edges:
-                source_id_ent = ext_edge.source_entity_id
-                target_name = ext_edge.target_name
-                target_orm_id = name_to_orm_id.get(target_name)
-                if target_orm_id is None:
-                    # Cross-file target; skip for now (v0.2 will resolve these)
-                    continue
-                # Skip self-loops
-                if source_id_ent == target_orm_id:
-                    continue
-                edge = Edge(
-                    id=uuid.uuid4(),
-                    source_entity_id=source_id_ent,
-                    target_entity_id=target_orm_id,
-                    edge_type=ext_edge.edge_type,
-                    edge_metadata=ext_edge.metadata,
-                    created_at=datetime.now(UTC),
-                )
-                session.add(edge)
-
-            await session.flush()
+            await self._graph_store.upsert_graph(
+                source_id=source_id,
+                document_id=document_id,
+                entities=entities,
+                edges=edges,
+                snapshot_at=snapshot_at,
+            )
+        
+        # SQL-side graph storage is now deprecated and removed from ingestion path.
 
     # ------------------------------------------------------------------
     # Private helpers — each kept < 30 lines

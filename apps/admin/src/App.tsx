@@ -9,6 +9,7 @@ import { SourcesPage } from "./pages/SourcesPage";
 import { TokensPage } from "./pages/TokensPage";
 import { IngestionPage } from "./pages/IngestionPage";
 import { SearchPage } from "./pages/SearchPage";
+import { GraphPage } from "./pages/GraphPage";
 import { FreshnessPage } from "./pages/FreshnessPage";
 import { RetentionPage } from "./pages/RetentionPage";
 import { IncidentTimelinePage } from "./pages/IncidentTimelinePage";
@@ -43,6 +44,10 @@ function AppInner() {
             <Route
               path="/search"
               element={<SearchPage addToast={addToast} />}
+            />
+            <Route
+              path="/graph"
+              element={<GraphPage addToast={addToast} />}
             />
             <Route path="/freshness" element={<FreshnessPage />} />
             <Route path="/retention" element={<RetentionPage />} />

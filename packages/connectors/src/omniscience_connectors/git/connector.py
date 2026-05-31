@@ -7,26 +7,85 @@ Uses subprocess calls to git with list-form arguments to prevent shell injection
 from __future__ import annotations
 
 import fnmatch
+import ipaddress
 import logging
 import mimetypes
+import socket
 import subprocess
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import ClassVar
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
 from omniscience_connectors.base import Connector, DocumentRef, FetchedDocument, WebhookHandler
 from omniscience_connectors.git.webhook import GitWebhookHandler
 
-__all__ = ["GitConfig", "GitConnector"]
+__all__ = ["ConnectorError", "GitConfig", "GitConnector"]
 
 logger = logging.getLogger(__name__)
 
 # Byte sequences that indicate a binary file (null byte is the most reliable)
 _BINARY_HEURISTIC_BYTES = 8192
 _NULL_BYTE = b"\x00"
+
+# Schemes permitted for remote git URLs (allowlist).  Anything else (file://,
+# ext::, fd::, gopher://, etc.) is rejected to limit the git transport surface.
+_ALLOWED_REMOTE_SCHEMES = frozenset({"https", "http", "ssh", "git"})
+
+
+class ConnectorError(ValueError):
+    """Raised when connector configuration fails validation.
+
+    Subclasses :class:`ValueError` so existing call sites that catch broad
+    exceptions continue to work.
+    """
+
+
+def _is_blocked_ip(host: str) -> bool:
+    """Return True if *host* resolves to a loopback/link-local/private address.
+
+    Defense-in-depth against SSRF: sources are admin-configured, so we block
+    obvious literals and direct DNS resolutions but do not attempt to defeat
+    DNS rebinding.
+    """
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return False  # Unresolvable; let git surface the connection error.
+    for addr in addrs:
+        ip = ipaddress.ip_address(addr)
+        if ip.is_loopback or ip.is_link_local or ip.is_private or ip.is_reserved:
+            return True
+    return False
+
+
+def _validate_git_url(url: str) -> None:
+    """Validate a git URL/path before passing it to ``git`` (raises ConnectorError).
+
+    Rejects flag-like values, disallowed schemes, and http(s) remotes that
+    point at loopback/link-local/private ranges (SSRF mitigation).
+    """
+    if not url or url.startswith("-"):
+        raise ConnectorError(f"Invalid git url {url!r}: must not be empty or start with '-'")
+
+    # Local filesystem path (existing directory) is always allowed.
+    if Path(url).is_dir():
+        return
+
+    # scp-like syntax: user@host:path  (no scheme, has ':' before any '/').
+    if "://" not in url and "@" in url and ":" in url.split("/", 1)[0]:
+        return
+
+    parts = urlsplit(url)
+    if parts.scheme not in _ALLOWED_REMOTE_SCHEMES:
+        raise ConnectorError(f"Invalid git url {url!r}: scheme {parts.scheme!r} is not allowed")
+    if parts.scheme in {"http", "https"} and parts.hostname and _is_blocked_ip(parts.hostname):
+        raise ConnectorError(
+            f"Invalid git url {url!r}: host resolves to a private/link-local address"
+        )
 
 
 def _is_binary(data: bytes) -> bool:
@@ -90,12 +149,13 @@ def _resolve_repo(url: str) -> tuple[str, str | None]:
     For local paths: returns the path as-is, no tmp dir.
     For remote URLs: clones into a temp dir and returns that path + temp dir.
     """
+    _validate_git_url(url)
     p = Path(url)
     if p.exists() and p.is_dir():
         return str(p), None
 
     tmp = tempfile.mkdtemp(prefix="omniscience_git_")
-    _run_git(["clone", "--depth=1", "--no-tags", url, tmp])
+    _run_git(["clone", "--depth=1", "--no-tags", "--", url, tmp])
     return tmp, tmp
 
 
@@ -112,6 +172,7 @@ class GitConnector(Connector):
     async def validate(self, config: BaseModel, secrets: dict[str, str]) -> None:
         """Verify the repository is accessible and the ref exists."""
         cfg: GitConfig = config  # type: ignore[assignment]
+        _validate_git_url(cfg.url)
 
         p = Path(cfg.url)
         if p.exists():
@@ -126,7 +187,7 @@ class GitConnector(Connector):
                 # Inject token into URL for authentication
                 url = url.replace("https://", f"https://oauth2:{env_token}@", 1)
             result = subprocess.run(  # noqa: S603
-                ["git", "ls-remote", url, cfg.ref],  # noqa: S607
+                ["git", "ls-remote", "--", url, cfg.ref],  # noqa: S607
                 capture_output=True,
                 timeout=60,
             )

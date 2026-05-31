@@ -4,6 +4,89 @@ import { Source, SourceCreate, SourceType, ApiError } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 
+function DiscoverySettings({ addToast }: { addToast: ToastFn }) {
+  const { client } = useTokenContext();
+  const [metadata, setMetadata] = useState<Record<string, any>>({});
+  const [loading, setLoading] = useState(true);
+  const [saving, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    client.getWorkspace()
+      .then(ws => setMetadata(ws.metadata))
+      .catch(() => addToast("Failed to load workspace settings", "error"))
+      .finally(() => setLoading(false));
+  }, [client, addToast]);
+
+  const handleSave = async (e: FormEvent) => {
+    e.preventDefault();
+    setSubmitting(true);
+    try {
+      await client.updateWorkspace(metadata);
+      addToast("Discovery settings saved.", "success");
+    } catch (err: any) {
+      addToast(err.detail || "Save failed", "error");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (loading) return null;
+
+  const github = metadata.discovery?.github || {};
+
+  return (
+    <div className="bg-elevation-1 rounded-xl border border-border shadow-sm p-6 mb-8">
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-base font-medium text-text">Auto-Discovery (v0.4)</h2>
+        <div className="text-[10px] bg-accent/10 text-accent px-2 py-0.5 rounded uppercase font-bold tracking-wider">Experimental</div>
+      </div>
+      <form onSubmit={handleSave} className="space-y-4">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          <div>
+            <label className="block text-xs font-medium text-text-secondary uppercase mb-1">GitHub Org</label>
+            <input
+              type="text"
+              value={github.org || ""}
+              onChange={e => setMetadata({...metadata, discovery: { ...metadata.discovery, github: { ...github, org: e.target.value }}})}
+              placeholder="my-org"
+              className="w-full border border-border bg-elevation-2 text-text rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-text-secondary uppercase mb-1">GitHub Token</label>
+            <input
+              type="password"
+              value={github.token || ""}
+              onChange={e => setMetadata({...metadata, discovery: { ...metadata.discovery, github: { ...github, token: e.target.value }}})}
+              placeholder="ghp_***"
+              className="w-full border border-border bg-elevation-2 text-text rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-text-secondary uppercase mb-1">Include Pattern (Regex)</label>
+            <input
+              type="text"
+              value={github.include_pattern || ""}
+              onChange={e => setMetadata({...metadata, discovery: { ...metadata.discovery, github: { ...github, include_pattern: e.target.value }}})}
+              placeholder="-(service|api)$"
+              className="w-full border border-border bg-elevation-2 text-text rounded-lg px-3 py-2 text-sm"
+            />
+          </div>
+        </div>
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={saving}
+            className="px-4 py-2 text-sm bg-accent text-accent-fg rounded-lg hover:bg-accent-hover disabled:opacity-50 transition-colors"
+          >
+            {saving ? "Saving..." : "Save Discovery Config"}
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 const SOURCE_TYPES: SourceType[] = [
   "git",
   "fs",
@@ -214,6 +297,8 @@ export function SourcesPage({ addToast }: Props) {
         <h1 className="text-2xl font-semibold text-text">Sources</h1>
         <AddSourceForm onCreated={handleCreated} addToast={addToast} />
       </div>
+
+      <DiscoverySettings addToast={addToast} />
 
       {loading ? (
         <p className="text-sm text-text-muted py-12 text-center">Loading...</p>

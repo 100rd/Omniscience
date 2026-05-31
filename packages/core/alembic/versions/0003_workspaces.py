@@ -65,21 +65,28 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # 2. Seed the default workspace
     # ------------------------------------------------------------------
-    op.execute(
-        sa.text(
-            """
-            INSERT INTO workspaces (id, name, display_name, settings, created_at, updated_at)
-            VALUES (
-                :id,
-                'default',
-                'Default Workspace',
-                '{}'::jsonb,
-                NOW(),
-                NOW()
-            )
-            ON CONFLICT (name) DO NOTHING
-            """
-        ).bindparams(id=str(_DEFAULT_WORKSPACE_ID))
+    from datetime import datetime, UTC
+    workspaces_table = sa.table(
+        "workspaces",
+        sa.column("id", postgresql.UUID(as_uuid=True)),
+        sa.column("name", sa.Text()),
+        sa.column("display_name", sa.Text()),
+        sa.column("settings", postgresql.JSONB()),
+        sa.column("created_at", sa.DateTime(timezone=True)),
+        sa.column("updated_at", sa.DateTime(timezone=True)),
+    )
+    op.bulk_insert(
+        workspaces_table,
+        [
+            {
+                "id": _DEFAULT_WORKSPACE_ID,
+                "name": "default",
+                "display_name": "Default Workspace",
+                "settings": {},
+                "created_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
+            }
+        ],
     )
 
     # ------------------------------------------------------------------

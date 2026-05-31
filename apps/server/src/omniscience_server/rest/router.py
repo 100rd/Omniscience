@@ -23,11 +23,13 @@ from omniscience_server.rest.similar_incidents import router as similar_incident
 from omniscience_server.rest.sources import router as sources_router
 from omniscience_server.rest.stats import router as stats_router
 from omniscience_server.rest.webhooks import router as webhooks_router
+from omniscience_server.rest.workspace import router as workspace_router
 
 api_v1_router = APIRouter(prefix="/api/v1")
 
 api_v1_router.include_router(search_router)
 api_v1_router.include_router(sources_router)
+api_v1_router.include_router(workspace_router)
 api_v1_router.include_router(documents_router)
 api_v1_router.include_router(entities_router)
 api_v1_router.include_router(ingestion_runs_router)

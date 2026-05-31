@@ -266,6 +266,7 @@ ON CREATE SET
     n.display_name = $display_name,
     n.chunk_id = $chunk_id,
     n.metadata = $metadata,
+    n.is_stub = false,
     n.created_at = $now,
     n.updated_at = $now
 ON MATCH SET
@@ -275,6 +276,7 @@ ON MATCH SET
     n.display_name = $display_name,
     n.chunk_id = $chunk_id,
     n.metadata = $metadata,
+    n.is_stub = false,
     n.updated_at = $now
 """
 
@@ -291,6 +293,22 @@ ON CREATE SET
 ON MATCH SET
     r.source_id = $source_id,
     r.metadata = $metadata,
+    r.updated_at = $now
+"""
+
+_UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE: Final[str] = f"""
+MATCH (a:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $source_id_ent}})
+MERGE (b:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: $target_name}})
+ON CREATE SET 
+    b.id = $generated_id,
+    b.is_stub = true,
+    b.created_at = $now
+MERGE (a)-[r:`{{edge_type}}` {{workspace_id: $workspace_id}}]->(b)
+ON CREATE SET
+    r.source_id = $source_id,
+    r.metadata = $metadata,
+    r.edge_type = $edge_type,
+    r.created_at = $now,
     r.updated_at = $now
 """
 
@@ -984,7 +1002,8 @@ RETURN count(snap) AS total
 # or post-#131 writer); pre-bitemporal legacy rows return NULL on those.
 _GET_ENTITY_BY_NAME_CYPHER: Final[str] = f"""
 MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: $entity_name}})
-RETURN n.name AS name,
+RETURN n.id AS id,
+       n.name AS name,
        n.kind AS kind,
        n.source_id AS source_id,
        n.chunk_text AS chunk_text,
@@ -1009,7 +1028,8 @@ MATCH (n)-[:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
 WHERE s.workspace_id = $workspace_id
   AND s.valid_from <= datetime($as_of)
   AND (datetime($as_of) < s.valid_to OR s.valid_to IS NULL)
-RETURN n.name AS name,
+RETURN n.id AS id,
+       n.name AS name,
        s.kind AS kind,
        s.source_id AS source_id,
        n.chunk_text AS chunk_text,
@@ -1032,6 +1052,7 @@ _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "  AND neighbour <> seed\n"
     "WITH seed, neighbour, rels, length(path) AS depth\n"
     "RETURN\n"
+    "    seed.id AS id,\n"
     "    seed.name AS seed_name,\n"
     "    seed.kind AS seed_kind,\n"
     "    seed.source_id AS seed_source_id,\n"
@@ -1040,6 +1061,7 @@ _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "    seed.valid_to AS seed_valid_to,\n"
     "    seed.recorded_at AS seed_recorded_at,\n"
     "    collect(CASE WHEN neighbour IS NULL THEN NULL ELSE {\n"
+    "        id: neighbour.id,\n"
     "        name: neighbour.name,\n"
     "        kind: neighbour.kind,\n"
     "        source_id: neighbour.source_id,\n"
@@ -1107,6 +1129,7 @@ _TRAVERSE_AS_OF_CYPHER_TEMPLATE: Final[str] = (
     "    AND (datetime($as_of) < n_state.valid_to OR n_state.valid_to IS NULL)\n"
     "WITH seed, seed_state, neighbour, n_state, rels, length(path) AS depth\n"
     "RETURN\n"
+    "    seed.id AS id,\n"
     "    seed.name AS seed_name,\n"
     "    seed_state.kind AS seed_kind,\n"
     "    seed_state.source_id AS seed_source_id,\n"
@@ -1115,6 +1138,7 @@ _TRAVERSE_AS_OF_CYPHER_TEMPLATE: Final[str] = (
     "    seed_state.valid_to AS seed_valid_to,\n"
     "    seed_state.recorded_at AS seed_recorded_at,\n"
     "    collect(CASE WHEN neighbour IS NULL THEN NULL ELSE {\n"
+    "        id: neighbour.id,\n"
     "        name: neighbour.name,\n"
     "        kind: coalesce(n_state.kind, neighbour.kind),\n"
     "        source_id: coalesce(n_state.source_id, neighbour.source_id),\n"
@@ -1362,13 +1386,9 @@ def _as_of_to_param(as_of: datetime) -> str:
 
 
 def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
-    """Build an :class:`EntityNodeView` from a single-row Cypher result.
-
-    Populates the ADR-0008 bitemporal triple (``valid_from``,
-    ``valid_to``, ``recorded_at``) when present in the row; legacy rows
-    that pre-date the #130 backfill leave them ``None``.
-    """
+    """Build an :class:`EntityNodeView` from a single-row Cypher result."""
     return EntityNodeView(
+        id=uuid.UUID(str(record["id"])),
         name=str(record["name"]),
         kind=str(record["kind"]),
         source=str(record["source_id"]),
@@ -1384,6 +1404,7 @@ def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
 def _neighbour_to_view(payload: dict[str, Any]) -> EntityNodeView:
     """Build a neighbour :class:`EntityNodeView` from collect() output."""
     return EntityNodeView(
+        id=uuid.UUID(str(payload["id"])),
         name=str(payload["name"]),
         kind=str(payload["kind"]),
         source=str(payload["source_id"]),
@@ -1632,6 +1653,25 @@ def _edge_state_fingerprint(params: dict[str, Any]) -> str:
 # Store
 # ---------------------------------------------------------------------------
 
+
+_RESOLVE_STUBS_CYPHER: Final[str] = f"""
+MATCH (stub:{_ENTITY_LABEL} {{workspace_id: $workspace_id, is_stub: true}})
+MATCH (real:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: stub.name}})
+WHERE real <> stub AND (real.is_stub IS NULL OR real.is_stub = false)
+WITH stub, real
+LIMIT $batch_size
+CALL {{
+    WITH stub, real
+    MATCH (caller)-[r]->(stub)
+    WHERE r.workspace_id = $workspace_id
+    CREATE (caller)-[r2:calls {{workspace_id: $workspace_id}}]->(real)
+    SET r2 = properties(r), r2.edge_type = 'calls'
+    DELETE r
+    RETURN count(*) AS in_moved
+}}
+DETACH DELETE stub
+RETURN count(DISTINCT stub) AS resolved
+"""
 
 class Neo4jGraphStore:
     """Neo4j-backed ``GraphStore`` — Phase-2a adapter for issue #104.
@@ -1922,8 +1962,30 @@ class Neo4jGraphStore:
         )
         for ext_edge in edges:
             edge_params = _edge_to_params(ext_edge, source_id, workspace_id, name_to_id, now)
+            
             if edge_params is None:
+                # Cross-file edge: target not in name_to_id (this batch).
+                # Create a stub node and link to it.
+                target_name = getattr(ext_edge, "target_name", None)
+                if not target_name:
+                    continue
+                    
+                edge_type = str(getattr(ext_edge, "edge_type", "calls"))
+                stub_params = {
+                    "workspace_id": str(workspace_id),
+                    "source_id_ent": str(getattr(ext_edge, "source_entity_id")),
+                    "target_name": str(target_name),
+                    "generated_id": str(uuid.uuid4()),
+                    "source_id": str(source_id),
+                    "edge_type": edge_type,
+                    "metadata": _coerce_metadata(getattr(ext_edge, "metadata", None)),
+                    "now": now,
+                }
+                _serialise_metadata_param(stub_params)
+                rendered = _UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
+                await tx.run(rendered, stub_params)
                 continue
+
             if bitemporal_enabled:
                 edge_params["state_fingerprint"] = _edge_state_fingerprint(edge_params)
             # Issue #226 — see entity loop above.
@@ -1973,10 +2035,7 @@ class Neo4jGraphStore:
         edge: EdgeUpsert,
         workspace_id: uuid.UUID,
     ) -> None:
-        """Upsert a single edge within ``workspace_id`` (idempotent).
-
-        See :meth:`upsert_entity` for the flag-gated behaviour split.
-        """
+        """Upsert a single edge within ``workspace_id`` (idempotent)."""
         edge_type = edge.edge_type
         if not _EDGE_TYPE_REGEX.match(edge_type):
             raise ValueError(f"invalid_edge_type:{edge_type}")
@@ -1991,6 +2050,32 @@ class Neo4jGraphStore:
             "now": now,
         }
         rendered = self._select_edge_upsert_cypher(params, edge_type)
+        async with self._driver.session(database=self._config.database) as session:
+            await session.execute_write(_run_write_stmt, rendered, params)
+
+    async def upsert_edge_by_name(
+        self,
+        *,
+        source_entity_id: uuid.UUID,
+        target_name: str,
+        edge_type: str,
+        workspace_id: uuid.UUID,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Create an edge to a target identified by name (creates a stub if missing)."""
+        now = datetime.now(UTC).isoformat()
+        params: dict[str, Any] = {
+            "workspace_id": str(workspace_id),
+            "source_id_ent": str(source_entity_id),
+            "target_name": target_name,
+            "generated_id": str(uuid.uuid4()),
+            "source_id": (metadata.get("source_id") if metadata else ""),
+            "edge_type": edge_type,
+            "metadata": _coerce_metadata(metadata),
+            "now": now,
+        }
+        _serialise_metadata_param(params)
+        rendered = _UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
         async with self._driver.session(database=self._config.database) as session:
             await session.execute_write(_run_write_stmt, rendered, params)
 
@@ -2416,6 +2501,22 @@ class Neo4jGraphStore:
         edge_deleted = int(edge_rows[0].get("deleted", 0)) if edge_rows else 0
         return es_deleted, edge_deleted
 
+    async def resolve_pending_stubs(self, *, workspace_id: uuid.UUID) -> int:
+        """Merge stub nodes with real entities in the same workspace."""
+        params = {
+            "workspace_id": str(workspace_id),
+            "batch_size": 100,
+        }
+        total_resolved = 0
+        async with self._driver.session(database=self._config.database) as session:
+            while True:
+                rows = await session.execute_write(_run_write_returning, _RESOLVE_STUBS_CYPHER, params)
+                count = int(rows[0].get("resolved", 0)) if rows else 0
+                if count == 0:
+                    break
+                total_resolved += count
+        return total_resolved
+
     async def count_records_by_tier(
         self,
         *,
@@ -2585,9 +2686,60 @@ class Neo4jGraphStore:
             rows = await session.execute_read(
                 _run_read_stmt, _COUNT_ENTITIES_BY_SOURCE_CYPHER, params
             )
-        return {
-            str(r["source_id"]): int(r["total"]) for r in rows if r.get("source_id") is not None
+        return {str(r["source_id"]): int(r["total"]) for r in rows if r.get("source_id") is not None}
+
+    async def find_entities_by_metadata(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        key: str,
+        value: Any,
+    ) -> list[EntityNodeView]:
+        """Find entities where metadata[key] == value within workspace.
+
+        Used by the cross-source linker to find candidate matches (e.g. by ARN).
+        """
+        # Note: metadata is stored as JSON string in Neo4j post-#226.
+        cypher = f"""
+        MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+        WHERE n.metadata CONTAINS $query_part
+        RETURN n.name AS name,
+               n.kind AS kind,
+               n.source_id AS source_id,
+               n.chunk_text AS chunk_text,
+               n.valid_from AS valid_from,
+               n.valid_to AS valid_to,
+               n.recorded_at AS recorded_at
+        """
+        params = {
+            "workspace_id": str(workspace_id),
+            "query_part": f'"{key}":"{value}"',
         }
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        return [_entity_record_to_view(r) for r in rows]
+
+    async def get_all_entities(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> list[EntityNodeView]:
+        """Return all entities for a workspace (use with caution)."""
+        cypher = f"""
+        MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+        RETURN n.id AS id,
+               n.name AS name,
+               n.kind AS kind,
+               n.source_id AS source_id,
+               n.name AS chunk_text,
+               n.valid_from AS valid_from,
+               n.valid_to AS valid_to,
+               n.recorded_at AS recorded_at
+        """
+        params = {"workspace_id": str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        return [_entity_record_to_view(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------

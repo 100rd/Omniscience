@@ -45,6 +45,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.requests import Request
 from starlette.responses import Response
 
+from omniscience_server.discovery_worker import DiscoveryWorker
 from omniscience_server.freshness_worker import FreshnessWorker
 from omniscience_server.ingestion.events import DocumentChangeEvent
 from omniscience_server.ingestion.worker import IngestionWorker
@@ -236,14 +237,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
 
     # --- Ingestion worker ---
-    # As of issue #126 the worker drives all three stores: Postgres
-    # (operational metadata via ``IndexWriter``), Neo4j (entities + edges
-    # via ``graph_store``), and Qdrant (chunk embeddings via
-    # ``vector_store``).  ``workspace_id`` is resolved from
-    # ``Source.tenant_id`` per document before any adapter call — the
-    # ACL invariant from ADR-0005/0006 carries through the live path the
-    # same way the migration runner enforces it for backfills.
-    index_writer = IndexWriter(session_factory)
+    # As of issue #126 and Epic #96, the writer is orchestrated and handles
+    # all three stores (Postgres, Neo4j, Qdrant) internally.
+    index_writer = IndexWriter(
+        session_factory=session_factory,
+        graph_store=neo4j_graph_store,
+        vector_store=qdrant_store,
+    )
     # OTLP/HTTP trace receiver (#152) — wired here so the route in
     # ``rest/otlp.py`` can pull the per-workspace ingester off
     # ``app.state``.  Tenant identity is resolved from the bearer token
@@ -262,13 +262,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         connector_registry=connector_registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
-        graph_store=neo4j_graph_store,
-        vector_store=qdrant_store,
         session_factory=session_factory,
     )
     worker_task = asyncio.create_task(worker.start())
     app.state.ingestion_worker = worker
     log.info("ingestion_worker_started")
+
+    # --- Discovery worker (v0.4 Preview) ---
+    discovery_worker = DiscoveryWorker(
+        session_factory=session_factory,
+        settings=settings,
+    )
+    discovery_task = asyncio.create_task(discovery_worker.start())
+    app.state.discovery_worker = discovery_worker
+    log.info("discovery_worker_started")
 
     # --- Freshness worker ---
     freshness_worker = FreshnessWorker(
@@ -328,6 +335,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
+
+    discovery_worker.stop()
+    discovery_task.cancel()
 
     freshness_worker.stop()
     freshness_task.cancel()
