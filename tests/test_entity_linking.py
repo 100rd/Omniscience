@@ -1,25 +1,30 @@
-"""Tests for Issue #29 — Cross-source entity linking.
+"""Tests for Issue #29 — Cross-source entity linking (ADR-0012 graph-store API).
 
 Coverage:
 - normalize_entity_name: prefix stripping, separator normalisation, edge cases
 - exact_name_match: match/no-match, case insensitivity, separator variance
 - resource_name_match: tf↔k8s fuzzy matching, threshold behaviour, empty inputs
 - EntityLinker.link_entities: creates cross-ref edges, skips same-source pairs
-- EntityLinker.link_entities: idempotency (running twice doesn't duplicate edges)
+- EntityLinker.link_entities: idempotency — upsert_edge is called with same
+  (source_entity_id, target_entity_id) on re-run; graph dedupes via upsert
 - EntityLinker.link_entities: returns count of new edges
-- EntityLinker.resolve_cross_references: global pass over multiple sources
-- Pipeline stage_link wiring: called after graph stage, swallows errors
+- EntityLinker.resolve_stubs: delegates to graph_store.resolve_pending_stubs
+- Pipeline _stage_link wiring: called after graph stage, swallows errors
+
+NOTE: The SQL-era _make_session_factory / Entity ORM mock has been removed.
+EntityLinker now takes graph_store: GraphStore (ADR-0012).  All entity fixtures
+use EntityNodeView.  The old _compute_links(existing_set) signature no longer
+exists; idempotency is expressed via upsert_edge semantics (the graph dedupes).
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from omniscience_core.db.models import Entity
+from omniscience_core.storage.graph import EntityNodeView
 from omniscience_index.linker import CROSS_REF_EDGE_TYPE, EntityLinker
 from omniscience_index.matchers import (
     exact_name_match,
@@ -34,80 +39,37 @@ from omniscience_index.matchers import (
 _NOW = datetime(2026, 4, 17, 12, 0, 0, tzinfo=UTC)
 
 
-def _make_entity(
+def _make_node(
     *,
-    source_id: uuid.UUID | None = None,
-    entity_type: str = "function",
+    source: uuid.UUID | None = None,
+    kind: str = "function",
     name: str = "mymod.my_func",
-    display_name: str | None = None,
-    entity_metadata: dict[str, Any] | None = None,
-) -> Entity:
-    return Entity(
+    chunk_text: str | None = None,
+) -> EntityNodeView:
+    """Construct an EntityNodeView for linker tests."""
+    return EntityNodeView(
         id=uuid.uuid4(),
-        source_id=source_id or uuid.uuid4(),
-        entity_type=entity_type,
         name=name,
-        display_name=display_name or name.split(".")[-1],
-        chunk_id=None,
-        entity_metadata=entity_metadata or {},
-        created_at=_NOW,
+        kind=kind,
+        source=str(source or uuid.uuid4()),
+        chunk_text=chunk_text,
     )
 
 
-def _make_session_factory(
-    entities: list[Entity] | None = None,
-    existing_edges: list[tuple[uuid.UUID, uuid.UUID]] | None = None,
-) -> MagicMock:
-    """Build an async_sessionmaker mock for EntityLinker tests.
+def _make_graph_store(
+    entities: list[EntityNodeView] | None = None,
+    resolve_count: int = 0,
+) -> AsyncMock:
+    """Build a minimal GraphStore mock for EntityLinker tests.
 
-    ``entities`` is the list returned by SELECT Entity queries.
-    ``existing_edges`` is the list of (src_id, tgt_id) pairs for cross_ref edges.
+    ``entities``      — list returned by get_all_entities(workspace_id=...)
+    ``resolve_count`` — value returned by resolve_pending_stubs(workspace_id=...)
     """
-    entities = entities or []
-    existing_edges = existing_edges or []
-
-    # Scalars result for Entity queries
-    def _make_scalars_result(rows: list[Any]) -> MagicMock:
-        sr = MagicMock()
-        sr.scalars.return_value.all.return_value = rows
-        return sr
-
-    # Rows result for Edge pair queries
-    def _make_rows_result(pairs: list[tuple[uuid.UUID, uuid.UUID]]) -> MagicMock:
-        rr = MagicMock()
-        rr.__iter__ = MagicMock(return_value=iter(pairs))
-        return rr
-
-    session = AsyncMock()
-
-    # execute is called multiple times; cycle through expected return values
-    call_returns = [
-        _make_scalars_result(entities),  # _fetch_entities_for_source
-        _make_scalars_result(entities),  # _fetch_entities_excluding_source
-        _make_rows_result(existing_edges),  # _fetch_existing_cross_ref_pairs
-    ]
-
-    async def _execute_side_effect(_stmt: Any) -> Any:
-        if call_returns:
-            return call_returns.pop(0)
-        return _make_scalars_result([])
-
-    session.execute = AsyncMock(side_effect=_execute_side_effect)
-    session.flush = AsyncMock()
-    session.add = MagicMock()
-
-    cm = AsyncMock()
-    cm.__aenter__ = AsyncMock(return_value=session)
-    cm.__aexit__ = AsyncMock(return_value=False)
-
-    tx = AsyncMock()
-    tx.__aenter__ = AsyncMock(return_value=None)
-    tx.__aexit__ = AsyncMock(return_value=False)
-    session.begin = MagicMock(return_value=tx)
-
-    factory = MagicMock()
-    factory.return_value = cm
-    return factory
+    store = AsyncMock()
+    store.get_all_entities = AsyncMock(return_value=entities or [])
+    store.upsert_edge = AsyncMock(return_value=None)
+    store.resolve_pending_stubs = AsyncMock(return_value=resolve_count)
+    return store
 
 
 # ===========================================================================
@@ -141,7 +103,6 @@ class TestNormalizeEntityName:
         assert normalize_entity_name("Deployment/nginx") == "deployment_nginx"
 
     def test_strips_leading_trailing_underscores(self) -> None:
-        # If prefix stripping leaves leading/trailing underscores
         result = normalize_entity_name("_foo_")
         assert not result.startswith("_")
         assert not result.endswith("_")
@@ -195,7 +156,6 @@ class TestResourceNameMatch:
         assert resource_name_match("nginx", "nginx") == 1.0
 
     def test_tf_k8s_partial_overlap(self) -> None:
-        # "aws_s3_bucket.my_storage" ↔ "my-storage" should have overlap
         score = resource_name_match("my_storage_bucket", "my-storage")
         assert score > 0.0
 
@@ -214,343 +174,233 @@ class TestResourceNameMatch:
         assert 0.0 <= score <= 1.0
 
     def test_high_overlap_scores_above_threshold(self) -> None:
-        # Both refer to "nginx" — should score high
         score = resource_name_match("aws_instance.nginx", "nginx-deployment")
         assert score >= 0.4
 
     def test_prefix_stripped_before_compare(self) -> None:
-        # aws_nginx_instance vs k8s_nginx → after stripping, "nginx" common token
         score = resource_name_match("aws_nginx_instance", "k8s_nginx_service")
         assert score > 0.0
 
 
 # ===========================================================================
-# EntityLinker — unit tests with mocked session
+# EntityLinker — unit tests with mocked GraphStore
 # ===========================================================================
 
 
 class TestEntityLinkerLinkEntities:
     @pytest.mark.asyncio
     async def test_returns_zero_when_no_entities(self) -> None:
-        factory = _make_session_factory(entities=[])
-        linker = EntityLinker(factory)
-        count = await linker.link_entities(uuid.uuid4())
+        """link_entities returns 0 immediately when the workspace has no entities."""
+        ws = uuid.uuid4()
+        store = _make_graph_store(entities=[])
+        linker = EntityLinker(graph_store=store)
+        count = await linker.link_entities(source_id=uuid.uuid4(), workspace_id=ws)
         assert count == 0
 
     @pytest.mark.asyncio
     async def test_creates_edge_for_exact_name_match(self) -> None:
+        """Exact-name match across two sources creates a CROSS_REF_EDGE_TYPE edge."""
+        ws = uuid.uuid4()
         source_a = uuid.uuid4()
         source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="nginx", display_name="nginx")
-        ent_b = _make_entity(source_id=source_b, name="nginx", display_name="nginx")
+        ent_a = _make_node(source=source_a, name="nginx")
+        ent_b = _make_node(source=source_b, name="nginx")
 
-        linker = EntityLinker.__new__(EntityLinker)
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
+        count = await linker.link_entities(source_id=source_a, workspace_id=ws)
 
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        new_edges = linker._compute_links([ent_a], [ent_b], existing)
-
-        assert len(new_edges) == 1
-        assert new_edges[0].edge_type == CROSS_REF_EDGE_TYPE
+        assert count == 1
+        store.upsert_edge.assert_awaited_once()
+        edge_arg = store.upsert_edge.call_args.kwargs["edge"]
+        assert edge_arg.edge_type == CROSS_REF_EDGE_TYPE
 
     @pytest.mark.asyncio
     async def test_no_edge_for_same_source(self) -> None:
+        """Two entities from the same source never produce a cross-ref edge.
+
+        Production splits entities into source_entities vs other_entities before
+        calling _compute_links, so same-source pairs are never candidates.
+        """
+        ws = uuid.uuid4()
         source_id = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_id, name="nginx")
-        ent_b = _make_entity(source_id=source_id, name="nginx")
+        ent_a = _make_node(source=source_id, name="nginx")
+        ent_b = _make_node(source=source_id, name="nginx")
 
-        linker = EntityLinker.__new__(EntityLinker)
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        new_edges = linker._compute_links([ent_a], [ent_b], existing)
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
+        count = await linker.link_entities(source_id=source_id, workspace_id=ws)
 
-        assert new_edges == []
-
-    @pytest.mark.asyncio
-    async def test_idempotency_no_duplicate_edge(self) -> None:
-        source_a = uuid.uuid4()
-        source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="nginx")
-        ent_b = _make_entity(source_id=source_b, name="nginx")
-
-        linker = EntityLinker.__new__(EntityLinker)
-
-        # First pass — creates edge
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        first_pass = linker._compute_links([ent_a], [ent_b], existing)
-        assert len(first_pass) == 1
-
-        # Second pass — existing_pairs now contains the pair
-        second_pass = linker._compute_links([ent_a], [ent_b], existing)
-        assert len(second_pass) == 0
-
-    @pytest.mark.asyncio
-    async def test_edge_metadata_contains_score(self) -> None:
-        source_a = uuid.uuid4()
-        source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="myservice")
-        ent_b = _make_entity(source_id=source_b, name="myservice")
-
-        linker = EntityLinker.__new__(EntityLinker)
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        edges = linker._compute_links([ent_a], [ent_b], existing)
-
-        assert "score" in edges[0].edge_metadata
-        assert edges[0].edge_metadata["score"] == 1.0
-
-    @pytest.mark.asyncio
-    async def test_edge_metadata_contains_strategy(self) -> None:
-        source_a = uuid.uuid4()
-        source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="myservice")
-        ent_b = _make_entity(source_id=source_b, name="myservice")
-
-        linker = EntityLinker.__new__(EntityLinker)
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        edges = linker._compute_links([ent_a], [ent_b], existing)
-
-        assert "strategy" in edges[0].edge_metadata
-        assert edges[0].edge_metadata["strategy"] in {
-            "exact_name",
-            "exact_display_name",
-            "resource_name",
-            "service_name",
-        }
+        assert count == 0
+        store.upsert_edge.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_no_edge_for_clearly_different_names(self) -> None:
+        """Entities with clearly different names produce no edge."""
+        ws = uuid.uuid4()
         source_a = uuid.uuid4()
         source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="postgres_primary")
-        ent_b = _make_entity(source_id=source_b, name="redis_cache_secondary")
+        ent_a = _make_node(source=source_a, name="postgres_primary")
+        ent_b = _make_node(source=source_b, name="redis_cache_secondary")
 
-        linker = EntityLinker.__new__(EntityLinker)
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        edges = linker._compute_links([ent_a], [ent_b], existing)
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
+        count = await linker.link_entities(source_id=source_a, workspace_id=ws)
 
-        assert edges == []
+        assert count == 0
+        store.upsert_edge.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_edge_metadata_contains_score(self) -> None:
+        """upsert_edge is called with metadata containing a numeric score."""
+        ws = uuid.uuid4()
+        source_a = uuid.uuid4()
+        source_b = uuid.uuid4()
+        ent_a = _make_node(source=source_a, name="myservice")
+        ent_b = _make_node(source=source_b, name="myservice")
+
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
+        await linker.link_entities(source_id=source_a, workspace_id=ws)
+
+        edge_arg = store.upsert_edge.call_args.kwargs["edge"]
+        assert "score" in edge_arg.metadata
+        assert edge_arg.metadata["score"] == 1.0
+
+    @pytest.mark.asyncio
+    async def test_edge_metadata_contains_strategy(self) -> None:
+        """upsert_edge is called with metadata containing a strategy string."""
+        ws = uuid.uuid4()
+        source_a = uuid.uuid4()
+        source_b = uuid.uuid4()
+        ent_a = _make_node(source=source_a, name="myservice")
+        ent_b = _make_node(source=source_b, name="myservice")
+
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
+        await linker.link_entities(source_id=source_a, workspace_id=ws)
+
+        edge_arg = store.upsert_edge.call_args.kwargs["edge"]
+        assert "strategy" in edge_arg.metadata
+        assert edge_arg.metadata["strategy"] in {
+            "exact_name",
+            "resource_name",
+            "jira_ticket_match",
+        }
 
     @pytest.mark.asyncio
     async def test_resource_name_match_tf_k8s(self) -> None:
+        """Terraform↔K8s resource_name strategy creates an edge when score >= threshold."""
+        ws = uuid.uuid4()
         source_a = uuid.uuid4()
         source_b = uuid.uuid4()
-        ent_tf = _make_entity(
-            source_id=source_a,
-            entity_type="terraform_resource",
-            name="aws_instance.nginx",
-            display_name="nginx",
-        )
-        ent_k8s = _make_entity(
-            source_id=source_b,
-            entity_type="k8s_resource",
-            name="nginx-deployment",
-            display_name="nginx",
-        )
+        ent_tf = _make_node(source=source_a, kind="terraform_resource", name="aws_instance.nginx")
+        ent_k8s = _make_node(source=source_b, kind="k8s_resource", name="nginx-deployment")
 
-        linker = EntityLinker.__new__(EntityLinker)
-        existing: set[tuple[uuid.UUID, uuid.UUID]] = set()
-        edges = linker._compute_links([ent_tf], [ent_k8s], existing)
+        store = _make_graph_store(entities=[ent_tf, ent_k8s])
+        linker = EntityLinker(graph_store=store)
+        count = await linker.link_entities(source_id=source_a, workspace_id=ws)
 
-        # display_name "nginx" == "nginx" → exact_display_name match
-        assert len(edges) >= 1
+        # "nginx" common token — resource_name score crosses threshold
+        assert count >= 1
 
     @pytest.mark.asyncio
     async def test_link_entities_returns_count(self) -> None:
-        """link_entities returns the number of new edges created."""
+        """link_entities returns the number of upsert_edge calls made."""
+        ws = uuid.uuid4()
         source_a = uuid.uuid4()
         source_b = uuid.uuid4()
+        ent_a = _make_node(source=source_a, name="shared_service")
+        ent_b = _make_node(source=source_b, name="shared_service")
 
-        ent_a = _make_entity(source_id=source_a, name="shared_service")
-        ent_b = _make_entity(source_id=source_b, name="shared_service")
-
-        # Simulate DB: both queries return all entities (source + others)
-
-        session = AsyncMock()
-
-        def _scalars(rows: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.scalars.return_value.all.return_value = rows
-            return r
-
-        def _rows(pairs: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.__iter__ = MagicMock(return_value=iter(pairs))
-            return r
-
-        call_returns = [
-            _scalars([ent_a]),  # fetch for source_a
-            _scalars([ent_b]),  # fetch excluding source_a
-            _rows([]),  # existing cross_ref pairs
-        ]
-
-        async def _exec(_stmt: Any) -> Any:
-            return call_returns.pop(0)
-
-        session.execute = AsyncMock(side_effect=_exec)
-        session.flush = AsyncMock()
-        session.add = MagicMock()
-
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=session)
-        cm.__aexit__ = AsyncMock(return_value=False)
-
-        tx = AsyncMock()
-        tx.__aenter__ = AsyncMock(return_value=None)
-        tx.__aexit__ = AsyncMock(return_value=False)
-        session.begin = MagicMock(return_value=tx)
-
-        factory = MagicMock()
-        factory.return_value = cm
-
-        linker = EntityLinker(factory)
-        count = await linker.link_entities(source_a)
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
+        count = await linker.link_entities(source_id=source_a, workspace_id=ws)
 
         assert count == 1
-        session.add.assert_called_once()
+        assert store.upsert_edge.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_link_entities_idempotent_with_existing_pairs(self) -> None:
-        """Running link_entities twice returns 0 on second call (existing_pairs loaded)."""
+    async def test_idempotency_upsert_called_with_same_pair_on_rerun(self) -> None:
+        """Idempotency: running link_entities twice calls upsert_edge with the
+        same (source_entity_id, target_entity_id) pair both times.
+
+        The graph-store guarantees deduplication via upsert semantics — the
+        production code does NOT maintain a client-side duplicate-tracking set
+        between runs.  The correct assertion is therefore that the same edge
+        args are submitted on each call (not that the second call is skipped),
+        and that the graph layer absorbs the duplicate.
+        """
+        ws = uuid.uuid4()
         source_a = uuid.uuid4()
         source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="shared_service")
-        ent_b = _make_entity(source_id=source_b, name="shared_service")
+        ent_a = _make_node(source=source_a, name="shared_service")
+        ent_b = _make_node(source=source_b, name="shared_service")
 
-        # Second call: existing_pairs already has the pair
-        existing_pair = (ent_a.id, ent_b.id)
+        store = _make_graph_store(entities=[ent_a, ent_b])
+        linker = EntityLinker(graph_store=store)
 
-        session = AsyncMock()
+        await linker.link_entities(source_id=source_a, workspace_id=ws)
+        first_edge = store.upsert_edge.call_args.kwargs["edge"]
 
-        def _scalars(rows: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.scalars.return_value.all.return_value = rows
-            return r
+        # Reset call tracking; re-run with same entity set
+        store.upsert_edge.reset_mock()
+        await linker.link_entities(source_id=source_a, workspace_id=ws)
+        second_edge = store.upsert_edge.call_args.kwargs["edge"]
 
-        def _rows(pairs: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.__iter__ = MagicMock(return_value=iter(pairs))
-            return r
-
-        call_returns = [
-            _scalars([ent_a]),
-            _scalars([ent_b]),
-            _rows([existing_pair]),  # already linked
-        ]
-
-        async def _exec(_stmt: Any) -> Any:
-            return call_returns.pop(0)
-
-        session.execute = AsyncMock(side_effect=_exec)
-        session.flush = AsyncMock()
-        session.add = MagicMock()
-
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=session)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        tx = AsyncMock()
-        tx.__aenter__ = AsyncMock(return_value=None)
-        tx.__aexit__ = AsyncMock(return_value=False)
-        session.begin = MagicMock(return_value=tx)
-
-        factory = MagicMock()
-        factory.return_value = cm
-
-        linker = EntityLinker(factory)
-        count = await linker.link_entities(source_a)
-
-        assert count == 0
-        session.add.assert_not_called()
+        # Both runs submit the same (src, tgt) pair — graph dedupes via upsert
+        assert first_edge.source_entity_id == second_edge.source_entity_id
+        assert first_edge.target_entity_id == second_edge.target_entity_id
+        assert first_edge.edge_type == second_edge.edge_type
 
 
 # ===========================================================================
-# EntityLinker — resolve_cross_references
+# EntityLinker — resolve_stubs
 # ===========================================================================
 
 
 class TestEntityLinkerResolve:
     @pytest.mark.asyncio
-    async def test_resolve_returns_zero_when_no_entities(self) -> None:
-        session = AsyncMock()
-
-        def _scalars(rows: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.scalars.return_value.all.return_value = rows
-            return r
-
-        def _rows(pairs: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.__iter__ = MagicMock(return_value=iter(pairs))
-            return r
-
-        call_returns = [_scalars([])]
-
-        async def _exec(_stmt: Any) -> Any:
-            return call_returns.pop(0)
-
-        session.execute = AsyncMock(side_effect=_exec)
-        session.flush = AsyncMock()
-        session.add = MagicMock()
-
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=session)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        tx = AsyncMock()
-        tx.__aenter__ = AsyncMock(return_value=None)
-        tx.__aexit__ = AsyncMock(return_value=False)
-        session.begin = MagicMock(return_value=tx)
-
-        factory = MagicMock()
-        factory.return_value = cm
-
-        linker = EntityLinker(factory)
-        count = await linker.resolve_cross_references()
+    async def test_resolve_returns_zero_when_no_stubs(self) -> None:
+        """resolve_stubs returns 0 when graph_store.resolve_pending_stubs returns 0."""
+        ws = uuid.uuid4()
+        store = _make_graph_store(resolve_count=0)
+        linker = EntityLinker(graph_store=store)
+        count = await linker.resolve_stubs(workspace_id=ws)
         assert count == 0
+        store.resolve_pending_stubs.assert_awaited_once_with(workspace_id=ws)
 
     @pytest.mark.asyncio
-    async def test_resolve_links_across_two_sources(self) -> None:
+    async def test_resolve_returns_stub_count_from_store(self) -> None:
+        """resolve_stubs returns the count from graph_store.resolve_pending_stubs.
+
+        NOTE: The SQL-era resolve_cross_references iterated all entities and
+        called session.add for each pair.  The graph-based resolve_stubs
+        delegates entirely to a Cypher batch in the store; the test asserts
+        the delegated return value and that the store method was called.
+        """
+        ws = uuid.uuid4()
+        store = _make_graph_store(resolve_count=3)
+        linker = EntityLinker(graph_store=store)
+        count = await linker.resolve_stubs(workspace_id=ws)
+        assert count == 3
+        store.resolve_pending_stubs.assert_awaited_once_with(workspace_id=ws)
+
+    @pytest.mark.asyncio
+    async def test_link_entities_calls_resolve_stubs(self) -> None:
+        """link_entities always calls resolve_stubs (stub resolution pass) after linking."""
+        ws = uuid.uuid4()
         source_a = uuid.uuid4()
         source_b = uuid.uuid4()
-        ent_a = _make_entity(source_id=source_a, name="shared")
-        ent_b = _make_entity(source_id=source_b, name="shared")
+        ent_a = _make_node(source=source_a, name="shared")
+        ent_b = _make_node(source=source_b, name="shared")
 
-        session = AsyncMock()
+        store = _make_graph_store(entities=[ent_a, ent_b], resolve_count=1)
+        linker = EntityLinker(graph_store=store)
+        await linker.link_entities(source_id=source_a, workspace_id=ws)
 
-        def _scalars(rows: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.scalars.return_value.all.return_value = rows
-            return r
-
-        def _rows(pairs: list[Any]) -> MagicMock:
-            r = MagicMock()
-            r.__iter__ = MagicMock(return_value=iter(pairs))
-            return r
-
-        call_returns = [
-            _scalars([ent_a, ent_b]),  # _fetch_all_entities
-            _rows([]),  # _fetch_existing_cross_ref_pairs
-        ]
-
-        async def _exec(_stmt: Any) -> Any:
-            return call_returns.pop(0)
-
-        session.execute = AsyncMock(side_effect=_exec)
-        session.flush = AsyncMock()
-        session.add = MagicMock()
-
-        cm = AsyncMock()
-        cm.__aenter__ = AsyncMock(return_value=session)
-        cm.__aexit__ = AsyncMock(return_value=False)
-        tx = AsyncMock()
-        tx.__aenter__ = AsyncMock(return_value=None)
-        tx.__aexit__ = AsyncMock(return_value=False)
-        session.begin = MagicMock(return_value=tx)
-
-        factory = MagicMock()
-        factory.return_value = cm
-
-        linker = EntityLinker(factory)
-        count = await linker.resolve_cross_references()
-
-        assert count == 1
-        session.add.assert_called_once()
+        # resolve_pending_stubs must be called as part of the link_entities flow
+        store.resolve_pending_stubs.assert_awaited_once_with(workspace_id=ws)
 
 
 # ===========================================================================
@@ -561,16 +411,16 @@ class TestEntityLinkerResolve:
 class TestPipelineStageLinkWiring:
     @pytest.mark.asyncio
     async def test_stage_link_calls_link_entities(self) -> None:
-        """_stage_link forwards source_id to entity_linker.link_entities."""
+        """_stage_link forwards source_id and workspace_id to entity_linker.link_entities."""
         from omniscience_server.ingestion.events import DocumentChangeEvent
         from omniscience_server.ingestion.pipeline import IngestionPipeline
 
         source_id = uuid.uuid4()
+        workspace_id = uuid.uuid4()
 
         mock_linker = AsyncMock()
         mock_linker.link_entities = AsyncMock(return_value=3)
 
-        # Minimal pipeline — only need the linker wired
         pipeline = IngestionPipeline.__new__(IngestionPipeline)
         pipeline._entity_linker = mock_linker
 
@@ -582,9 +432,12 @@ class TestPipelineStageLinkWiring:
         bound.debug = MagicMock()
         bound.warning = MagicMock()
 
-        await pipeline._stage_link(event, bound)
+        await pipeline._stage_link(event, workspace_id, bound)
 
-        mock_linker.link_entities.assert_called_once_with(source_id)
+        mock_linker.link_entities.assert_called_once_with(
+            source_id=source_id,
+            workspace_id=workspace_id,
+        )
 
     @pytest.mark.asyncio
     async def test_stage_link_skipped_when_no_linker(self) -> None:
@@ -601,8 +454,8 @@ class TestPipelineStageLinkWiring:
 
         bound = MagicMock()
 
-        # Should return without error
-        await pipeline._stage_link(event, bound)
+        # Should return without error; no calls to bound.debug
+        await pipeline._stage_link(event, uuid.uuid4(), bound)
         bound.debug.assert_not_called()
 
     @pytest.mark.asyncio
@@ -625,5 +478,5 @@ class TestPipelineStageLinkWiring:
         bound.warning = MagicMock()
 
         # Must not raise
-        await pipeline._stage_link(event, bound)
+        await pipeline._stage_link(event, uuid.uuid4(), bound)
         bound.warning.assert_called_once()
