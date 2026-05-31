@@ -5,11 +5,11 @@ session factory, index writer) are mocked — no real NATS, Postgres, or
 embedding service is required.
 
 Coverage:
-  - Happy path: fetch → parse → chunk → embed → index
+  - Happy path: fetch -> parse -> chunk -> embed -> index
   - Content hash dedup (unchanged)
-  - Deleted document → tombstone
-  - Error in fetch stage → error result + consumer nak
-  - Error in embed stage → error result + consumer nak
+  - Deleted document -> tombstone
+  - Error in fetch stage -> error result + consumer nak
+  - Error in embed stage -> error result + consumer nak
   - IngestionRun counter tracking
   - Prometheus metrics increment
   - Graceful stop
@@ -81,7 +81,13 @@ def _make_embedding_provider(
 
 
 def _make_index_writer(upsert_action: str = "created") -> MagicMock:
-    """Return a mock IndexWriter satisfying IndexWriterProtocol."""
+    """Return a mock IndexWriter satisfying IndexWriterProtocol.
+
+    The orchestrated IndexWriter fans out to Postgres + Qdrant via
+    ``upsert_document`` and to Neo4j via ``upsert_graph``.  Both methods
+    are stubbed here so pipeline tests can assert on either without
+    needing real adapters.
+    """
     result = MagicMock()
     result.action = upsert_action
     result.chunks_written = 1
@@ -89,30 +95,9 @@ def _make_index_writer(upsert_action: str = "created") -> MagicMock:
 
     writer = MagicMock(spec=IndexWriterProtocol)
     writer.upsert_document = AsyncMock(return_value=result)
+    writer.upsert_graph = AsyncMock(return_value=None)
     writer.tombstone = AsyncMock(return_value=True)
     return writer
-
-
-def _make_graph_store() -> MagicMock:
-    """Return a mock GraphStore for the pipeline / worker tests."""
-    store = MagicMock()
-    store.upsert_graph = AsyncMock(return_value=None)
-    store.delete_tombstoned = AsyncMock(return_value=0)
-    return store
-
-
-def _make_vector_store() -> MagicMock:
-    """Return a mock VectorStore for the pipeline / worker tests."""
-    outcome = MagicMock()
-    outcome.action = "created"
-    outcome.chunks_written = 1
-    outcome.document_id = uuid.uuid4()
-    outcome.doc_version = 1
-
-    store = MagicMock()
-    store.upsert_chunks = AsyncMock(return_value=outcome)
-    store.delete_by_document = AsyncMock(return_value=True)
-    return store
 
 
 def _make_session_factory(source: Any = None) -> MagicMock:
@@ -157,15 +142,16 @@ def _make_pipeline(
     connector: MagicMock | None = None,
     embedding_provider: MagicMock | None = None,
     index_writer: MagicMock | None = None,
-    graph_store: MagicMock | None = None,
-    vector_store: MagicMock | None = None,
 ) -> IngestionPipeline:
+    """Build a pipeline with the new single-index_writer API.
+
+    The orchestrated IndexWriter fans out to all three stores internally;
+    pipeline tests inject a mock writer and assert on its methods.
+    """
     return IngestionPipeline(
         connector=connector or _make_connector(),
         embedding_provider=embedding_provider or _make_embedding_provider(),
         index_writer=index_writer or _make_index_writer(),
-        graph_store=graph_store or _make_graph_store(),
-        vector_store=vector_store or _make_vector_store(),
     )
 
 
@@ -304,7 +290,10 @@ class TestIngestionPipelineDeletedDocument:
             event, config=None, secrets={}, workspace_id=_DEFAULT_WORKSPACE_ID
         )
         assert result.action == "deleted"
-        writer.tombstone.assert_awaited_once_with(event.source_id, event.external_id)
+        # Production code: tombstone(source_id, external_id, workspace_id=workspace_id)
+        writer.tombstone.assert_awaited_once_with(
+            event.source_id, event.external_id, workspace_id=_DEFAULT_WORKSPACE_ID
+        )
 
     @pytest.mark.asyncio
     async def test_deleted_action_does_not_call_embed(self) -> None:
@@ -590,10 +579,13 @@ def _make_worker(
     connector: MagicMock | None = None,
     provider: MagicMock | None = None,
     writer: MagicMock | None = None,
-    graph_store: MagicMock | None = None,
-    vector_store: MagicMock | None = None,
     source: Any = None,
 ) -> tuple[IngestionWorker, MagicMock]:
+    """Build an IngestionWorker with all collaborators mocked.
+
+    The worker now takes only ``index_writer`` (no separate graph_store /
+    vector_store) — the orchestrated IndexWriter fans out internally.
+    """
     queue_consumer = _make_queue_consumer(events or [])
     registry = _make_connector_registry(connector or _make_connector())
     embedding_provider = provider or _make_embedding_provider()
@@ -607,8 +599,6 @@ def _make_worker(
         connector_registry=registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
-        graph_store=graph_store or _make_graph_store(),
-        vector_store=vector_store or _make_vector_store(),
         session_factory=session_factory,
     )
     return worker, queue_consumer
@@ -695,8 +685,6 @@ class TestIngestionWorkerErrors:
             connector_registry=_make_connector_registry(connector),
             embedding_provider=_make_embedding_provider(),
             index_writer=_make_index_writer(),
-            graph_store=_make_graph_store(),
-            vector_store=_make_vector_store(),
             session_factory=_make_session_factory(source=_make_source()),
         )
 
@@ -734,8 +722,6 @@ class TestIngestionWorkerErrors:
             connector_registry=_make_connector_registry(),
             embedding_provider=provider,
             index_writer=_make_index_writer(),
-            graph_store=_make_graph_store(),
-            vector_store=_make_vector_store(),
             session_factory=_make_session_factory(source=_make_source()),
         )
 

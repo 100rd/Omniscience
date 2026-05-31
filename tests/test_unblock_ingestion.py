@@ -198,10 +198,6 @@ def _make_worker(
     embedding_provider.provider_name = "test-provider"
 
     index_writer = MagicMock()
-    graph_store = MagicMock()
-    graph_store.upsert_graph = AsyncMock(return_value=None)
-    vector_store = MagicMock()
-    vector_store.upsert_chunks = AsyncMock(return_value=MagicMock(action="created"))
 
     # Session factory: return a Source row with a non-null tenant_id so
     # workspace resolution succeeds.  These tests stub IngestionPipeline.run,
@@ -227,8 +223,6 @@ def _make_worker(
         connector_registry=mock_registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
-        graph_store=graph_store,
-        vector_store=vector_store,
         session_factory=session_factory,
         secrets_resolver=secrets_resolver,
     )
