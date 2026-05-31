@@ -1498,18 +1498,26 @@ source = { editable = "packages/retrieval" }
 dependencies = [
     { name = "asyncpg" },
     { name = "httpx" },
+    { name = "omniscience-connectors" },
     { name = "omniscience-core" },
     { name = "omniscience-embeddings" },
+    { name = "omniscience-index" },
+    { name = "prometheus-client" },
     { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "omniscience-connectors", editable = "packages/connectors" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
+    { name = "omniscience-index", editable = "packages/index" },
+    { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
+    { name = "structlog", specifier = ">=24.2.0" },
 ]
 
 [[package]]
