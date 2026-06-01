@@ -11,11 +11,12 @@ import { ApiClient } from "../api/client";
  * Auth strategy: httpOnly session cookie (set by POST /api/v1/admin/session).
  *
  * The plaintext API token is never stored in localStorage or any JS-readable
- * storage after login.  On mount we probe /health to determine whether the
- * browser already has a valid session cookie.  On login we POST the token
- * to the session endpoint which sets the httpOnly + Secure + SameSite=Strict
- * cookie server-side.  On logout we DELETE the session endpoint to clear both
- * cookies.
+ * storage after login.  On mount we probe GET /api/v1/sources (an authenticated
+ * endpoint) to determine whether the browser already has a valid session cookie.
+ * A 401/403 response means no valid session → show the login screen.  On login
+ * we POST the token to the session endpoint which sets the httpOnly + Secure +
+ * SameSite=Strict cookie server-side.  On logout we DELETE the session endpoint
+ * to clear both cookies.
  *
  * The in-memory `authenticated` flag is the only UI state kept in React; the
  * actual credential lives exclusively in the httpOnly cookie.
@@ -36,10 +37,14 @@ export function TokenProvider({ children }: { children: ReactNode }) {
   const [authenticated, setAuthenticated] = useState<boolean>(false);
   const [probed, setProbed] = useState<boolean>(false);
 
-  // Probe on mount to restore session from existing httpOnly cookie.
+  // Probe an authenticated endpoint on mount to restore session from an
+  // existing httpOnly cookie.  GET /api/v1/sources returns 401/403 when the
+  // session cookie is absent or invalid, so a catch here correctly drives the
+  // login screen.  Using /health would always succeed (public endpoint) and
+  // would incorrectly keep `authenticated` true even without a session cookie.
   useEffect(() => {
     client
-      .health()
+      .listSources()
       .then(() => setAuthenticated(true))
       .catch(() => setAuthenticated(false))
       .finally(() => setProbed(true));

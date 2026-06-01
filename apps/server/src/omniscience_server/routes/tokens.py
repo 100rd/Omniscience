@@ -42,6 +42,7 @@ class TokenCreateRequest(BaseModel):
     name: str
     scopes: list[str]
     expires_at: datetime | None = None
+    workspace_id: uuid.UUID | None = None
 
 
 class TokenCreateResponse(BaseModel):
@@ -76,6 +77,10 @@ async def create_token(
 
     The plaintext secret is returned exactly once in the response body.
     It is not stored and cannot be recovered again.
+
+    If ``workspace_id`` is provided it is persisted on the token row,
+    which allows the token to satisfy workspace-scoped endpoints (e.g.
+    stats, graph retrieval).
     """
     factory = _get_db_factory(request)
     env = _get_env(request)
@@ -91,6 +96,7 @@ async def create_token(
             token_prefix=prefix,
             scopes=payload.scopes,
             expires_at=payload.expires_at,
+            workspace_id=payload.workspace_id,
         )
         db.add(token_obj)
         await db.flush()
