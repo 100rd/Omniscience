@@ -20,7 +20,8 @@
  * visible refresh indicator.
  *
  * ACL: the `stats:read` scope is enforced server-side. If the API returns 403
- * we render a clear "missing scope" banner instead of crashing.
+ * we render a clear banner surfacing the server's actual reason (e.g. missing
+ * scope vs missing workspace binding) instead of a hardcoded message.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -37,6 +38,10 @@ import { useTokenContext } from "../context/TokenContext";
 const NEVER_SYNCED_SENTINEL = 1e14;
 
 const REFRESH_MS = 30_000;
+
+/** Fallback message when the server returns 403 but the body carries no detail. */
+const FALLBACK_403_MSG =
+  "Your token doesn't have stats:read. Ask an administrator to issue a token with the freshness scope to view this panel.";
 
 type Bucket = "fresh" | "approaching" | "stale" | "never-synced" | "no-sla";
 
@@ -381,22 +386,25 @@ function Body({
     );
   }
 
-  /* Error: distinguish 403 (missing scope) from other errors so the operator
-   * isn't left guessing. We keep stale data hidden in this branch — surfacing
-   * possibly-incorrect cached data alongside an error is worse than nothing. */
+  /* Error: distinguish 403 from other errors so the operator isn't left
+   * guessing.  For 403 we surface the server's actual error message (e.g.
+   * "Stats endpoints require a workspace-scoped token") because different
+   * token configurations produce different 403 reasons.  We keep stale data
+   * hidden in this branch — surfacing possibly-incorrect cached data alongside
+   * an error is worse than nothing. */
   if (error != null) {
     if (error instanceof ApiError && error.status === 403) {
+      /* `error.detail` is the server's `data.detail.message` string,
+       * already extracted by ApiClient.request().  Fall back to the generic
+       * "missing scope" hint only when the body carried no message. */
+      const serverMsg = error.detail || FALLBACK_403_MSG;
       return (
         <div
           role="alert"
           className="rounded-md border border-warning-border bg-warning-bg text-warning-fg px-4 py-3 text-sm my-6"
         >
-          <p className="font-medium">Missing scope</p>
-          <p className="mt-1">
-            Your token doesn't have <code>stats:read</code>. Ask an
-            administrator to issue a token with the freshness scope to view
-            this panel.
-          </p>
+          <p className="font-medium">Access denied (403)</p>
+          <p className="mt-1">{serverMsg}</p>
         </div>
       );
     }

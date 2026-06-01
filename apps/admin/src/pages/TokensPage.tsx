@@ -5,6 +5,11 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 
 const AVAILABLE_SCOPES = ["search", "sources:read", "sources:write", "admin"];
 
+const DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface ToastFn {
   (msg: string, type?: "success" | "error" | "info"): void;
 }
@@ -24,6 +29,7 @@ function CreateTokenForm({
   const [open, setOpen] = useState(false);
   const [name, setName] = useState("");
   const [scopes, setScopes] = useState<string[]>(["search"]);
+  const [workspaceId, setWorkspaceId] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
   const toggleScope = (scope: string) => {
@@ -42,15 +48,22 @@ function CreateTokenForm({
       addToast("Select at least one scope.", "error");
       return;
     }
+    const trimmedWsId = workspaceId.trim();
+    if (trimmedWsId && !UUID_RE.test(trimmedWsId)) {
+      addToast("Workspace ID must be a valid UUID.", "error");
+      return;
+    }
     setSubmitting(true);
     try {
       const resp = await client.createToken({
         name: name.trim(),
         scopes,
+        ...(trimmedWsId ? { workspace_id: trimmedWsId } : {}),
       });
       onCreated(resp.token, resp.secret);
       setName("");
       setScopes(["search"]);
+      setWorkspaceId("");
       setOpen(false);
     } catch (err) {
       const msg = err instanceof ApiError ? err.detail : String(err);
@@ -109,6 +122,24 @@ function CreateTokenForm({
               </label>
             ))}
           </div>
+        </div>
+
+        <div>
+          <label className="block text-sm font-medium text-text-secondary mb-1">
+            Workspace ID (UUID){" "}
+            <span className="text-text-muted font-normal">— optional</span>
+          </label>
+          <input
+            type="text"
+            value={workspaceId}
+            onChange={(e) => setWorkspaceId(e.target.value)}
+            placeholder={DEFAULT_WORKSPACE_ID}
+            className="w-full border border-border bg-elevation-2 text-text placeholder:text-text-muted rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent"
+          />
+          <p className="mt-1 text-xs text-text-muted">
+            Required for stats and retention endpoints. Default workspace:{" "}
+            <code className="font-mono">{DEFAULT_WORKSPACE_ID}</code>
+          </p>
         </div>
 
         <div className="flex gap-3">
@@ -251,6 +282,9 @@ export function TokensPage({ addToast }: Props) {
                   Scopes
                 </th>
                 <th className="px-4 py-3 text-left font-medium text-text-secondary">
+                  Workspace
+                </th>
+                <th className="px-4 py-3 text-left font-medium text-text-secondary">
                   Created
                 </th>
                 <th className="px-4 py-3 text-left font-medium text-text-secondary">
@@ -281,6 +315,9 @@ export function TokensPage({ addToast }: Props) {
                         </span>
                       ))}
                     </div>
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-text-secondary truncate max-w-[10rem]" title={tok.workspace_id ?? undefined}>
+                    {tok.workspace_id ?? <span className="text-text-muted">—</span>}
                   </td>
                   <td className="px-4 py-3 text-text-muted text-xs tabular-nums">
                     {new Date(tok.created_at).toLocaleDateString()}

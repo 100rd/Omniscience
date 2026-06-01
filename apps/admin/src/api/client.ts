@@ -86,6 +86,10 @@ export interface TokenCreateRequest {
   name: string;
   scopes: string[];
   expires_at?: string;
+  /** Optional UUID of the workspace this token is scoped to.
+   *  Required for stats/retention endpoints.
+   *  Default workspace: 00000000-0000-0000-0000-000000000001 */
+  workspace_id?: string;
 }
 
 export interface TokenCreateResponse {
