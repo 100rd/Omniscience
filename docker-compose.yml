@@ -13,6 +13,8 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      ollama-pull:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 10s
@@ -139,14 +141,36 @@ services:
       start_period: 5s
     restart: unless-stopped
 
+  # Embedding backend for the default `app` service (EMBEDDING_PROVIDER=ollama).
+  # Started by default — `app` waits for the model to be pulled. Air-gapped
+  # deployments use `--profile air-gapped` (app-air-gapped, local provider) and
+  # should stop this container.
   ollama:
     image: ollama/ollama:0.6.2
-    profiles:
-      - dev
+    restart: unless-stopped
     ports:
       - "127.0.0.1:11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  # One-shot: pulls the embedding model into the shared ollama volume so the
+  # stack works out of the box. Idempotent (a no-op once the volume has it).
+  # `app` depends on this completing successfully.
+  ollama-pull:
+    image: ollama/ollama:0.6.2
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["ollama", "pull", "nomic-embed-text"]
+    restart: "no"
 
   prometheus:
     image: prom/prometheus:v2.52.0
