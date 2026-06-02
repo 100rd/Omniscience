@@ -17,6 +17,7 @@ const NAV_ITEMS = [
   { to: "/ingestion", label: "Ingestion" },
   { to: "/search", label: "Search Playground" },
   { to: "/replay", label: "Replay" },
+  { to: "/components", label: "System Status" },
 ];
 
 export function Layout({ children }: LayoutProps) {

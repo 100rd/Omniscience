@@ -6,6 +6,7 @@ from fastapi import APIRouter
 
 from omniscience_server.rest.admin_session import router as admin_session_router
 from omniscience_server.rest.blast_radius import router as blast_radius_router
+from omniscience_server.rest.components import router as components_router
 from omniscience_server.rest.documents import router as documents_router
 from omniscience_server.rest.entities import router as entities_router
 from omniscience_server.rest.freshness import router as freshness_router
@@ -49,5 +50,6 @@ api_v1_router.include_router(replay_router)
 api_v1_router.include_router(runbook_router)
 api_v1_router.include_router(similar_incidents_router)
 api_v1_router.include_router(postmortem_router)
+api_v1_router.include_router(components_router)
 
 __all__ = ["api_v1_router"]
