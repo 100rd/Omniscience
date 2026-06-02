@@ -18,7 +18,14 @@ log = structlog.get_logger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-_SEVEN_DAYS_NS: int = 7 * 24 * 60 * 60 * 10**9  # nanoseconds
+# nats-py's StreamConfig.max_age is expressed in SECONDS — as_dict() converts it
+# to nanoseconds for the server. Passing nanoseconds here double-converts to a
+# 24-digit value that the server rejects with err_code 10025 "invalid JSON".
+_SEVEN_DAYS_SECONDS: float = 7 * 24 * 60 * 60
+
+# JetStream API error code for "stream name already in use" — the only
+# BadRequestError we treat as benign on re-create.
+_STREAM_ALREADY_EXISTS_CODE = 10058
 
 INGEST_CHANGES_STREAM = "INGEST_CHANGES"
 INGEST_DLQ_STREAM = "INGEST_DLQ"
@@ -28,7 +35,7 @@ _STREAM_CONFIGS: list[nats.js.api.StreamConfig] = [
         name=INGEST_CHANGES_STREAM,
         subjects=["ingest.changes.*"],
         retention=nats.js.api.RetentionPolicy.LIMITS,
-        max_age=_SEVEN_DAYS_NS,
+        max_age=_SEVEN_DAYS_SECONDS,
         storage=nats.js.api.StorageType.FILE,
         num_replicas=1,
     ),
@@ -36,7 +43,7 @@ _STREAM_CONFIGS: list[nats.js.api.StreamConfig] = [
         name=INGEST_DLQ_STREAM,
         subjects=["ingest.dlq.*"],
         retention=nats.js.api.RetentionPolicy.LIMITS,
-        max_age=_SEVEN_DAYS_NS,
+        max_age=_SEVEN_DAYS_SECONDS,
         storage=nats.js.api.StorageType.FILE,
         num_replicas=1,
     ),
@@ -65,10 +72,18 @@ async def _ensure_stream(
     js: nats.js.JetStreamContext,
     cfg: nats.js.api.StreamConfig,
 ) -> None:
-    """Create a single stream, or skip if it already exists."""
+    """Create a single stream, or skip if it already exists.
+
+    Only "stream name already in use" (err_code 10058) is treated as a benign
+    no-op; any other BadRequestError (e.g. 10025 "invalid JSON" from a bad
+    config) is re-raised so a misconfiguration fails loudly instead of being
+    silently swallowed as "already exists".
+    """
     try:
         await js.add_stream(config=cfg)
         log.info("nats_stream_created", stream=cfg.name, subjects=cfg.subjects)
-    except BadRequestError:
-        # Stream already exists — this is expected on restart.
+    except BadRequestError as exc:
+        if getattr(exc, "err_code", None) != _STREAM_ALREADY_EXISTS_CODE:
+            log.error("nats_stream_create_failed", stream=cfg.name, error=str(exc))
+            raise
         log.debug("nats_stream_exists", stream=cfg.name)
