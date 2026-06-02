@@ -203,8 +203,10 @@ async def _collect_qdrant(request: Request) -> QdrantComponent:
     try:
         collection_name = vector_store.collection_name
         info = await vector_store._qc.get_collection(collection_name)
-        vectors_count = int(info.vectors_count or 0)
+        # qdrant-client CollectionInfo exposes points_count + indexed_vectors_count
+        # (there is no `vectors_count`); points_count is the stored-vector total.
         points_count = int(info.points_count or 0)
+        vectors_count = int(getattr(info, "indexed_vectors_count", None) or points_count)
         collection_status = str(info.status.value) if info.status is not None else "unknown"
         return QdrantComponent(
             status="ok",
