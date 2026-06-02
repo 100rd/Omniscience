@@ -50,6 +50,7 @@ from omniscience_server.freshness_worker import FreshnessWorker
 from omniscience_server.ingestion.events import DocumentChangeEvent
 from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
+from omniscience_server.mcp.server import mcp_server
 from omniscience_server.middleware import TelemetryMiddleware, TracingMiddleware
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.rest.otlp_ingester import OtlpIngester
@@ -331,7 +332,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.scheduler = None
         log.info("scheduler_worker_disabled")
 
-    yield
+    # --- MCP streamable-http session manager (FastMCP) ---
+    # The MCP ASGI sub-app is mounted at /mcp, so its own lifespan never runs
+    # under the parent app. We must start the session-manager task group here,
+    # otherwise every MCP request 500s with "Task group is not initialized".
+    async with mcp_server.session_manager.run():
+        log.info("mcp_session_manager_started")
+        yield
 
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
