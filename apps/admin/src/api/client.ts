@@ -337,6 +337,92 @@ export interface Workspace {
   metadata: Record<string, unknown>;
 }
 
+
+export type ComponentStatus = "ok" | "degraded" | "error";
+
+export interface PostgresMetrics {
+  size_bytes: number;
+  table_counts: Record<string, number>;
+}
+
+export interface PostgresComponent {
+  status: ComponentStatus;
+  metrics: PostgresMetrics | null;
+  error: string | null;
+}
+
+export interface Neo4jMetrics {
+  total_nodes: number;
+  total_relationships: number;
+  entity_nodes: number;
+  entity_state_nodes: number;
+}
+
+export interface Neo4jComponent {
+  status: ComponentStatus;
+  metrics: Neo4jMetrics | null;
+  error: string | null;
+}
+
+export interface QdrantMetrics {
+  collection_name: string;
+  vectors_count: number;
+  points_count: number;
+  collection_status: string;
+}
+
+export interface QdrantComponent {
+  status: ComponentStatus;
+  metrics: QdrantMetrics | null;
+  error: string | null;
+}
+
+export interface NatsConsumerMetrics {
+  name: string;
+  num_pending: number;
+  num_ack_pending: number;
+  num_redelivered: number;
+}
+
+export interface NatsStreamMetrics {
+  name: string;
+  messages: number;
+  bytes: number;
+  consumers: NatsConsumerMetrics[];
+}
+
+export interface NatsMetrics {
+  streams: NatsStreamMetrics[];
+}
+
+export interface NatsComponent {
+  status: ComponentStatus;
+  metrics: NatsMetrics | null;
+  error: string | null;
+}
+
+export interface EmbeddingMetrics {
+  provider: string;
+  model: string;
+  dim: number;
+}
+
+export interface EmbeddingComponent {
+  status: ComponentStatus;
+  metrics: EmbeddingMetrics | null;
+  error: string | null;
+}
+
+export interface ComponentsResponse {
+  status: ComponentStatus;
+  version: string;
+  postgres: PostgresComponent;
+  neo4j: Neo4jComponent;
+  qdrant: QdrantComponent;
+  nats: NatsComponent;
+  embedding: EmbeddingComponent;
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -664,4 +750,15 @@ export class ApiClient {
       `/api/v1/replay/audit/${encodeURIComponent(auditLogId)}`
     );
   }
+
+  // Components status
+  async getComponents(signal?: AbortSignal): Promise<ComponentsResponse> {
+    return this.request<ComponentsResponse>(
+      "GET",
+      "/api/v1/admin/components",
+      undefined,
+      signal
+    );
+  }
+
 }

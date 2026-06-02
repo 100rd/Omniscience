@@ -14,6 +14,7 @@ import { FreshnessPage } from "./pages/FreshnessPage";
 import { RetentionPage } from "./pages/RetentionPage";
 import { IncidentTimelinePage } from "./pages/IncidentTimelinePage";
 import { ReplayPage } from "./pages/ReplayPage";
+import { ComponentsPage } from "./pages/ComponentsPage";
 
 function AppInner() {
   const { authenticated } = useTokenContext();
@@ -59,6 +60,7 @@ function AppInner() {
               path="/replay"
               element={<ReplayPage addToast={addToast} />}
             />
+            <Route path="/components" element={<ComponentsPage />} />
           </Routes>
         </Layout>
       </BrowserRouter>
