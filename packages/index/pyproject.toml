@@ -9,7 +9,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",
     "neo4j>=5.19.0",
-    "qdrant-client>=1.12.0",
+    "qdrant-client>=1.17,<1.18",
     "structlog>=24.1.0",
 ]
 
