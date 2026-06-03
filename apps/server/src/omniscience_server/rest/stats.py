@@ -7,6 +7,7 @@ Endpoints
 * ``GET /api/v1/stats/sources``            — per-source table
 * ``GET /api/v1/stats/entities-by-kind``   — entity-kind histogram
 * ``GET /api/v1/stats/edges-by-type``      — edge-type histogram
+* ``GET /api/v1/stats/activity``           — windowed document-activity counts
 
 All endpoints require the ``stats:read`` scope.  All responses are
 workspace-scoped: counts include only sources, documents, chunks,
@@ -33,15 +34,16 @@ protocol-level ``workspace_id`` invariants on ``GraphStore`` and
 from __future__ import annotations
 
 import uuid
-from typing import Any
+from typing import Annotated, Any
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from omniscience_core.auth.middleware import get_current_token, require_scope
 from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
 from omniscience_core.stats import (
+    ActivityResponse,
     ClientsStatsResponse,
     ClientsStatsService,
     EdgesByTypeResponse,
@@ -50,6 +52,7 @@ from omniscience_core.stats import (
     StatsOverview,
     StatsService,
 )
+from omniscience_core.stats.service import _ACTIVITY_HOURS_MAX, _ACTIVITY_HOURS_MIN
 from omniscience_core.storage.graph import GraphStore
 from omniscience_core.storage.vector import VectorStore
 
@@ -160,6 +163,47 @@ async def stats_overview(
         chunks=overview.chunks,
     )
     return overview
+
+
+@router.get(
+    "/stats/activity",
+    response_model=ActivityResponse,
+    summary="Windowed document-activity counts",
+    dependencies=[_stats_scope_dep],
+)
+async def stats_activity(
+    request: Request,
+    token: ApiToken = _current_token_dep,
+    hours: Annotated[
+        int,
+        Query(
+            ge=_ACTIVITY_HOURS_MIN,
+            le=_ACTIVITY_HOURS_MAX,
+            description=(
+                f"Width of the time window in hours "
+                f"({_ACTIVITY_HOURS_MIN}-{_ACTIVITY_HOURS_MAX}). "
+                "Default: 24."
+            ),
+        ),
+    ] = 24,
+) -> ActivityResponse:
+    """Windowed document-activity counts for the admin dashboard.
+
+    Returns counts of new, updated, and tombstoned documents within the
+    requested time window, all scoped to the caller's workspace.
+
+    Field semantics:
+    - ``new``        — first-time indexings (``doc_version == 1``) in window.
+    - ``updated``    — re-indexed documents (``doc_version > 1``) in window.
+    - ``tombstoned`` — documents soft-deleted in window.
+    - ``window_hours`` — the window echoed back for client-side cross-check.
+
+    Requires scope: ``stats:read``
+    Requires: token scoped to a workspace (fails closed with 403 otherwise).
+    """
+    workspace_id = _require_workspace(token)
+    service = _resolve_service(request)
+    return await service.activity(workspace_id=workspace_id, window_hours=hours)
 
 
 @router.get(

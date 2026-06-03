@@ -209,6 +209,14 @@ export interface StatsOverview {
   documents_tombstoned_24h: number;
 }
 
+/** Response from GET /api/v1/stats/activity */
+export interface StatsActivity {
+  new: number;
+  updated: number;
+  tombstoned: number;
+  window_hours: number;
+}
+
 export interface KindHistogramEntry {
   kind: string;
   count: number;
@@ -631,6 +639,19 @@ export class ApiClient {
     return this.request<StatsOverview>(
       "GET",
       "/api/v1/stats/overview",
+      undefined,
+      signal
+    );
+  }
+
+  async statsActivity(
+    hours: number,
+    signal?: AbortSignal
+  ): Promise<StatsActivity> {
+    const qs = new URLSearchParams({ hours: String(hours) });
+    return this.request<StatsActivity>(
+      "GET",
+      `/api/v1/stats/activity?${qs}`,
       undefined,
       signal
     );

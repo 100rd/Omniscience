@@ -58,6 +58,34 @@ class StatsOverview(BaseModel):
     )
 
 
+class ActivityResponse(BaseModel):
+    """Windowed document-activity counts for the admin dashboard.
+
+    Used by ``GET /api/v1/stats/activity?hours=<int>``.  All counts are
+    scoped to the caller's workspace.
+
+    Field semantics:
+    - ``new``         — documents indexed for the first time (doc_version == 1)
+                        within the window.
+    - ``updated``     — existing documents re-indexed (doc_version > 1) within
+                        the window.
+    - ``tombstoned``  — documents soft-deleted within the window.
+    - ``window_hours`` — the requested window echoed back so the caller can
+                         cross-check the value actually used.
+    """
+
+    new: int = Field(..., ge=0, description="Documents first indexed within the window.")
+    updated: int = Field(
+        ..., ge=0, description="Documents re-indexed (content changed) within the window."
+    )
+    tombstoned: int = Field(
+        ..., ge=0, description="Documents soft-deleted within the window."
+    )
+    window_hours: int = Field(
+        ..., ge=1, description="The time window in hours (echoed from the request)."
+    )
+
+
 class SourceStatsRow(BaseModel):
     """One row of the per-source stats table.
 
@@ -157,6 +185,7 @@ class ClientsStatsResponse(BaseModel):
 
 
 __all__ = [
+    "ActivityResponse",
     "ClientsStatsResponse",
     "EdgeTypeHistogramEntry",
     "EdgesByTypeResponse",
