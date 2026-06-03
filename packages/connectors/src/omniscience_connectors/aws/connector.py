@@ -26,6 +26,15 @@ Organizations URI format:
   ``aws://org/{org_id}``
   ``aws://org/{org_id}/ou/{ou_id}``
   ``aws://org/{org_id}/account/{account_id}``
+
+Config-aggregator mode (acquisition="config", ADR-0014 Phase 1)
+---------------------------------------------------------------
+Reads the org AWS Config aggregator instead of direct service APIs.
+Produces bitemporal entities (valid_from=configurationItemCaptureTime),
+Config relationships as graph edges, tombstones for deleted resources,
+and a cold_ref pointer per version for retention tiering (ADR-0009).
+external_id: ``aws:{account}:{region}:{type}:{resource_id}``
+uri:         ``aws://{account}/{region}/{type}/{resource_id}``
 """
 
 from __future__ import annotations
@@ -35,7 +44,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 import boto3
 import botocore.exceptions
@@ -49,6 +58,39 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# ADR-0014 Tier-1 resource type list (Phase 1 scope)
+# ---------------------------------------------------------------------------
+
+_TIER1_RESOURCE_TYPES: tuple[str, ...] = (
+    "AWS::EC2::VPC",
+    "AWS::EC2::Subnet",
+    "AWS::EC2::SecurityGroup",
+    "AWS::EC2::RouteTable",
+    "AWS::EC2::NatGateway",
+    "AWS::EC2::InternetGateway",
+    "AWS::EC2::EIP",
+    "AWS::EKS::Cluster",
+    "AWS::EKS::Nodegroup",
+    "AWS::EKS::Addon",
+    "AWS::ElasticLoadBalancingV2::LoadBalancer",
+    "AWS::IAM::Role",
+    "AWS::IAM::Policy",
+    "AWS::IAM::User",
+    "AWS::IAM::Group",
+    "AWS::IAM::OIDCProvider",
+    "AWS::S3::Bucket",
+    "AWS::KMS::Key",
+    "AWS::ECR::Repository",
+    "AWS::SecretsManager::Secret",
+    "AWS::Lambda::Function",
+    "AWS::Route53::HostedZone",
+)
+
+# Config CI statuses that indicate a resource has been removed.
+_DELETED_STATUSES: frozenset[str] = frozenset({"ResourceDeleted", "ResourceDeletedNotRecorded"})
+
+
+# ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
@@ -56,15 +98,30 @@ logger = logging.getLogger(__name__)
 class AwsConfig(BaseModel):
     """Public configuration for the AWS connector (no secrets)."""
 
+    acquisition: Literal["describe", "cloudcontrol", "config"] = Field(default="describe")
+    """Acquisition mode for AWS resources (ADR-0014).
+
+    - ``"describe"`` — legacy per-service path (default).  Behaviour is
+      byte-for-byte identical to the original connector; all existing fields
+      (``regions``, ``services``, ``include_organizations``, etc.) apply.
+    - ``"cloudcontrol"`` — Cloud Control API generic poll (Phase 3, reserved).
+    - ``"config"`` — org AWS Config aggregator query (ADR-0014 Phase 1).
+      Requires ``aggregator_name`` and the read-only IAM policy delivered in
+      ``infra/iam/omniscience-config-reader-policy.json``.
+    """
+
     regions: list[str] = Field(default=["us-east-1"])
-    """List of AWS regions to scan for regional services like EC2."""
+    """List of AWS regions to scan for regional services like EC2.
+    Only used when ``acquisition="describe"``."""
 
     services: list[str] = Field(default=["s3", "iam", "ec2"])
-    """Which AWS services to discover.  Supported: ``"s3"``, ``"iam"``, ``"ec2"``."""
+    """Which AWS services to discover.  Supported: ``"s3"``, ``"iam"``, ``"ec2"``.
+    Only used when ``acquisition="describe"``."""
 
     resource_type_filters: list[str] = Field(default_factory=list)
     """Optional resource-type allow-list (e.g. ``["aws_instance", "aws_vpc"]``).
-    Empty means include all resource types for the configured services."""
+    Empty means include all resource types for the configured services.
+    Only used when ``acquisition="describe"``."""
 
     include_organizations: bool = Field(default=False)
     """When True, enumerate the AWS Organization, its OUs, and member accounts.
@@ -77,7 +134,26 @@ class AwsConfig(BaseModel):
     The Organizations API endpoint is always ``us-east-1`` regardless of the
     ``regions`` setting.  Existing s3/iam/ec2 behavior is unchanged when this
     is False (the default).
-    """
+    Only used when ``acquisition="describe"``."""
+
+    # ---- config-mode fields (acquisition="config") ----
+
+    aggregator_name: str | None = Field(default=None)
+    """Name of the org Config aggregator in the Log Archive account.
+    Required when ``acquisition="config"``.
+    Applied via ``/infra-team`` (human-gated step — see spec)."""
+
+    config_resource_types: list[str] = Field(
+        default_factory=lambda: list(_TIER1_RESOURCE_TYPES),
+    )
+    """AWS Config resource type names to enumerate from the aggregator.
+    Defaults to the ADR-0014 Tier-1 list.  Only used when
+    ``acquisition="config"``."""
+
+    config_regions: list[str] = Field(default_factory=list)
+    """Regions to scope Config queries.  Empty = all regions (the aggregator
+    is already ``all_regions=true`` org-wide).  Only used when
+    ``acquisition="config"``."""
 
 
 # ---------------------------------------------------------------------------
@@ -921,6 +997,295 @@ def _fetch_org_account(client: Any, account_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Config-aggregator helpers (acquisition="config", ADR-0014 Phase 1)
+# ---------------------------------------------------------------------------
+
+
+def _config_external_id(account: str, region: str, resource_type: str, resource_id: str) -> str:
+    """Return stable external_id for a Config CI.
+
+    Format: ``aws:{account}:{region}:{type}:{resource_id}``
+    """
+    return f"aws:{account}:{region}:{resource_type}:{resource_id}"
+
+
+def _config_uri(account: str, region: str, resource_type: str, resource_id: str) -> str:
+    """Return URI for a Config CI.
+
+    Format: ``aws://{account}/{region}/{type}/{resource_id}``
+    """
+    return f"aws://{account}/{region}/{resource_type}/{resource_id}"
+
+
+def _normalise_relationship_type(relationship_name: str) -> str:
+    """Normalise a Config relationship name to a snake_case edge type.
+
+    Examples::
+        "Is associated with Vpc" -> "is_associated_with_vpc"
+        "Contains SecurityGroup"  -> "contains_securitygroup"
+    """
+    return "_".join(relationship_name.lower().split())
+
+
+def _ci_to_ref(ci: dict[str, Any]) -> DocumentRef | None:
+    """Convert a Config configuration item dict to a DocumentRef.
+
+    Returns None when mandatory fields are missing so callers can skip.
+    """
+    resource_type: str = ci.get("resourceType", "")
+    resource_id: str = ci.get("resourceId", "")
+    account_id: str = ci.get("accountId", "")
+    region: str = ci.get("awsRegion", "")
+
+    if not (resource_type and resource_id and account_id and region):
+        return None
+
+    arn: str = ci.get("arn", "")
+    capture_time: str = str(ci.get("configurationItemCaptureTime", ""))
+    status: str = ci.get("configurationItemStatus", "")
+    tags: dict[str, str] = ci.get("tags", {}) or {}
+    name_tag: str = tags.get("Name", resource_id)
+
+    # Parse relationships for graph edges (stored in metadata; pipeline writes edges)
+    relationships: list[dict[str, Any]] = ci.get("relationships", []) or []
+    edge_list: list[dict[str, str]] = []
+    for rel in relationships:
+        related_id: str = rel.get("resourceId", "")
+        rel_type: str = rel.get("resourceType", "")
+        rel_name: str = rel.get("relationshipName", "")
+        if not related_id:
+            continue
+        edge_list.append(
+            {
+                "related_resource_id": related_id,
+                "related_resource_type": rel_type,
+                "edge_type": _normalise_relationship_type(rel_name),
+                "related_external_id": _config_external_id(
+                    account_id, region, rel_type, related_id
+                ),
+            }
+        )
+
+    # Cold pointer for retention tiering (ADR-0009 / spec Phase 1)
+    cold_ref: dict[str, str] = {
+        "s3_bucket": ci.get("configDeliveryS3Bucket", ""),
+        "s3_key": ci.get("configDeliveryS3KeyPrefix", ""),
+        "capture_time": capture_time,
+    }
+
+    external_id = _config_external_id(account_id, region, resource_type, resource_id)
+    uri = _config_uri(account_id, region, resource_type, resource_id)
+
+    return DocumentRef(
+        external_id=external_id,
+        uri=uri,
+        metadata={
+            "kind": "aws_config",
+            "acquisition": "config",
+            "aws_resource_type": resource_type,
+            "resource_id": resource_id,
+            "arn": arn,
+            "account_id": account_id,
+            "region": region,
+            "name": name_tag,
+            "capture_time": capture_time,
+            "configuration_item_status": status,
+            "is_tombstone": status in _DELETED_STATUSES,
+            "tags": tags,
+            "relationships": edge_list,
+            "cold_ref": cold_ref,
+            # valid_from carries bitemporal timestamp (ADR-0008)
+            "valid_from": capture_time,
+        },
+    )
+
+
+def _build_config_client(secrets: dict[str, str], region: str | None = None) -> Any:
+    """Return a boto3 config client for Config aggregator queries."""
+    return _build_client("config", secrets, region)
+
+
+def _list_aggregate_cis_for_type(
+    client: Any,
+    aggregator_name: str,
+    resource_type: str,
+    regions: list[str],
+) -> list[dict[str, Any]]:
+    """Page through ListAggregateDiscoveredResources + BatchGetAggregateResourceConfig.
+
+    Returns a flat list of configuration item dicts for *resource_type*.
+    Raises on unrecoverable errors; caller catches and skips the type.
+    """
+    discovered: list[dict[str, Any]] = []
+    kwargs: dict[str, Any] = {
+        "ConfigurationAggregatorName": aggregator_name,
+        "ResourceType": resource_type,
+        "Limit": 100,
+    }
+    if regions:
+        kwargs["Filters"] = {"Region": regions}
+
+    while True:
+        resp: dict[str, Any] = client.list_aggregate_discovered_resources(**kwargs)
+        identifiers: list[dict[str, Any]] = resp.get("ResourceIdentifiers", [])
+        if identifiers:
+            batch_resp: dict[str, Any] = client.batch_get_aggregate_resource_config(
+                ConfigurationAggregatorName=aggregator_name,
+                ResourceIdentifiers=[
+                    {
+                        "SourceAccountId": r.get("SourceAccountId", ""),
+                        "SourceRegion": r.get("SourceRegion", ""),
+                        "ResourceId": r.get("ResourceId", ""),
+                        "ResourceType": r.get("ResourceType", resource_type),
+                    }
+                    for r in identifiers
+                ],
+            )
+            discovered.extend(batch_resp.get("BaseConfigurationItems", []))
+        next_token: str = resp.get("NextToken", "")
+        if not next_token:
+            break
+        kwargs["NextToken"] = next_token
+    return discovered
+
+
+def _discover_config_type(
+    client: Any,
+    aggregator_name: str,
+    resource_type: str,
+    regions: list[str],
+) -> list[DocumentRef]:
+    """Discover all CIs for one resource type from the aggregator.
+
+    Gracefully returns empty list on access errors so the overall
+    discover() loop can skip the type and continue.
+    """
+    try:
+        cis = _list_aggregate_cis_for_type(client, aggregator_name, resource_type, regions)
+    except botocore.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        logger.warning(
+            "aws_config.discover.type_skipped",
+            extra={"resource_type": resource_type, "error_code": code},
+        )
+        return []
+
+    refs: list[DocumentRef] = []
+    for ci in cis:
+        ref = _ci_to_ref(ci)
+        if ref is not None:
+            refs.append(ref)
+    return refs
+
+
+def _fetch_config_ci(
+    client: Any,
+    aggregator_name: str,
+    account_id: str,
+    region: str,
+    resource_type: str,
+    resource_id: str,
+) -> dict[str, Any]:
+    """Fetch a single CI via BatchGetAggregateResourceConfig.
+
+    Returns the configuration item dict or empty dict on error.
+    """
+    try:
+        resp: dict[str, Any] = client.batch_get_aggregate_resource_config(
+            ConfigurationAggregatorName=aggregator_name,
+            ResourceIdentifiers=[
+                {
+                    "SourceAccountId": account_id,
+                    "SourceRegion": region,
+                    "ResourceId": resource_id,
+                    "ResourceType": resource_type,
+                }
+            ],
+        )
+        items: list[dict[str, Any]] = resp.get("BaseConfigurationItems", [])
+        return items[0] if items else {}
+    except botocore.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        logger.warning(
+            "aws_config.fetch.error",
+            extra={
+                "resource_type": resource_type,
+                "resource_id": resource_id,
+                "error_code": code,
+            },
+        )
+        return {}
+
+
+def _ci_to_text(ci: dict[str, Any]) -> str:
+    """Produce a concise human-readable summary of a Config CI for embeddings.
+
+    Never logs the full configuration blob at info level (security).
+    """
+    resource_type: str = ci.get("resourceType", "<unknown>")
+    resource_id: str = ci.get("resourceId", "<unknown>")
+    account_id: str = ci.get("accountId", "")
+    region: str = ci.get("awsRegion", "")
+    status: str = ci.get("configurationItemStatus", "")
+    capture_time: str = str(ci.get("configurationItemCaptureTime", ""))
+    tags: dict[str, str] = ci.get("tags", {}) or {}
+
+    lines: list[str] = [
+        f"Type: {resource_type}",
+        f"ID: {resource_id}",
+    ]
+    if ci.get("arn"):
+        lines.append(f"ARN: {ci['arn']}")
+    if account_id:
+        lines.append(f"Account: {account_id}")
+    if region:
+        lines.append(f"Region: {region}")
+    if status:
+        lines.append(f"Status: {status}")
+    if capture_time:
+        lines.append(f"CaptureTime: {capture_time}")
+    if tags:
+        tag_str = ", ".join(f"{k}={v}" for k, v in sorted(tags.items())[:10])
+        lines.append(f"Tags: {tag_str}")
+
+    # Include a short snippet of key config fields — never the full blob
+    raw_config: str = ci.get("configuration", "") or ""
+    if raw_config:
+        try:
+            config_obj: dict[str, Any] = json.loads(raw_config)
+            # Surface a small fixed set of fields that are meaningful for any type
+            key_fields = {
+                k: v
+                for k, v in config_obj.items()
+                if k
+                in {
+                    "State",
+                    "state",
+                    "Status",
+                    "status",
+                    "VpcId",
+                    "SubnetId",
+                    "AvailabilityZone",
+                    "InstanceType",
+                    "Engine",
+                    "DBInstanceClass",
+                    "FunctionName",
+                    "Runtime",
+                    "Handler",
+                    "BucketName",
+                    "KeyId",
+                    "RepositoryName",
+                }
+            }
+            if key_fields:
+                lines.append(f"Config: {json.dumps(key_fields, separators=(',', ':'))[:300]}")
+        except (json.JSONDecodeError, TypeError):
+            pass  # malformed config — safe to skip
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # AwsConnector
 # ---------------------------------------------------------------------------
 
@@ -971,10 +1336,11 @@ class AwsConnector(Connector):
     ) -> AsyncIterator[DocumentRef]:
         """Yield a DocumentRef for every discovered live AWS resource.
 
-        Enumerates all configured services across all configured regions.
-        Global services (S3, IAM) are enumerated once regardless of the
-        ``regions`` list.  When ``include_organizations`` is True, the
-        Organization tree (org, OUs, accounts) is also enumerated once.
+        Routes to the appropriate acquisition path based on
+        ``config.acquisition``:
+
+        - ``"describe"`` — per-service boto3 describe APIs (original path).
+        - ``"config"`` — org AWS Config aggregator (ADR-0014 Phase 1).
 
         Args:
             config: Validated :class:`AwsConfig`.
@@ -985,6 +1351,12 @@ class AwsConnector(Connector):
         """
         cfg: AwsConfig = config  # type: ignore[assignment]
 
+        if cfg.acquisition == "config":
+            async for ref in self._discover_config(cfg, secrets):
+                yield ref
+            return
+
+        # --- describe path (original, byte-for-byte preserved) ---
         account_id = await asyncio.to_thread(_get_account_id, secrets)
         filters = cfg.resource_type_filters
 
@@ -1012,17 +1384,44 @@ class AwsConnector(Connector):
             for ref in refs:
                 yield ref
 
+    async def _discover_config(
+        self,
+        cfg: AwsConfig,
+        secrets: dict[str, str],
+    ) -> AsyncIterator[DocumentRef]:
+        """Enumerate all Tier-1 CIs from the org Config aggregator.
+
+        Per-type errors are logged and skipped — the overall enumeration
+        continues.  Mirrors the K8s connector's per-kind graceful skip.
+        """
+        if not cfg.aggregator_name:
+            raise ValueError("AwsConfig.aggregator_name is required when acquisition='config'")
+        aggregator = cfg.aggregator_name
+        regions = cfg.config_regions
+
+        for resource_type in cfg.config_resource_types:
+            refs = await asyncio.to_thread(
+                _discover_config_type,
+                _build_config_client(secrets),
+                aggregator,
+                resource_type,
+                regions,
+            )
+            for ref in refs:
+                yield ref
+
     async def fetch(
         self,
         config: BaseModel,
         secrets: dict[str, str],
         ref: DocumentRef,
     ) -> FetchedDocument:
-        """Describe the AWS resource referenced by *ref* and return its JSON detail.
+        """Return content for one resource ref.
 
-        The ``ref.metadata`` fields are used to route the call to the correct
-        boto3 describe API.  Falls back to returning the ref metadata as JSON
-        when the resource type is unrecognised.
+        Routes on acquisition mode:
+        - ``"config"`` — fetches the CI from the aggregator and returns a
+          concise ``text/plain`` summary suitable for embeddings.
+        - ``"describe"`` — original JSON describe path (byte-for-byte preserved).
 
         Args:
             config: Validated :class:`AwsConfig`.
@@ -1030,11 +1429,15 @@ class AwsConnector(Connector):
             ref: The reference returned by :meth:`discover`.
 
         Returns:
-            :class:`~omniscience_connectors.base.FetchedDocument` with JSON content.
+            :class:`~omniscience_connectors.base.FetchedDocument` with content.
         """
         cfg: AwsConfig = config  # type: ignore[assignment]
-        del cfg
 
+        if cfg.acquisition == "config":
+            return await self._fetch_config(cfg, secrets, ref)
+
+        # --- describe path (original, byte-for-byte preserved) ---
+        del cfg
         meta = ref.metadata
         resource_type: str = meta.get("resource_type", "")
         region: str = meta.get("region", "us-east-1")
@@ -1095,6 +1498,56 @@ class AwsConnector(Connector):
             ref=ref,
             content_bytes=content,
             content_type="application/json",
+        )
+
+    async def _fetch_config(
+        self,
+        cfg: AwsConfig,
+        secrets: dict[str, str],
+        ref: DocumentRef,
+    ) -> FetchedDocument:
+        """Fetch a single Config CI and return a text/plain summary.
+
+        Uses BatchGetAggregateResourceConfig via the aggregator so credentials
+        only need read access to the aggregator account.
+        """
+        if not cfg.aggregator_name:
+            raise ValueError("AwsConfig.aggregator_name is required when acquisition='config'")
+        meta = ref.metadata
+        account_id: str = meta.get("account_id", "")
+        region: str = meta.get("region", "")
+        resource_type: str = meta.get("aws_resource_type", "")
+        resource_id: str = meta.get("resource_id", "")
+        aggregator = cfg.aggregator_name
+
+        ci = await asyncio.to_thread(
+            _fetch_config_ci,
+            _build_config_client(secrets),
+            aggregator,
+            account_id,
+            region,
+            resource_type,
+            resource_id,
+        )
+
+        if not ci:
+            # Fall back to summary built from the ref metadata when fetch fails
+            ci = {
+                "resourceType": resource_type,
+                "resourceId": resource_id,
+                "accountId": account_id,
+                "awsRegion": region,
+                "arn": meta.get("arn", ""),
+                "tags": meta.get("tags", {}),
+                "configurationItemCaptureTime": meta.get("capture_time", ""),
+                "configurationItemStatus": meta.get("configuration_item_status", ""),
+            }
+
+        text = _ci_to_text(ci)
+        return FetchedDocument(
+            ref=ref,
+            content_bytes=text.encode("utf-8"),
+            content_type="text/plain",
         )
 
     def webhook_handler(self) -> WebhookHandler | None:
