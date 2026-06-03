@@ -324,25 +324,38 @@ class TestEnsureStreams:
 
     @pytest.mark.asyncio
     async def test_idempotent_on_bad_request_error(self) -> None:
-        """ensure_streams() must silently handle stream-already-exists errors."""
+        """ensure_streams() must silently handle stream-already-exists errors.
+
+        Only err_code 10058 ("stream name already in use") is benign; any other
+        BadRequestError propagates (see test_nats_streams.py for the propagation
+        case). A bare BadRequestError without err_code is a real failure, so the
+        benign mock must carry 10058 explicitly.
+        """
         from nats.js.errors import BadRequestError
 
         js = _make_js_mock()
-        js.add_stream = AsyncMock(side_effect=BadRequestError())
+        exc = BadRequestError()
+        exc.err_code = 10058
+        js.add_stream = AsyncMock(side_effect=exc)
 
         # Should not raise
         await ensure_streams(js)
 
     @pytest.mark.asyncio
     async def test_stream_max_age_seven_days(self) -> None:
-        """Both streams must have a 7-day max_age in nanoseconds."""
+        """Both streams serialise to a 7-day max_age in nanoseconds.
+
+        max_age is configured in SECONDS (nats-py converts seconds -> ns in
+        as_dict()); asserting the raw attribute would compare seconds to
+        nanoseconds, so the check goes through as_dict().
+        """
         seven_days_ns = 7 * 24 * 60 * 60 * 10**9
         js = _make_js_mock()
         await ensure_streams(js)
 
         for call in js.add_stream.call_args_list:
             cfg = call.kwargs["config"]
-            assert cfg.max_age == seven_days_ns
+            assert cfg.as_dict()["max_age"] == seven_days_ns
 
     @pytest.mark.asyncio
     async def test_storage_type_is_file(self) -> None:
