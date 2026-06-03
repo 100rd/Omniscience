@@ -4,6 +4,7 @@ import { Source, SourceCreate, SourceType, ApiError } from "../api/client";
 import { StatusBadge } from "../components/StatusBadge";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { SourceEditModal } from "../components/SourceEditModal";
+import { getSourceTemplate } from "../api/sourceTemplates";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,6 +175,11 @@ const SOURCE_TYPES: SourceType[] = [
   "grafana",
   "k8s",
   "terraform",
+  "s3",
+  "aws",
+  "alerts",
+  "otel",
+  "k8s_operator",
 ];
 
 interface ToastFn {
@@ -194,10 +200,23 @@ function AddSourceForm({
   const { client } = useTokenContext();
   const [open, setOpen] = useState(false);
   const [type, setType] = useState<SourceType>("git");
+  const [configRaw, setConfigRaw] = useState(
+    () => getSourceTemplate("git").configJson
+  );
+  const [configHint, setConfigHint] = useState(
+    () => getSourceTemplate("git").hint
+  );
   const [name, setName] = useState("");
-  const [configRaw, setConfigRaw] = useState("{}");
   const [submitting, setSubmitting] = useState(false);
   const [configError, setConfigError] = useState<string | null>(null);
+
+  const handleTypeChange = (newType: SourceType) => {
+    setType(newType);
+    const tmpl = getSourceTemplate(newType);
+    setConfigRaw(tmpl.configJson);
+    setConfigHint(tmpl.hint);
+    setConfigError(null);
+  };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -218,7 +237,8 @@ function AddSourceForm({
       onCreated(created);
       addToast(`Source "${created.name}" created.`, "success");
       setName("");
-      setConfigRaw("{}");
+      const resetTmpl = getSourceTemplate(type);
+      setConfigRaw(resetTmpl.configJson);
       setOpen(false);
     } catch (err) {
       const msg = err instanceof ApiError ? err.detail : String(err);
@@ -254,7 +274,9 @@ function AddSourceForm({
             <select
               id="add-source-type"
               value={type}
-              onChange={(e) => setType(e.target.value as SourceType)}
+              onChange={(e) =>
+                handleTypeChange(e.target.value as SourceType)
+              }
               className="w-full border border-border bg-elevation-2 text-text rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent"
             >
               {SOURCE_TYPES.map((t) => (
@@ -284,22 +306,56 @@ function AddSourceForm({
         </div>
 
         <div>
-          <label
-            htmlFor="add-source-config"
-            className="block text-sm font-medium text-text-secondary mb-1"
-          >
-            Config (JSON)
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label
+              htmlFor="add-source-config"
+              className="block text-sm font-medium text-text-secondary"
+            >
+              Config (JSON)
+            </label>
+            <button
+              type="button"
+              onClick={() => {
+                const tmpl = getSourceTemplate(type);
+                setConfigRaw(tmpl.configJson);
+                setConfigHint(tmpl.hint);
+                setConfigError(null);
+              }}
+              className="text-xs text-accent hover:text-accent-hover transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent rounded"
+            >
+              Load example
+            </button>
+          </div>
           <textarea
             id="add-source-config"
             value={configRaw}
-            onChange={(e) => setConfigRaw(e.target.value)}
-            rows={5}
-            className="w-full border border-border bg-elevation-2 text-text placeholder:text-text-muted rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent"
-            placeholder='{"repo_url": "https://github.com/..."}'
+            onChange={(e) => {
+              setConfigRaw(e.target.value);
+              setConfigError(null);
+            }}
+            rows={8}
+            spellCheck={false}
+            className="w-full border border-border bg-elevation-2 text-text placeholder:text-text-muted rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent resize-y"
+            aria-describedby={
+              configError ? "add-source-config-error" : "add-source-config-hint"
+            }
+            aria-invalid={configError != null}
           />
-          {configError && (
-            <p className="text-xs text-danger-fg mt-1">{configError}</p>
+          {configError ? (
+            <p
+              id="add-source-config-error"
+              role="alert"
+              className="text-xs text-danger-fg mt-1"
+            >
+              {configError}
+            </p>
+          ) : (
+            <p
+              id="add-source-config-hint"
+              className="text-xs text-text-muted mt-1"
+            >
+              {configHint}
+            </p>
           )}
         </div>
 

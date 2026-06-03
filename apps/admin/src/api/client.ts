@@ -18,7 +18,12 @@ export type SourceType =
   | "jira"
   | "grafana"
   | "k8s"
-  | "terraform";
+  | "terraform"
+  | "s3"
+  | "aws"
+  | "alerts"
+  | "otel"
+  | "k8s_operator";
 
 export type SourceStatus = "active" | "paused" | "error";
 
