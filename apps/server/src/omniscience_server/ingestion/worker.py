@@ -471,9 +471,7 @@ class IngestionWorker:
         """
         async with self._session_factory() as session:
             await session.execute(
-                update(Source)
-                .where(Source.id == source_id)
-                .values(last_sync_at=datetime.now(UTC))
+                update(Source).where(Source.id == source_id).values(last_sync_at=datetime.now(UTC))
             )
             await session.commit()
 

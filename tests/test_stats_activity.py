@@ -148,6 +148,7 @@ async def test_activity_service_issues_three_queries() -> None:
 @pytest.mark.asyncio
 async def test_activity_service_window_hours_echoed() -> None:
     """window_hours must be echoed back in the response."""
+
     async def _execute(stmt: Any) -> Any:
         result = MagicMock()
         result.scalar_one.return_value = 0
@@ -325,9 +326,7 @@ async def test_activity_default_24h() -> None:
     tok, pt = _make_token(["stats:read"], workspace_id=workspace_id)
 
     activity_response = ActivityResponse(new=5, updated=2, tombstoned=1, window_hours=24)
-    svc = _stub_stats_service_with_activity(
-        activity_fn=AsyncMock(return_value=activity_response)
-    )
+    svc = _stub_stats_service_with_activity(activity_fn=AsyncMock(return_value=activity_response))
     app = _build_app(token=tok, stats_service=svc)
 
     async with await _client_for(app) as client:
@@ -351,9 +350,7 @@ async def test_activity_7d_window() -> None:
     tok, pt = _make_token(["stats:read"], workspace_id=workspace_id)
 
     activity_response = ActivityResponse(new=120, updated=45, tombstoned=8, window_hours=168)
-    svc = _stub_stats_service_with_activity(
-        activity_fn=AsyncMock(return_value=activity_response)
-    )
+    svc = _stub_stats_service_with_activity(activity_fn=AsyncMock(return_value=activity_response))
     app = _build_app(token=tok, stats_service=svc)
 
     async with await _client_for(app) as client:
@@ -375,9 +372,7 @@ async def test_activity_30d_window() -> None:
     tok, pt = _make_token(["stats:read"], workspace_id=workspace_id)
 
     activity_response = ActivityResponse(new=500, updated=200, tombstoned=50, window_hours=720)
-    svc = _stub_stats_service_with_activity(
-        activity_fn=AsyncMock(return_value=activity_response)
-    )
+    svc = _stub_stats_service_with_activity(activity_fn=AsyncMock(return_value=activity_response))
     app = _build_app(token=tok, stats_service=svc)
 
     async with await _client_for(app) as client:

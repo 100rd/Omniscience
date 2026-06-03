@@ -78,9 +78,7 @@ class ActivityResponse(BaseModel):
     updated: int = Field(
         ..., ge=0, description="Documents re-indexed (content changed) within the window."
     )
-    tombstoned: int = Field(
-        ..., ge=0, description="Documents soft-deleted within the window."
-    )
+    tombstoned: int = Field(..., ge=0, description="Documents soft-deleted within the window.")
     window_hours: int = Field(
         ..., ge=1, description="The time window in hours (echoed from the request)."
     )
