@@ -164,6 +164,7 @@ async def _client_for(app: FastAPI) -> AsyncClient:
 def _make_worker(
     events: list[DocumentChangeEvent] | None = None,
     secrets_resolver: SecretsResolver | None = None,
+    source_secrets_ref: str | None = None,
 ) -> tuple[IngestionWorker, AsyncMock, AsyncMock]:
     """Build an IngestionWorker with mocked dependencies.
 
@@ -189,7 +190,13 @@ def _make_worker(
 
     mock_consumer.__aiter__ = _aiter
 
+    from pydantic import BaseModel as _BaseModel
+
+    class _EmptyConfig(_BaseModel):
+        pass
+
     connector = MagicMock()
+    connector.config_schema = _EmptyConfig
     mock_registry: ConnectorRegistry = MagicMock(spec=ConnectorRegistry)
     mock_registry.get = MagicMock(return_value=connector)
 
@@ -206,6 +213,8 @@ def _make_worker(
     fake_source.id = uuid.uuid4()
     fake_source.name = "unblock-test-source"
     fake_source.tenant_id = uuid.uuid4()
+    fake_source.config = {}
+    fake_source.secrets_ref = source_secrets_ref
 
     inner_session = AsyncMock()
     scalar_result = MagicMock()
@@ -635,7 +644,7 @@ async def test_worker_passes_empty_secrets_when_no_secrets_ref() -> None:
     worker, mock_run, _ = _make_worker(events=[event])
 
     with patch(
-        "omniscience_server.ingestion.worker.IngestionPipeline.run",
+        "omniscience_server.ingestion.worker.IngestionPipeline.run_ref",
         new=mock_run,
     ):
         await worker.process_document(event)
@@ -649,20 +658,25 @@ async def test_worker_passes_empty_secrets_when_no_secrets_ref() -> None:
 async def test_worker_passes_resolved_secrets_to_pipeline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """process_document resolves secrets_ref and passes secrets to pipeline.run."""
+    """process_document resolves source.secrets_ref and passes secrets to pipeline.run_ref.
+
+    Secrets now come from Source.secrets_ref (server-side), not from the event payload.
+    """
     monkeypatch.setenv("WORKER_TEST_KEY", "worker_secret_value")
 
     source_id = uuid.uuid4()
-    # Use a MagicMock so we can attach secrets_ref as a duck-typed attribute
-    event_with_ref = MagicMock(spec=DocumentChangeEvent)
-    event_with_ref.source_id = source_id
-    event_with_ref.source_type = "git"
-    event_with_ref.external_id = "main.py"
-    event_with_ref.uri = "file://main.py"
-    event_with_ref.action = "updated"
-    event_with_ref.secrets_ref = "env:WORKER_TEST_KEY=api_key"
+    event = DocumentChangeEvent(
+        source_id=source_id,
+        source_type="git",
+        external_id="main.py",
+        uri="file://main.py",
+        action="updated",
+    )
 
-    worker, mock_run, _ = _make_worker(events=[event_with_ref])
+    worker, mock_run, _ = _make_worker(
+        events=[event],
+        source_secrets_ref="env:WORKER_TEST_KEY=api_key",
+    )
     mock_run.return_value = ProcessResult(
         source_id=source_id,
         external_id="main.py",
@@ -671,10 +685,10 @@ async def test_worker_passes_resolved_secrets_to_pipeline(
     )
 
     with patch(
-        "omniscience_server.ingestion.worker.IngestionPipeline.run",
+        "omniscience_server.ingestion.worker.IngestionPipeline.run_ref",
         new=mock_run,
     ):
-        await worker.process_document(event_with_ref)
+        await worker.process_document(event)
 
     call_kwargs = mock_run.call_args.kwargs
     assert call_kwargs["secrets"] == {"api_key": "worker_secret_value"}
@@ -704,11 +718,12 @@ async def test_worker_uses_custom_resolver_for_secrets() -> None:
     )
 
     with patch(
-        "omniscience_server.ingestion.worker.IngestionPipeline.run",
+        "omniscience_server.ingestion.worker.IngestionPipeline.run_ref",
         new=mock_run,
     ):
         result = await worker.process_document(event)
 
+    # Resolver is called with source.secrets_ref (None in this case, from fake_source).
     mock_resolver.resolve.assert_called_once_with(None)
     call_kwargs = mock_run.call_args.kwargs
     assert call_kwargs["secrets"] == {"injected_key": "injected_val"}

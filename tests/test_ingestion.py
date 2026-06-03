@@ -60,8 +60,13 @@ def _make_event(
 def _make_connector(content: bytes = b"hello world") -> MagicMock:
     """Return a mock Connector whose fetch() returns content."""
     from omniscience_connectors.base import DocumentRef, FetchedDocument
+    from pydantic import BaseModel
+
+    class _EmptyConfig(BaseModel):
+        pass
 
     connector = MagicMock()
+    connector.config_schema = _EmptyConfig
     ref = DocumentRef(external_id="abc/def.py", uri="file://abc/def.py")
     fetched = FetchedDocument(ref=ref, content_bytes=content, content_type="text/plain")
     connector.fetch = AsyncMock(return_value=fetched)
@@ -135,6 +140,8 @@ def _make_source(tenant_id: uuid.UUID | None = None, name: str = "test-source") 
     src.id = uuid.uuid4()
     src.name = name
     src.tenant_id = tenant_id if tenant_id is not None else uuid.uuid4()
+    src.config = {}
+    src.secrets_ref = None
     return src
 
 

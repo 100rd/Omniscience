@@ -68,7 +68,6 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-from omniscience_index.workspace import MissingWorkspaceError
 from omniscience_server.ingestion.events import DocumentChangeEvent
 from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.worker import IngestionWorker
@@ -98,8 +97,13 @@ def _make_event(
 
 def _make_connector(content: bytes = b"def foo():\n    pass\n") -> MagicMock:
     from omniscience_connectors.base import DocumentRef, FetchedDocument
+    from pydantic import BaseModel
+
+    class _EmptyConfig(BaseModel):
+        pass
 
     connector = MagicMock()
+    connector.config_schema = _EmptyConfig
     ref = DocumentRef(external_id="abc/def.py", uri="file://abc/def.py")
     fetched = FetchedDocument(ref=ref, content_bytes=content, content_type="text/plain")
     connector.fetch = AsyncMock(return_value=fetched)
@@ -176,6 +180,8 @@ def _make_source(tenant_id: uuid.UUID | None) -> Any:
     src.id = uuid.uuid4()
     src.name = "issue-126-test-source"
     src.tenant_id = tenant_id
+    src.config = {}
+    src.secrets_ref = None
     return src
 
 
@@ -443,16 +449,17 @@ class TestWorkerWorkspaceResolution:
 
     @pytest.mark.asyncio
     async def test_resolve_workspace_raises_on_missing_workspace(self) -> None:
-        """``_resolve_workspace`` raises ``MissingWorkspaceError`` for tenant-less sources.
+        """A source with ``tenant_id is None`` produces ``action='error'``.
 
-        Direct unit test: catches the helper's behaviour even before the
-        process_document call wraps it in an error result.
+        The original test called ``_resolve_workspace`` directly; that helper was
+        merged into ``_load_source_and_workspace`` (single DB round-trip). We now
+        assert the observable outcome via ``process_document`` instead.
         """
         source = _make_source(tenant_id=None)
         worker, _ = self._build_worker(source=source)
 
-        with pytest.raises(MissingWorkspaceError):
-            await worker._resolve_workspace(uuid.uuid4())
+        result = await worker.process_document(_make_event())
+        assert result.action == "error"
 
 
 # ---------------------------------------------------------------------------
@@ -713,7 +720,7 @@ async def test_worker_passes_workspace_to_pipeline_run() -> None:
         )
 
     with patch(
-        "omniscience_server.ingestion.worker.IngestionPipeline.run",
+        "omniscience_server.ingestion.worker.IngestionPipeline.run_ref",
         new=AsyncMock(side_effect=_capture),
     ):
         await worker.process_document(_make_event())
