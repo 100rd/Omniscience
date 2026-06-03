@@ -25,7 +25,7 @@ async def seed():
             http_port=settings.qdrant_http_port,
             api_key=settings.qdrant_api_key,
         ),
-        embedding_provider=create_embedding_provider(settings)
+        embedding_provider=create_embedding_provider(settings),
     )
 
     await graph_store.connect()
@@ -42,9 +42,12 @@ async def seed():
     async with session_factory() as session:
         await session.execute(delete(Source).where(Source.name == "omniscience-demo"))
         demo_source = Source(
-            id=src_id, name="omniscience-demo", type=SourceType.git,
+            id=src_id,
+            name="omniscience-demo",
+            type=SourceType.git,
             config={"repo_url": "git://demo-repo"},
-            tenant_id=ws_id, status=SourceStatus.active
+            tenant_id=ws_id,
+            status=SourceStatus.active,
         )
         session.add(demo_source)
         await session.commit()
@@ -53,14 +56,25 @@ async def seed():
     print(f"Seeding demo data for workspace {ws_id}...")
 
     # Data for Payments
-    chunks_p = [ChunkData(ord=0, text="""def process_payment(card):
+    chunks_p = [
+        ChunkData(
+            ord=0,
+            text="""def process_payment(card):
     auth.validate_token()
-    print('Paid')""", embedding=[0.1]*768)]
+    print('Paid')""",
+            embedding=[0.1] * 768,
+        )
+    ]
 
     res_p = await writer.upsert_document(
-        source_id=src_id, external_id="payments.py", uri="git://demo/payments.py",
-        title="Payments Module", content_hash="hash_p1", metadata={"lang": "python"},
-        chunks=chunks_p, workspace_id=ws_id
+        source_id=src_id,
+        external_id="payments.py",
+        uri="git://demo/payments.py",
+        title="Payments Module",
+        content_hash="hash_p1",
+        metadata={"lang": "python"},
+        chunks=chunks_p,
+        workspace_id=ws_id,
     )
 
     # Manual graph insertion to ensure stubs are created
@@ -72,7 +86,7 @@ async def seed():
             self.id = eid
             self.entity_type = etype
             self.name = name
-            self.display_name = name.split('.')[-1]
+            self.display_name = name.split(".")[-1]
             self.metadata = {}
             self.chunk_id = None
 
@@ -85,27 +99,40 @@ async def seed():
 
     # Upsert payments.py (creates stub for auth.validate_token)
     await writer.upsert_graph(
-        source_id=src_id, document_id=res_p.document_id,
+        source_id=src_id,
+        document_id=res_p.document_id,
         entities=[MockEnt(ent_p1_id, "function", "payments.process_payment")],
         edges=[MockEdge(ent_p1_id, "auth.validate_token", "calls")],
-        workspace_id=ws_id
+        workspace_id=ws_id,
     )
 
     # Upsert auth.py (materializes the stub)
-    chunks_a = [ChunkData(ord=0, text="""def validate_token():
-    return True""", embedding=[0.3]*768)]
+    chunks_a = [
+        ChunkData(
+            ord=0,
+            text="""def validate_token():
+    return True""",
+            embedding=[0.3] * 768,
+        )
+    ]
 
     res_a = await writer.upsert_document(
-        source_id=src_id, external_id="auth.py", uri="git://demo/auth.py",
-        title="Auth Module", content_hash="hash_a1", metadata={"lang": "python"},
-        chunks=chunks_a, workspace_id=ws_id
+        source_id=src_id,
+        external_id="auth.py",
+        uri="git://demo/auth.py",
+        title="Auth Module",
+        content_hash="hash_a1",
+        metadata={"lang": "python"},
+        chunks=chunks_a,
+        workspace_id=ws_id,
     )
 
     await writer.upsert_graph(
-        source_id=src_id, document_id=res_a.document_id,
+        source_id=src_id,
+        document_id=res_a.document_id,
         entities=[MockEnt(uuid.uuid4(), "function", "auth.validate_token")],
         edges=[],
-        workspace_id=ws_id
+        workspace_id=ws_id,
     )
 
     # 3. Resolve Stubs
@@ -114,6 +141,7 @@ async def seed():
 
     await graph_store.close()
     await vector_store.close()
+
 
 if __name__ == "__main__":
     asyncio.run(seed())

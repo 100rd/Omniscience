@@ -86,7 +86,10 @@ ignore = [
     "S101",  # assert is the standard pytest assertion mechanism
 ]
 "scripts/*" = [
-    "T201",  # print is the standard CLI output mechanism for one-shot scripts
+    "T201",    # print is the standard CLI output mechanism for one-shot scripts
+    "S108",    # /tmp paths are intentional for one-shot operational glue scripts
+    "S310",    # urlopen targets the trusted cluster API URL in fetch scripts
+    "SIM115",  # json.load(open(...)) is acceptable for short-lived one-shot scripts
 ]
 "bench/runner.py" = [
     "T201",  # print is the standard CLI output mechanism for the bench runner

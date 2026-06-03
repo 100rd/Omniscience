@@ -792,9 +792,7 @@ class TestVerifyRunnerRun:
     @pytest.mark.asyncio
     async def test_two_workspaces_isolation_check_no_breach(self) -> None:
         src_a = _make_source_mock(source_id=_SRC_1, tenant_id=_WS_A, name="src-a")
-        src_b = _make_source_mock(
-            source_id=uuid.uuid4(), tenant_id=_WS_B, name="src-b"
-        )
+        src_b = _make_source_mock(source_id=uuid.uuid4(), tenant_id=_WS_B, name="src-b")
         gs = _make_graph_store()
         vs = _make_vector_store()
         cfg = _make_config()
@@ -847,9 +845,7 @@ class TestVerifyRunnerRun:
     @pytest.mark.asyncio
     async def test_two_workspaces_isolation_breach_detected(self) -> None:
         src_a = _make_source_mock(source_id=_SRC_1, tenant_id=_WS_A, name="src-a")
-        src_b = _make_source_mock(
-            source_id=uuid.uuid4(), tenant_id=_WS_B, name="src-b"
-        )
+        src_b = _make_source_mock(source_id=uuid.uuid4(), tenant_id=_WS_B, name="src-b")
         gs = _make_graph_store()
         vs = _make_vector_store()
         cfg = _make_config()
@@ -1010,9 +1006,7 @@ class TestQdrantCountChunks:
         vs = _make_vector_store()
         vs._qc.count = AsyncMock(return_value=count_result)
 
-        with patch(
-            "omniscience_index.migration.verify.QdrantFilterBuilder"
-        ) as mock_fb:
+        with patch("omniscience_index.migration.verify.QdrantFilterBuilder") as mock_fb:
             mock_fb.return_value.with_source_ids.return_value = mock_fb.return_value
             mock_fb.return_value.exclude_tombstoned.return_value = mock_fb.return_value
             mock_fb.return_value.build.return_value = MagicMock()

@@ -300,8 +300,7 @@ async def test_connect_creates_all_adr_0008_constraints_and_indexes() -> None:
                     async for record in await session.run("SHOW CONSTRAINTS YIELD name")
                 ]
                 idx_rows = [
-                    record.data()
-                    async for record in await session.run("SHOW INDEXES YIELD name")
+                    record.data() async for record in await session.run("SHOW INDEXES YIELD name")
                 ]
         finally:
             await store.close()

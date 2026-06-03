@@ -274,14 +274,14 @@ def citation_for(runbook: RunbookDocument) -> dict[str, Any]:
 
 def runbook_source_uid(runbook_name: str) -> str:
     """Extract the ``source_uid`` segment from a canonical runbook name."""
-    tail = runbook_name[len("runbook://"):]
+    tail = runbook_name[len("runbook://") :]
     head, _, _ = tail.partition("/")
     return head
 
 
 def runbook_rel_path(runbook_name: str) -> str:
     """Extract the ``rel_path`` tail from a canonical runbook name."""
-    tail = runbook_name[len("runbook://"):]
+    tail = runbook_name[len("runbook://") :]
     _, _, rest = tail.partition("/")
     return rest
 

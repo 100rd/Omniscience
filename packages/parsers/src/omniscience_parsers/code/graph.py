@@ -20,6 +20,7 @@ from omniscience_parsers.base import ParsedDocument
 # Data classes
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class ExtractedEntity:
     id: uuid.UUID
@@ -29,12 +30,14 @@ class ExtractedEntity:
     symbol: str
     metadata: dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class ExtractedEdge:
     source_entity_id: uuid.UUID
     target_name: str  # FQN or alias
     edge_type: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
 
 # ---------------------------------------------------------------------------
 # Python Logic (AST-aware heuristics)
@@ -104,18 +107,20 @@ def _extract_python(
             continue
         ent_id = uuid.uuid4()
         etype = "class" if "class " in sec.text else "function"
-        entities.append(ExtractedEntity(
-            id=ent_id,
-            entity_type=etype,
-            name=sec.symbol,
-            display_name=sec.symbol.split(".")[-1],
-            symbol=sec.symbol,
-            metadata={
-                "line_start": sec.line_start,
-                "line_end": sec.line_end,
-                "language": parsed.language,
-            },
-        ))
+        entities.append(
+            ExtractedEntity(
+                id=ent_id,
+                entity_type=etype,
+                name=sec.symbol,
+                display_name=sec.symbol.split(".")[-1],
+                symbol=sec.symbol,
+                metadata={
+                    "line_start": sec.line_start,
+                    "line_end": sec.line_end,
+                    "language": parsed.language,
+                },
+            )
+        )
         symbol_to_id[sec.symbol] = ent_id
         edges.append(ExtractedEdge(module_id, sec.symbol, "defines"))
 
@@ -153,9 +158,11 @@ def _extract_python(
 
     return entities, edges
 
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
 
 def extract_symbol_graph(
     parsed: ParsedDocument,
@@ -170,5 +177,6 @@ def extract_symbol_graph(
     if parsed.language != "python":
         return [], []
     return _extract_python(parsed, source_text)
+
 
 __all__ = ["ExtractedEdge", "ExtractedEntity", "extract_symbol_graph"]
