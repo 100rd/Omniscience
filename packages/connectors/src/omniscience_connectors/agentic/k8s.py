@@ -25,21 +25,41 @@ Config
     - ``cluster_name`` — human-readable label stored in document metadata.
     - ``api_server`` — Kubernetes API server URL (e.g. ``https://k8s.example.com``).
     - ``namespace`` — namespace to scope discovery; empty = all namespaces.
-    - ``default_include_kinds`` — fallback list used when LLM fails.
+    - ``default_include_kinds`` — fallback list used when LLM fails (and the
+      sole source of kinds when ``use_llm_kind_selection=False``).
     - ``default_exclude_kinds`` — kinds always excluded regardless of LLM output.
+    - ``verify_ssl`` — ``True`` (default) verifies with the system CA bundle;
+      ``False`` disables verification (insecure escape hatch).  Ignored when a
+      CA is supplied — the CA always takes precedence.
+    - ``ca_cert_pem`` — PEM-encoded cluster CA certificate (string).  When set,
+      TLS verification uses this CA instead of the system bundle.
+    - ``ca_cert_b64`` — Base64-encoded PEM certificate.  Decoded and used the
+      same way as ``ca_cert_pem``.  ``ca_cert_pem`` takes precedence if both
+      are provided.
+    - ``use_llm_kind_selection`` — when ``False``, ``discover()`` skips the LLM
+      entirely and yields refs directly from ``default_include_kinds`` minus
+      ``default_exclude_kinds``.  Deterministic, no LLM dependency.
 
 Secrets
 -------
 ``kubeconfig`` or ``token`` (service-account JWT).  Passed via the secrets dict.
+The CA certificate may also be supplied as ``ca_cert_pem`` or ``ca_cert_b64``
+in the secrets dict; that takes precedence over the config fields.
 
 Discovery flow
 --------------
+When ``use_llm_kind_selection=True`` (default):
 1. Query ``/api`` and ``/apis`` to enumerate available resource kinds.
 2. Build a prompt listing the kinds and asking the LLM which to index.
 3. Parse the LLM's JSON response (``{"include": [...], "exclude": [...]}``) into
    ``DocumentRef`` objects — one per (kind, namespace/resource name) pair.
 4. Fall back to ``default_include_kinds`` minus ``default_exclude_kinds`` on
    parse failure.
+
+When ``use_llm_kind_selection=False``:
+1. Yield refs directly from ``default_include_kinds`` minus
+   ``default_exclude_kinds`` and ``_ALWAYS_EXCLUDE``.  No LLM call, no API
+   enumeration needed for kind selection (``/api`` / ``/apis`` are NOT called).
 
 Note: ``fetch()`` retrieves the resource as JSON and stores it as
 ``application/json`` bytes.  The downstream pipeline is responsible for further
@@ -48,8 +68,10 @@ parsing.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
+import ssl
 import warnings
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar, Final
@@ -60,7 +82,7 @@ from pydantic import BaseModel, Field
 from omniscience_connectors.agentic.base import AgentConfig, AgenticConnector
 from omniscience_connectors.base import DocumentRef, FetchedDocument, WebhookHandler
 
-__all__ = ["K8sAgenticConfig", "K8sAgenticConnector"]
+__all__ = ["K8sAgenticConfig", "K8sAgenticConnector", "build_ssl_verify"]
 
 logger = logging.getLogger(__name__)
 
@@ -246,7 +268,10 @@ class K8sAgenticConfig(BaseModel):
 
     default_include_kinds: list[str] = Field(
         default_factory=lambda: list(_DEFAULT_INCLUDE_KINDS),
-        description="Fallback list of resource kinds used when the LLM fails.",
+        description=(
+            "Fallback list of resource kinds used when the LLM fails, "
+            "or the complete kind list when use_llm_kind_selection=False."
+        ),
     )
 
     default_exclude_kinds: list[str] = Field(
@@ -256,8 +281,99 @@ class K8sAgenticConfig(BaseModel):
 
     verify_ssl: bool = Field(
         default=True,
-        description="Whether to verify TLS certificates when calling the API server.",
+        description=(
+            "Whether to verify TLS certificates when calling the API server. "
+            "Set to False only as an explicit insecure escape hatch. "
+            "Ignored when ca_cert_pem or ca_cert_b64 is provided."
+        ),
     )
+
+    ca_cert_pem: str | None = Field(
+        default=None,
+        description=(
+            "PEM-encoded CA certificate used to verify the API server TLS. "
+            "Takes precedence over ca_cert_b64 and verify_ssl."
+        ),
+    )
+
+    ca_cert_b64: str | None = Field(
+        default=None,
+        description=(
+            "Base64-encoded PEM CA certificate. Decoded and treated identically "
+            "to ca_cert_pem. ca_cert_pem takes precedence if both are set."
+        ),
+    )
+
+    use_llm_kind_selection: bool = Field(
+        default=True,
+        description=(
+            "When True (default), the LLM selects which resource kinds to index. "
+            "When False, discover() skips the LLM entirely and uses "
+            "default_include_kinds minus default_exclude_kinds directly "
+            "(deterministic, no LLM dependency)."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# TLS helper
+# ---------------------------------------------------------------------------
+
+
+def build_ssl_verify(
+    cfg: K8sAgenticConfig,
+    secrets: dict[str, str],
+) -> ssl.SSLContext | bool:
+    """Return the correct ``verify=`` value for an httpx client.
+
+    Resolution order:
+    1. ``secrets["ca_cert_pem"]`` (runtime-injected PEM string)
+    2. ``secrets["ca_cert_b64"]`` (runtime-injected base64 PEM)
+    3. ``cfg.ca_cert_pem``
+    4. ``cfg.ca_cert_b64``
+    5. ``cfg.verify_ssl`` (``True`` = system CA bundle, ``False`` = insecure)
+
+    When a PEM is resolved, an :class:`ssl.SSLContext` is built via
+    ``ssl.create_default_context(cadata=pem)`` so httpx uses the cluster CA
+    without needing a temp file on disk.
+
+    Args:
+        cfg: Validated K8sAgenticConfig.
+        secrets: Runtime secrets dict (may contain ``ca_cert_pem``/``ca_cert_b64``).
+
+    Returns:
+        An :class:`ssl.SSLContext` when a CA PEM is available,
+        or a bool (``True``/``False``) otherwise.
+    """
+    pem: str | None = (
+        secrets.get("ca_cert_pem")
+        or (secrets.get("ca_cert_b64") and _decode_b64_pem(secrets["ca_cert_b64"]))
+        or cfg.ca_cert_pem
+        or (cfg.ca_cert_b64 and _decode_b64_pem(cfg.ca_cert_b64))
+        or None
+    )
+    if pem:
+        ctx = ssl.create_default_context(cadata=pem)
+        return ctx
+    return cfg.verify_ssl
+
+
+def _decode_b64_pem(b64_value: str) -> str:
+    """Decode a base64-encoded PEM string and return the decoded text.
+
+    Args:
+        b64_value: Base64-encoded PEM certificate bytes.
+
+    Returns:
+        Decoded PEM string (UTF-8).
+
+    Raises:
+        ValueError: If the value is not valid base64.
+    """
+    try:
+        return base64.b64decode(b64_value).decode("utf-8")
+    except Exception as exc:
+        raise ValueError(f"ca_cert_b64 is not valid base64: {exc}") from exc
 
 
 class K8sAgenticConnector(AgenticConnector):
@@ -272,6 +388,9 @@ class K8sAgenticConnector(AgenticConnector):
     Fallback: if the LLM returns unparsable output after all iterations, the
     connector falls back to ``config.default_include_kinds`` minus
     ``config.default_exclude_kinds`` minus ``_ALWAYS_EXCLUDE``.
+
+    When ``config.use_llm_kind_selection=False``, the LLM is never called;
+    ``default_include_kinds`` is used directly (deterministic mode).
     """
 
     connector_type: ClassVar[str] = "k8s-agentic"
@@ -295,6 +414,7 @@ class K8sAgenticConnector(AgenticConnector):
         """Verify the API server is reachable and the token is valid."""
         cfg: K8sAgenticConfig = config  # type: ignore[assignment]
         token = secrets.get("token") or secrets.get("kubeconfig", "")
+        verify = build_ssl_verify(cfg, secrets)
 
         headers: dict[str, str] = {}
         if token:
@@ -302,7 +422,7 @@ class K8sAgenticConnector(AgenticConnector):
 
         try:
             async with httpx.AsyncClient(
-                verify=cfg.verify_ssl,
+                verify=verify,
                 headers=headers,
                 timeout=10.0,
             ) as client:
@@ -430,11 +550,28 @@ class K8sAgenticConnector(AgenticConnector):
     ) -> AsyncIterator[DocumentRef]:
         """Enumerate available API resource kinds, then run the LLM loop.
 
-        Overrides ``AgenticConnector.discover`` to first query the Kubernetes
-        API for available resource kinds and inject them into the LLM context
-        before calling the parent loop.
+        When ``config.use_llm_kind_selection`` is ``False``, the LLM is never
+        called; refs are yielded directly from ``default_include_kinds`` minus
+        ``default_exclude_kinds``.
+
+        Otherwise, overrides ``AgenticConnector.discover`` to first query the
+        Kubernetes API for available resource kinds and inject them into the LLM
+        context before calling the parent loop.
         """
         cfg: K8sAgenticConfig = config  # type: ignore[assignment]
+
+        # ------------------------------------------------------------------
+        # Fast path: deterministic mode — no LLM, no API enumeration
+        # ------------------------------------------------------------------
+        if not cfg.use_llm_kind_selection:
+            logger.info("k8s_agentic.discover.deterministic_mode")
+            async for ref in self._default_document_refs(config, secrets):
+                yield ref
+            return
+
+        # ------------------------------------------------------------------
+        # LLM path: enumerate available kinds, then run the LLM loop
+        # ------------------------------------------------------------------
         available_kinds = await self._enumerate_kinds(cfg, secrets)
 
         from omniscience_connectors.agentic.llm import build_provider
@@ -491,6 +628,7 @@ class K8sAgenticConnector(AgenticConnector):
         cfg: K8sAgenticConfig = config  # type: ignore[assignment]
         kind = ref.metadata.get("kind", "")
         token = secrets.get("token") or secrets.get("kubeconfig", "")
+        verify = build_ssl_verify(cfg, secrets)
 
         headers: dict[str, str] = {"Accept": "application/json"}
         if token:
@@ -501,7 +639,7 @@ class K8sAgenticConnector(AgenticConnector):
 
         try:
             async with httpx.AsyncClient(
-                verify=cfg.verify_ssl,
+                verify=verify,
                 headers=headers,
                 timeout=30.0,
             ) as client:
@@ -539,6 +677,7 @@ class K8sAgenticConnector(AgenticConnector):
         Returns an empty list on failure (the LLM loop will use defaults).
         """
         token = secrets.get("token") or secrets.get("kubeconfig", "")
+        verify = build_ssl_verify(cfg, secrets)
         headers: dict[str, str] = {}
         if token:
             headers["Authorization"] = f"Bearer {token}"
@@ -546,7 +685,7 @@ class K8sAgenticConnector(AgenticConnector):
         kinds: set[str] = set()
         try:
             async with httpx.AsyncClient(
-                verify=cfg.verify_ssl,
+                verify=verify,
                 headers=headers,
                 timeout=15.0,
             ) as client:
