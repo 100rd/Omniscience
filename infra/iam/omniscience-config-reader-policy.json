@@ -1,0 +1,45 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "OmniscienceConfigAggregatorRead",
+      "Effect": "Allow",
+      "Action": [
+        "config:SelectAggregateResourceConfig",
+        "config:BatchGetAggregateResourceConfig",
+        "config:ListAggregateDiscoveredResources",
+        "config:GetAggregateResourceConfig",
+        "config:GetAggregateDiscoveredResourceCounts",
+        "config:GetAggregateResourceConfigHistory",
+        "config:DescribeConfigurationAggregators"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "OmniscienceConfigS3ColdRead",
+      "Effect": "Allow",
+      "Action": [
+        "s3:GetObject"
+      ],
+      "Resource": "arn:aws:s3:::REPLACE_WITH_CONFIG_DELIVERY_BUCKET/config/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceAccount": "REPLACE_WITH_LOG_ARCHIVE_ACCOUNT_ID"
+        }
+      }
+    },
+    {
+      "Sid": "OmniscienceConfigS3ListBucket",
+      "Effect": "Allow",
+      "Action": [
+        "s3:ListBucket"
+      ],
+      "Resource": "arn:aws:s3:::REPLACE_WITH_CONFIG_DELIVERY_BUCKET",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceAccount": "REPLACE_WITH_LOG_ARCHIVE_ACCOUNT_ID"
+        }
+      }
+    }
+  ]
+}
