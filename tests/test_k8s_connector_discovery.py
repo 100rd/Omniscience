@@ -413,12 +413,14 @@ class TestFetchPerInstanceRef:
         name: str = "api-server",
         namespace: str = "default",
         cluster: str = "prod",
+        api_kind: str | None = None,
     ) -> DocumentRef:
         return DocumentRef(
             external_id=f"k8s:{cluster}:{namespace}:{kind}:{name}",
             uri=f"k8s://{cluster}/{namespace}/{kind}/{name}",
             metadata={
                 "kind": kind,
+                "api_kind": api_kind or kind,
                 "cluster": cluster,
                 "namespace": namespace,
                 "name": name,
@@ -479,6 +481,47 @@ class TestFetchPerInstanceRef:
         text = doc.content_bytes.decode()
         assert "Service" in text
         assert "my-service" in text
+
+    async def test_fetch_crd_instance_uses_qualified_api_path(self) -> None:
+        """Regression: a per-instance CRD ref must fetch via the fully-qualified
+        /apis/<group>/<version>/namespaces/<ns>/<plural>/<name> path.
+
+        The bare ``kind`` ("Application") loses the group and would resolve to a
+        wrong core-style path; fetch must use ``api_kind`` ("argoproj.io/Application").
+        """
+        connector = K8sAgenticConnector()
+        cfg = K8sAgenticConfig(api_server="https://k8s.test", verify_ssl=False)
+        ref = self._make_per_instance_ref(
+            kind="Application",
+            api_kind="argoproj.io/Application",
+            name="argocd-qbiq-shared",
+            namespace="argocd",
+            cluster="qbiq-shared",
+        )
+
+        resource_body = {
+            "metadata": {"name": "argocd-qbiq-shared", "namespace": "argocd"},
+            "spec": {"project": "default"},
+        }
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value=resource_body)
+        mock_resp.content = json.dumps(resource_body).encode()
+
+        mock_client = AsyncMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await connector.fetch(cfg, {}, ref)
+
+        called_url = mock_client.get.call_args.args[0]
+        assert called_url == (
+            "https://k8s.test/apis/argoproj.io/v1alpha1/"
+            "namespaces/argocd/applications/argocd-qbiq-shared"
+        )
 
 
 # ---------------------------------------------------------------------------
