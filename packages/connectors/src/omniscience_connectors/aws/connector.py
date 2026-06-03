@@ -16,9 +16,16 @@ Supported services
 - **s3** — list_buckets + describe each (tags, policy, versioning)  [global]
 - **iam** — list_users, list_roles, list_policies                   [global]
 - **ec2** — describe_instances, describe_vpcs, describe_security_groups [per-region]
+- **organizations** — describe_organization, list roots/OUs (nested), list_accounts
+  Opt-in via ``include_organizations=True`` in :class:`AwsConfig`.
 
 URI format: ``aws://{account_id}/{region}/{service}/{resource_type}/{name}``
 external_id: ARN (e.g. ``arn:aws:s3:::my-bucket``)
+
+Organizations URI format:
+  ``aws://org/{org_id}``
+  ``aws://org/{org_id}/ou/{ou_id}``
+  ``aws://org/{org_id}/account/{account_id}``
 """
 
 from __future__ import annotations
@@ -26,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from typing import Any, ClassVar
 
@@ -57,6 +65,19 @@ class AwsConfig(BaseModel):
     resource_type_filters: list[str] = Field(default_factory=list)
     """Optional resource-type allow-list (e.g. ``["aws_instance", "aws_vpc"]``).
     Empty means include all resource types for the configured services."""
+
+    include_organizations: bool = Field(default=False)
+    """When True, enumerate the AWS Organization, its OUs, and member accounts.
+
+    Requires the caller's principal to have read-only Organizations permissions:
+    ``organizations:DescribeOrganization``, ``organizations:ListRoots``,
+    ``organizations:ListOrganizationalUnitsForParent``,
+    ``organizations:ListAccounts``, ``organizations:ListParents``.
+
+    The Organizations API endpoint is always ``us-east-1`` regardless of the
+    ``regions`` setting.  Existing s3/iam/ec2 behavior is unchanged when this
+    is False (the default).
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +423,268 @@ def _extract_name_tag(tags: list[dict[str, str]]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Organizations helpers (synchronous — run in asyncio.to_thread)
+# ---------------------------------------------------------------------------
+
+# The Organizations API is region-agnostic; all calls go to us-east-1.
+_ORG_REGION = "us-east-1"
+
+# Retry parameters for ThrottlingException / TooManyRequestsException.
+_ORG_MAX_RETRIES = 5
+_ORG_BACKOFF_BASE = 0.5  # seconds
+
+
+def _org_client(secrets: dict[str, str]) -> Any:
+    """Return a boto3 organizations client pinned to us-east-1."""
+    return _build_client("organizations", secrets, _ORG_REGION)
+
+
+def _paginate_org(client: Any, method: str, key: str, **kwargs: Any) -> list[dict[str, Any]]:
+    """Paginate an Organizations list call with exponential-backoff retry.
+
+    Args:
+        client:  boto3 organizations client.
+        method:  Paginator name (e.g. ``"list_accounts"``).
+        key:     Response key holding the result list (e.g. ``"Accounts"``).
+        **kwargs: Extra parameters forwarded to ``paginator.paginate()``.
+
+    Returns:
+        Flat list of all items across all pages.
+
+    Raises:
+        botocore.exceptions.ClientError: On access-denied or unrecoverable errors.
+    """
+    paginator = client.get_paginator(method)
+    items: list[dict[str, Any]] = []
+    attempt = 0
+    while True:
+        try:
+            for page in paginator.paginate(**kwargs):
+                items.extend(page.get(key, []))
+            return items
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code in ("ThrottlingException", "TooManyRequestsException"):
+                attempt += 1
+                if attempt > _ORG_MAX_RETRIES:
+                    logger.warning(
+                        "organizations.throttle.max_retries_exceeded",
+                        extra={"method": method, "attempts": attempt},
+                    )
+                    raise
+                wait = _ORG_BACKOFF_BASE * (2 ** (attempt - 1))
+                logger.debug(
+                    "organizations.throttle.retry",
+                    extra={"method": method, "attempt": attempt, "wait_s": wait},
+                )
+                time.sleep(wait)
+                items = []  # reset before retry
+            else:
+                raise
+
+
+def _collect_ous(
+    client: Any,
+    parent_id: str,
+    parent_path: str,
+    org_id: str,
+    filters: list[str],
+) -> list[DocumentRef]:
+    """Recursively collect OUs under *parent_id*.
+
+    Args:
+        client:      boto3 organizations client.
+        parent_id:   Root or OU id to recurse from.
+        parent_path: Human-readable path string for the parent (e.g. ``"/root"``).
+        org_id:      Organization id (used in the URI).
+        filters:     Resource-type allow-list.
+
+    Returns:
+        List of :class:`DocumentRef` for every OU found at any depth.
+    """
+    refs: list[DocumentRef] = []
+    ous = _paginate_org(
+        client,
+        "list_organizational_units_for_parent",
+        "OrganizationalUnits",
+        ParentId=parent_id,
+    )
+    for ou in ous:
+        ou_id: str = ou.get("Id", "")
+        ou_name: str = ou.get("Name", ou_id)
+        ou_arn: str = ou.get("Arn", f"arn:aws:organizations::{org_id}:ou/{org_id}/{ou_id}")
+        ou_path = f"{parent_path}/{ou_name}"
+        uri = f"aws://org/{org_id}/ou/{ou_id}"
+
+        if _allowed("aws_organizations_ou", filters):
+            refs.append(
+                DocumentRef(
+                    external_id=ou_arn,
+                    uri=uri,
+                    metadata={
+                        "kind": "aws_live",
+                        "resource_type": "aws_organizations_ou",
+                        "service": "organizations",
+                        "region": "global",
+                        "org_id": org_id,
+                        "ou_id": ou_id,
+                        "name": ou_name,
+                        "arn": ou_arn,
+                        "parent_id": parent_id,
+                        "path": ou_path,
+                    },
+                )
+            )
+
+        # Recurse into child OUs
+        refs.extend(_collect_ous(client, ou_id, ou_path, org_id, filters))
+
+    return refs
+
+
+def _discover_organizations(
+    secrets: dict[str, str],
+    filters: list[str],
+) -> list[DocumentRef]:
+    """Discover the Organization, all OUs (nested), and member accounts.
+
+    Gracefully handles ``AccessDeniedException`` (the caller may lack
+    organizations permissions in a member account without delegated access)
+    by logging a warning and returning an empty list.
+
+    Args:
+        secrets: Runtime credential dict.
+        filters: Resource-type allow-list.
+
+    Returns:
+        List of :class:`DocumentRef` for the org, every OU, and every account.
+    """
+    client = _org_client(secrets)
+    refs: list[DocumentRef] = []
+
+    # --- Describe the organization itself ---
+    try:
+        org_resp: dict[str, Any] = client.describe_organization()
+    except botocore.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code in ("AccessDeniedException", "AWSOrganizationsNotInUseException"):
+            logger.warning(
+                "organizations.discover.skipped",
+                extra={"reason": code},
+            )
+            return []
+        raise
+
+    org: dict[str, Any] = org_resp.get("Organization", {})
+    org_id: str = org.get("Id", "")
+    if not org_id:
+        logger.warning("organizations.discover.empty_org_id")
+        return []
+
+    org_arn: str = org.get("Arn", f"arn:aws:organizations::{org_id}:organization/{org_id}")
+    master_account: str = org.get("MasterAccountId", "")
+    feature_set: str = org.get("FeatureSet", "")
+
+    if _allowed("aws_organization", filters):
+        refs.append(
+            DocumentRef(
+                external_id=org_arn,
+                uri=f"aws://org/{org_id}",
+                metadata={
+                    "kind": "aws_live",
+                    "resource_type": "aws_organization",
+                    "service": "organizations",
+                    "region": "global",
+                    "org_id": org_id,
+                    "name": org_id,
+                    "arn": org_arn,
+                    "master_account_id": master_account,
+                    "feature_set": feature_set,
+                },
+            )
+        )
+
+    # --- Enumerate roots then collect OUs recursively ---
+    try:
+        roots = _paginate_org(client, "list_roots", "Roots")
+    except botocore.exceptions.ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        logger.warning("organizations.list_roots.failed", extra={"code": code})
+        roots = []
+
+    for root in roots:
+        root_id: str = root.get("Id", "")
+        if not root_id:
+            continue
+        try:
+            refs.extend(_collect_ous(client, root_id, "/root", org_id, filters))
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            logger.warning(
+                "organizations.list_ous.failed",
+                extra={"root_id": root_id, "code": code},
+            )
+
+    # --- Member accounts ---
+    if _allowed("aws_organizations_account", filters):
+        try:
+            accounts = _paginate_org(client, "list_accounts", "Accounts")
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            logger.warning("organizations.list_accounts.failed", extra={"code": code})
+            accounts = []
+
+        for acct in accounts:
+            acct_id: str = acct.get("Id", "")
+            if not acct_id:
+                continue
+            acct_name: str = acct.get("Name", acct_id)
+            _fallback = f"arn:aws:organizations::{org_id}:account/{org_id}/{acct_id}"
+            acct_arn: str = acct.get("Arn", _fallback)
+            acct_email: str = acct.get("Email", "")
+            acct_status: str = acct.get("Status", "")
+            joined: str = str(acct.get("JoinedTimestamp", ""))
+
+            # Resolve the immediate OU parent for this account
+            parent_id = ""
+            try:
+                parents = _paginate_org(
+                    client, "list_parents", "Parents", ChildId=acct_id
+                )
+                if parents:
+                    parent_id = parents[0].get("Id", "")
+            except botocore.exceptions.ClientError as exc:
+                code = exc.response.get("Error", {}).get("Code", "")
+                logger.warning(
+                    "organizations.list_parents.failed",
+                    extra={"account_id": acct_id, "code": code},
+                )
+
+            refs.append(
+                DocumentRef(
+                    external_id=acct_arn,
+                    uri=f"aws://org/{org_id}/account/{acct_id}",
+                    metadata={
+                        "kind": "aws_live",
+                        "resource_type": "aws_organizations_account",
+                        "service": "organizations",
+                        "region": "global",
+                        "org_id": org_id,
+                        "account_id": acct_id,
+                        "name": acct_name,
+                        "arn": acct_arn,
+                        "email": acct_email,
+                        "status": acct_status,
+                        "joined_timestamp": joined,
+                        "parent_id": parent_id,
+                    },
+                )
+            )
+
+    return refs
+
+
+# ---------------------------------------------------------------------------
 # Per-resource fetch helpers (synchronous — run in asyncio.to_thread)
 # ---------------------------------------------------------------------------
 
@@ -572,6 +855,74 @@ def _fetch_ec2_sg(client: Any, sg_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Organizations fetch helpers (synchronous — run in asyncio.to_thread)
+# ---------------------------------------------------------------------------
+
+
+def _fetch_org_organization(client: Any, org_id: str) -> dict[str, Any]:
+    """Describe the Organization."""
+    detail: dict[str, Any] = {"org_id": org_id}
+    try:
+        resp = client.describe_organization()
+        org = resp.get("Organization", {})
+        detail.update(
+            {
+                "id": org.get("Id", org_id),
+                "arn": org.get("Arn", ""),
+                "feature_set": org.get("FeatureSet", ""),
+                "master_account_id": org.get("MasterAccountId", ""),
+                "master_account_email": org.get("MasterAccountEmail", ""),
+                "available_policy_types": [
+                    pt.get("Type", "") for pt in org.get("AvailablePolicyTypes", [])
+                ],
+            }
+        )
+    except botocore.exceptions.ClientError:
+        pass
+    return detail
+
+
+def _fetch_org_ou(client: Any, ou_id: str) -> dict[str, Any]:
+    """Describe a single Organizational Unit."""
+    detail: dict[str, Any] = {"ou_id": ou_id}
+    try:
+        resp = client.describe_organizational_unit(OrganizationalUnitId=ou_id)
+        ou = resp.get("OrganizationalUnit", {})
+        detail.update(
+            {
+                "id": ou.get("Id", ou_id),
+                "arn": ou.get("Arn", ""),
+                "name": ou.get("Name", ""),
+            }
+        )
+    except botocore.exceptions.ClientError:
+        pass
+    return detail
+
+
+def _fetch_org_account(client: Any, account_id: str) -> dict[str, Any]:
+    """Describe a single member account."""
+    detail: dict[str, Any] = {"account_id": account_id}
+    try:
+        resp = client.describe_account(AccountId=account_id)
+        acct = resp.get("Account", {})
+        detail.update(
+            {
+                "id": acct.get("Id", account_id),
+                "arn": acct.get("Arn", ""),
+                "name": acct.get("Name", ""),
+                "email": acct.get("Email", ""),
+                "status": acct.get("Status", ""),
+                "joined_method": acct.get("JoinedMethod", ""),
+                "joined_timestamp": str(acct.get("JoinedTimestamp", "")),
+            }
+        )
+    except botocore.exceptions.ClientError:
+        pass
+    return detail
+
+
+# ---------------------------------------------------------------------------
 # AwsConnector
 # ---------------------------------------------------------------------------
 
@@ -579,10 +930,10 @@ def _fetch_ec2_sg(client: Any, sg_id: str) -> dict[str, Any]:
 class AwsConnector(Connector):
     """Connector for live AWS resources.
 
-    Discovers resources across S3, IAM, and EC2 (configurable) and returns
-    them as :class:`~omniscience_connectors.base.DocumentRef` objects tagged
-    with ``kind="aws_live"``.  The ARN is stored as ``external_id`` and in
-    ``metadata["arn"]`` to support ARN-based cross-source linking.
+    Discovers resources across S3, IAM, EC2, and optionally AWS Organizations
+    (configurable) and returns them as :class:`~omniscience_connectors.base.DocumentRef`
+    objects tagged with ``kind="aws_live"``.  The ARN is stored as ``external_id``
+    and in ``metadata["arn"]`` to support ARN-based cross-source linking.
 
     Stateless: all state derives from config + secrets at call time.
     """
@@ -624,7 +975,8 @@ class AwsConnector(Connector):
 
         Enumerates all configured services across all configured regions.
         Global services (S3, IAM) are enumerated once regardless of the
-        ``regions`` list.
+        ``regions`` list.  When ``include_organizations`` is True, the
+        Organization tree (org, OUs, accounts) is also enumerated once.
 
         Args:
             config: Validated :class:`AwsConfig`.
@@ -655,6 +1007,12 @@ class AwsConnector(Connector):
                 refs = await asyncio.to_thread(_discover_ec2, secrets, account_id, region, filters)
                 for ref in refs:
                     yield ref
+
+        # Organizations (opt-in, global)
+        if cfg.include_organizations:
+            refs = await asyncio.to_thread(_discover_organizations, secrets, filters)
+            for ref in refs:
+                yield ref
 
     async def fetch(
         self,
@@ -716,6 +1074,18 @@ class AwsConnector(Connector):
             if resource_type == "aws_security_group":
                 client = _build_client("ec2", secrets, region)
                 return _fetch_ec2_sg(client, meta.get("group_id", ""))
+
+            if resource_type == "aws_organization":
+                client = _org_client(secrets)
+                return _fetch_org_organization(client, meta.get("org_id", ""))
+
+            if resource_type == "aws_organizations_ou":
+                client = _org_client(secrets)
+                return _fetch_org_ou(client, meta.get("ou_id", ""))
+
+            if resource_type == "aws_organizations_account":
+                client = _org_client(secrets)
+                return _fetch_org_account(client, meta.get("account_id", ""))
 
             # Unknown type: return metadata as-is
             return dict(meta)
