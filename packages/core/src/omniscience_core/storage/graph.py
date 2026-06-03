@@ -47,6 +47,9 @@ class EntityNodeView:
     chunk_text: str | None
     depth: int = 0
     edge_type: str | None = None
+    # Human-readable label for display / matching (e.g. Jira ticket key).
+    # Optional: populated when the backend stores a distinct display label.
+    display_name: str | None = None
     # ADR-0008 §1 — bitemporal triple.
     valid_from: datetime | None = None
     valid_to: datetime | None = None
@@ -123,6 +126,7 @@ class GraphStore(Protocol):
         document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        snapshot_at: datetime | None = None,
     ) -> None: ...
 
     async def upsert_entity(
@@ -152,6 +156,25 @@ class GraphStore(Protocol):
         ...
 
     async def delete_tombstoned(self) -> int: ...
+
+    async def resolve_pending_stubs(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> int:
+        """Merge stub nodes with real entities in the same workspace.
+
+        A *stub* is a placeholder entity node created by
+        :meth:`upsert_edge_by_name` when the target entity does not yet
+        exist.  After the target is ingested, this method performs a
+        batch Cypher MATCH+MERGE to replace stub nodes with the real
+        entity (preserving existing edges).
+
+        Returns:
+            Number of stub nodes resolved (merged into real entities) in
+            this call.  Returns ``0`` when there is nothing to resolve.
+        """
+        ...
 
     # ------------------------------------------------------------------
     # Read API — every method REQUIRES workspace_id (keyword-only)

@@ -181,7 +181,7 @@ class EntityLinkerProtocol(Protocol):
     Tests inject a mock that also satisfies it.
     """
 
-    async def link_entities(self, source_id: UUID) -> int: ...
+    async def link_entities(self, source_id: UUID, workspace_id: UUID) -> int: ...
 
 
 # ---------------------------------------------------------------------------

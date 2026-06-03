@@ -156,11 +156,17 @@ class VectorStore(Protocol):
         *,
         source_id: uuid.UUID,
         external_id: str,
+        workspace_id: uuid.UUID | None = None,
     ) -> bool:
         """Tombstone the document identified by ``(source_id, external_id)``.
 
         Returns ``True`` when the document existed and was tombstoned;
         ``False`` when no matching active document was found.
+
+        ``workspace_id`` is keyword-only and optional at the protocol
+        level for backward-compatibility; the Qdrant adapter requires it
+        (raises ``ValueError`` when ``None``) per the ACL invariant
+        (ADR-0006 §ACL).
 
         Note: "tombstone" means set ``tombstoned_at`` — hard deletion
         is deferred to ``delete_tombstoned``.  This preserves the

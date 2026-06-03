@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from typing import Any
 
 import structlog
@@ -27,7 +28,7 @@ class WorkspaceUpdate(BaseModel):
     metadata: dict[str, Any]
 
 
-async def _get_db(request: Request) -> AsyncSession:
+async def _get_db(request: Request) -> AsyncGenerator[AsyncSession, None]:
     """Helper to get DB session from app state."""
     factory = request.app.state.db_session_factory
     async with factory() as session:

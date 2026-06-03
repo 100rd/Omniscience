@@ -34,6 +34,7 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from omniscience_core.auth.middleware import _lookup_token
 from omniscience_core.auth.scopes import Scope, check_scopes
 from pydantic import BaseModel, field_validator
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
 
@@ -56,8 +57,10 @@ class _SessionCreateRequest(BaseModel):
         return v
 
 
-def _require_db_factory(request: Request) -> object:
-    factory = getattr(request.app.state, "db_session_factory", None)
+def _require_db_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    factory: async_sessionmaker[AsyncSession] | None = getattr(
+        request.app.state, "db_session_factory", None
+    )
     if factory is None:
         raise HTTPException(status_code=503, detail="Database not available")
     return factory
