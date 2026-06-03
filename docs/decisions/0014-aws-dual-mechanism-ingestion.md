@@ -1,6 +1,6 @@
 # ADR-0014 — Dual-mechanism AWS ingestion: generic poll + AWS Config
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-06-03
 - **Deciders**: Architecture, Backend Engineer
 - **Builds on**: [ADR-0002](0002-connector-framework-vs-sdk.md) (connector
@@ -145,6 +145,51 @@ Config change / CloudTrail ─▶ EventBridge rule ─▶ SQS (omniscience-aws-i
 Reconciliation (pull) runs on a schedule via Config advanced query (or a
 `cloudcontrol` re-scan) to correct drift and catch missed events. Steady-state
 cost is proportional to **change volume**, not resource count.
+
+### 5. Grounded parameters (verified against `qbiq-ai/infra`)
+
+Inspection of the `infra` repo's `shared` env and org config (`modules/config-org`,
+`_envcommon/config.hcl`, `management/eu-west-1/organizations`) fixes the
+otherwise-open parameters on fact rather than assumption:
+
+- **Start mode = `config`, no enablement needed.** AWS Config is already running
+  org-wide: `recording_group{ all_supported = true, include_global_resource_types
+  = true }` + `aws_config_configuration_aggregator "org"` with
+  `organization_aggregation_source{ all_regions = true }`. All types, all
+  regions, all accounts are already recorded.
+- **Aggregator hub = Log Archive account** (delegated admin, infra #158). Omniscience
+  reads the org aggregator from Log Archive via a **read-only role** —
+  `config:SelectAggregateResourceConfig` / `BatchGetAggregateResourceConfig` /
+  `GetAggregateResourceConfigHistory`. The aggregator already spans every member
+  account (qbiq-prod, qbiq-dev, analytics, shared, …), so per-account `AssumeRole`
+  is **not** required for the baseline graph.
+- **Cold archive already exists.** Config delivers configuration snapshots/history
+  to **S3** (delivery channel, prefix `config`, in Log Archive). This is reused as
+  the cold tier (below) instead of duplicating old history in our hot stores.
+- **CloudTrail and EventBridge are already deployed** → Phases 4–5 (push,
+  activity) have their AWS-side primitives in place; the work is wiring, not
+  enablement.
+- **No RDS** in the estate → excluded from the starting scope.
+
+#### Decided execution parameters
+
+- **Reconciliation cadence:** full nightly + 6h incremental reconcile (pull).
+  After push (Phase 4) lands, reconciliation drops to nightly drift-check only.
+- **Starting scope (Tier-1):** `AWS::EC2::VPC|Subnet|SecurityGroup|RouteTable|
+  NatGateway|InternetGateway|EIP`, `AWS::EKS::Cluster|Nodegroup|Addon`,
+  `AWS::ElasticLoadBalancingV2::LoadBalancer`, `AWS::IAM::Role|Policy|User|Group|
+  OIDCProvider`, `AWS::S3::Bucket`, `AWS::KMS::Key`, `AWS::ECR::Repository`,
+  `AWS::SecretsManager::Secret`, `AWS::Lambda::Function`, `AWS::Route53::HostedZone`.
+  Tier-2 (TransitGateway, NetworkFirewall, DynamoDB, Backup, GuardDuty, Config
+  rules, CloudWatch, IdentityStore, AccessAnalyzer, Budgets/CE) follows on demand.
+- **Retention / tiering** (extends ADR-0009): **hot 90d** full bitemporal versions
+  in Neo4j/Qdrant/PG → **warm** summarised (changed fields + S3 snapshot pointer)
+  → **cold** = a *pointer* (S3 path + `captureTime`) into the existing Config S3
+  archive, full object re-hydrated on demand via **Athena** (slower deep search is
+  acceptable per operator). Our raw rows purge ~1y; S3 archive lives by its own
+  lifecycle (Glacier). Security-relevant types (IAM/SG/KMS) kept hot longer.
+- **Push:** deferred — **pull-only first** (Phases 1–3); SQS/EventBridge bridge is
+  Phase 4.
 
 ## Consequences
 
