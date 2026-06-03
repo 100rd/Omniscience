@@ -1,22 +1,25 @@
 """Integration tests for bitemporality and retention (issue #135, ADR-0009).
 
-Verifies that the orchestrated IndexWriter and RetentionWorker maintain 
+Verifies that the orchestrated IndexWriter and RetentionWorker maintain
 consistent bitemporal history across Postgres, Neo4j, and Qdrant.
 """
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from omniscience_core.storage.graph import EntityNodeView, GraphResultView
 from omniscience_index import ChunkData, IndexWriter
 from omniscience_retrieval.models import (
-    SearchHit, SearchResult, QueryStats, Citation, 
-    SourceInfo, ChunkLineage
+    ChunkLineage,
+    Citation,
+    QueryStats,
+    SearchHit,
+    SearchResult,
+    SourceInfo,
 )
 
 # ---------------------------------------------------------------------------
@@ -33,27 +36,28 @@ _T2 = datetime(2026, 5, 1, 12, 0, 0, tzinfo=UTC)
 # Test Setup
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_bitemporal_update_and_retention_flow() -> None:
     """End-to-end verification of temporal consistency."""
-    
+
     mock_session = AsyncMock()
     mock_begin = AsyncMock()
     mock_begin.__aenter__ = AsyncMock()
     mock_begin.__aexit__ = AsyncMock()
     mock_session.begin = MagicMock(return_value=mock_begin)
-    
+
     session_factory = MagicMock()
     mock_factory_cm = AsyncMock()
     mock_factory_cm.__aenter__ = AsyncMock(return_value=mock_session)
     mock_factory_cm.__aexit__ = AsyncMock()
     session_factory.return_value = mock_factory_cm
-    
+
     graph_store = MagicMock()
     graph_store.upsert_graph = AsyncMock()
     vector_store = MagicMock()
     vector_store.upsert_chunks = AsyncMock()
-    
+
     writer = IndexWriter(
         session_factory=session_factory,
         graph_store=graph_store,
@@ -64,12 +68,12 @@ async def test_bitemporal_update_and_retention_flow() -> None:
     mock_doc.id = uuid.uuid4()
     mock_doc.content_hash = "old-hash"
     mock_doc.doc_version = 1
-    
+
     # --- STEP 1: CREATE VERSION 1 ---
     with (
         patch.object(writer, "_find_document", AsyncMock(return_value=None)),
         patch.object(writer, "_insert_document", AsyncMock(return_value=mock_doc)),
-        patch.object(writer, "_insert_chunks", AsyncMock())
+        patch.object(writer, "_insert_chunks", AsyncMock()),
     ):
         chunks = [ChunkData(ord=0, text="Version 1 content", embedding=[0.1, 0.1])]
         await writer.upsert_document(
@@ -91,7 +95,7 @@ async def test_bitemporal_update_and_retention_flow() -> None:
         patch.object(writer, "_find_document", AsyncMock(return_value=mock_doc)),
         patch.object(writer, "_update_document", AsyncMock()),
         patch.object(writer, "_delete_chunks", AsyncMock()),
-        patch.object(writer, "_insert_chunks", AsyncMock())
+        patch.object(writer, "_insert_chunks", AsyncMock()),
     ):
         chunks_v2 = [ChunkData(ord=0, text="Version 2 content", embedding=[0.2, 0.2])]
         await writer.upsert_document(
@@ -108,7 +112,7 @@ async def test_bitemporal_update_and_retention_flow() -> None:
 
     # --- STEP 3: TEMPORAL RETRIEVAL SIMULATION ---
     from omniscience_retrieval.graph_rag import GraphRAGComposer
-    
+
     def _make_result(text: str) -> SearchResult:
         hit = SearchHit(
             chunk_id=uuid.uuid4(),
@@ -122,18 +126,15 @@ async def test_bitemporal_update_and_retention_flow() -> None:
                 embedding_provider="test",
                 parser_version="test",
                 chunker_strategy="test",
-                ingestion_run_id=uuid.uuid4()
+                ingestion_run_id=uuid.uuid4(),
             ),
-            metadata={}
+            metadata={},
         )
         return SearchResult(
             hits=[hit],
             query_stats=QueryStats(
-                total_matches_before_filters=1,
-                vector_matches=1,
-                text_matches=0,
-                duration_ms=1.0
-            )
+                total_matches_before_filters=1, vector_matches=1, text_matches=0, duration_ms=1.0
+            ),
         )
 
     async def mock_search_v1(**kwargs: Any) -> Any:
@@ -147,26 +148,22 @@ async def test_bitemporal_update_and_retention_flow() -> None:
         vector_store=vector_store,
         legacy_service=MagicMock(),
     )
-    
+
     with (
         patch("omniscience_retrieval.graph_rag._should_use_graphrag", return_value=True),
-        patch("omniscience_retrieval.graph_rag._stamp_envelope", side_effect=lambda x, **k: x)
+        patch("omniscience_retrieval.graph_rag._stamp_envelope", side_effect=lambda x, **k: x),
     ):
         composer._graphrag_active = True
-        
+
         # Query for Version 1
         res1 = await composer.search(
-            MagicMock(query="content", top_k=1, filters={}),
-            workspace_id=_WS_ID,
-            as_of=_T1
+            MagicMock(query="content", top_k=1, filters={}), workspace_id=_WS_ID, as_of=_T1
         )
         assert "Version 1" in res1.hits[0].text
-        
+
         # Query for Version 2
         res2 = await composer.search(
-            MagicMock(query="content", top_k=1, filters={}),
-            workspace_id=_WS_ID,
-            as_of=_T2
+            MagicMock(query="content", top_k=1, filters={}), workspace_id=_WS_ID, as_of=_T2
         )
         assert "Version 2" in res2.hits[0].text
 
@@ -174,6 +171,7 @@ async def test_bitemporal_update_and_retention_flow() -> None:
     vector_store.mark_retention_warm = AsyncMock()
     await vector_store.mark_retention_warm(workspace_id=_WS_ID, cutoff=_T2)
     vector_store.mark_retention_warm.assert_awaited_once()
+
 
 if __name__ == "__main__":
     pytest.main([__file__])

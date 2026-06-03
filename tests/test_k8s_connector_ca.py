@@ -41,11 +41,9 @@ import ssl
 import subprocess
 import warnings
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
-from pydantic import BaseModel
 
 # Suppress the module-level DeprecationWarning during import in tests.
 with warnings.catch_warnings():
@@ -201,9 +199,7 @@ class TestDeterministicMode:
             use_llm_kind_selection=False,
         )
         # No LLM mock needed — we assert it is NEVER called
-        with patch(
-            "omniscience_connectors.agentic.llm.build_provider"
-        ) as mock_build_provider:
+        with patch("omniscience_connectors.agentic.llm.build_provider") as mock_build_provider:
             refs = await _collect_discover(connector, cfg)
             mock_build_provider.assert_not_called()
 
@@ -333,12 +329,11 @@ class TestBearerTokenHeader:
         connector = K8sAgenticConnector()
         cfg = K8sAgenticConfig(api_server="https://k8s.example.com", verify_ssl=False)
 
-        mock_client_cls, mock_client = _make_httpx_mock()
+        mock_client_cls, _ = _make_httpx_mock()
 
         with patch("httpx.AsyncClient", mock_client_cls):
             await connector.validate(cfg, {"token": "my-sa-token"})
 
-        call_kwargs = mock_client.get.call_args
         # Header must be set at client construction time via AsyncClient(headers=...)
         client_init_kwargs = mock_client_cls.call_args[1]
         assert "Authorization" in client_init_kwargs.get("headers", {})
@@ -353,7 +348,7 @@ class TestBearerTokenHeader:
             metadata={"kind": "Deployment", "cluster": "test", "namespace": ""},
         )
 
-        mock_client_cls, mock_client = _make_httpx_mock(
+        mock_client_cls, _ = _make_httpx_mock(
             response_data={"items": []},
         )
 
@@ -397,7 +392,7 @@ class TestBearerTokenHeader:
         connector = K8sAgenticConnector()
         cfg = K8sAgenticConfig(api_server="https://k8s.example.com", verify_ssl=False)
 
-        mock_client_cls, mock_client = _make_httpx_mock()
+        mock_client_cls, _ = _make_httpx_mock()
 
         with patch("httpx.AsyncClient", mock_client_cls):
             await connector.validate(cfg, {})
@@ -419,7 +414,7 @@ class TestHttpxVerifyWiring:
             ca_cert_pem=_TEST_CA_PEM,
         )
 
-        mock_client_cls, mock_client = _make_httpx_mock()
+        mock_client_cls, _ = _make_httpx_mock()
 
         with patch("httpx.AsyncClient", mock_client_cls):
             await connector.validate(cfg, {})
@@ -435,7 +430,7 @@ class TestHttpxVerifyWiring:
             uri="k8s://test/ConfigMap",
             metadata={"kind": "ConfigMap", "cluster": "test", "namespace": ""},
         )
-        mock_client_cls, mock_client = _make_httpx_mock(response_data={"items": []})
+        mock_client_cls, _ = _make_httpx_mock(response_data={"items": []})
 
         with patch("httpx.AsyncClient", mock_client_cls):
             await connector.fetch(cfg, {"ca_cert_b64": _TEST_CA_B64}, ref)
@@ -450,7 +445,7 @@ class TestHttpxVerifyWiring:
             verify_ssl=False,
         )
 
-        mock_client_cls, mock_client = _make_httpx_mock()
+        mock_client_cls, _ = _make_httpx_mock()
 
         with patch("httpx.AsyncClient", mock_client_cls):
             await connector.validate(cfg, {})

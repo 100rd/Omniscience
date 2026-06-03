@@ -108,16 +108,9 @@ async def test_create_token_with_workspace_id_persists_it() -> None:
     read_model = _make_read_model(tok)
     session = _make_session(tok)
 
-    # Capture what ApiToken(...) was constructed with.
+    # Capture what ApiToken(...) was constructed with (via the patched
+    # side_effect below, which records kwargs into constructed_kwargs).
     constructed_kwargs: dict[str, Any] = {}
-
-    original_init = ApiToken.__init__
-
-    def _capture_init(self: ApiToken, **kwargs: Any) -> None:
-        constructed_kwargs.update(kwargs)
-        # Set attributes directly so the object behaves realistically.
-        for k, v in kwargs.items():
-            object.__setattr__(self, k, v)
 
     with (
         patch(
@@ -127,7 +120,7 @@ async def test_create_token_with_workspace_id_persists_it() -> None:
         patch("omniscience_server.routes.tokens.hash_token", return_value="hashed"),
         patch(
             "omniscience_server.routes.tokens.ApiToken",
-            side_effect=lambda **kw: (constructed_kwargs.update(kw) or tok),
+            side_effect=lambda **kw: constructed_kwargs.update(kw) or tok,
         ),
         patch(
             "omniscience_server.routes.tokens.ApiTokenRead.model_validate",
@@ -182,7 +175,7 @@ async def test_create_token_without_workspace_id_stays_null() -> None:
         patch("omniscience_server.routes.tokens.hash_token", return_value="hashed2"),
         patch(
             "omniscience_server.routes.tokens.ApiToken",
-            side_effect=lambda **kw: (constructed_kwargs.update(kw) or tok),
+            side_effect=lambda **kw: constructed_kwargs.update(kw) or tok,
         ),
         patch(
             "omniscience_server.routes.tokens.ApiTokenRead.model_validate",

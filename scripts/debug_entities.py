@@ -18,5 +18,6 @@ async def list_all():
 
     await graph_store.close()
 
+
 if __name__ == "__main__":
     asyncio.run(list_all())

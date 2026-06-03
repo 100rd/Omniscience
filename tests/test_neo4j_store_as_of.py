@@ -238,7 +238,6 @@ async def test_find_related_default_uses_latest_template() -> None:
         return_value=[
             {
                 "id": str(uuid.uuid4()),
-
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),
@@ -267,7 +266,6 @@ async def test_find_related_as_of_routes_to_bitemporal_template() -> None:
         return_value=[
             {
                 "id": str(uuid.uuid4()),
-
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),
@@ -305,7 +303,6 @@ async def test_traverse_passes_as_of_through_to_find_related() -> None:
         return_value=[
             {
                 "id": str(uuid.uuid4()),
-
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(uuid.uuid4()),
@@ -438,7 +435,6 @@ async def test_find_related_legacy_3_tuple_edges_still_parse() -> None:
         return_value=[
             {
                 "id": str(uuid.uuid4()),
-
                 "seed_name": "svc.auth",
                 "seed_kind": "service",
                 "seed_source_id": str(src),

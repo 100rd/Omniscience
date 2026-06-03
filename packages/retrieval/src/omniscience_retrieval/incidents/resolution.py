@@ -194,7 +194,7 @@ def validate_alert_id(alert_id: str) -> None:
         raise ValueError(f"{INVALID_ALERT_ID_CODE}:{INVALID_ALERT_ID_MESSAGE}")
     if not alert_id.startswith(_ALERT_PREFIX):
         raise ValueError(f"{INVALID_ALERT_ID_CODE}:{INVALID_ALERT_ID_MESSAGE}")
-    suffix = alert_id[len(_ALERT_PREFIX):]
+    suffix = alert_id[len(_ALERT_PREFIX) :]
     if "/" not in suffix:
         raise ValueError(f"{INVALID_ALERT_ID_CODE}:{INVALID_ALERT_ID_MESSAGE}")
     provider, _, provider_alert_id = suffix.partition("/")

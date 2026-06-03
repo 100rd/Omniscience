@@ -141,7 +141,7 @@ def _is_alert_name(name: str) -> bool:
     """True iff ``name`` is an ``alert://...`` canonical URI."""
     if not name.startswith(_ALERT_PREFIX):
         return False
-    suffix = name[len(_ALERT_PREFIX):]
+    suffix = name[len(_ALERT_PREFIX) :]
     return "/" in suffix
 
 

@@ -16,5 +16,6 @@ async def resolve():
 
     await graph_store.close()
 
+
 if __name__ == "__main__":
     asyncio.run(resolve())

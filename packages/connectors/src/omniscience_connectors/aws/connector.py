@@ -648,9 +648,7 @@ def _discover_organizations(
             # Resolve the immediate OU parent for this account
             parent_id = ""
             try:
-                parents = _paginate_org(
-                    client, "list_parents", "Parents", ChildId=acct_id
-                )
+                parents = _paginate_org(client, "list_parents", "Parents", ChildId=acct_id)
                 if parents:
                     parent_id = parents[0].get("Id", "")
             except botocore.exceptions.ClientError as exc:

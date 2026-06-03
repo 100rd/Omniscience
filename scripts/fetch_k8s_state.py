@@ -27,8 +27,15 @@ docs: list[dict] = []
 
 
 def add(external_id: str, uri: str, title: str, text: str, metadata: dict) -> None:
-    docs.append({"external_id": external_id, "uri": uri, "title": title,
-                 "text": text, "metadata": metadata})
+    docs.append(
+        {
+            "external_id": external_id,
+            "uri": uri,
+            "title": title,
+            "text": text,
+            "metadata": metadata,
+        }
+    )
 
 
 # --- ArgoCD Applications (the headline: sync/health/repo/destination) ---
@@ -49,11 +56,23 @@ for a in apps:
         f"Destination: server {dserver} namespace {dns}. "
         f"Project: {spec.get('project', 'default')}."
     )
-    add(f"argocd/app/{name}", f"argocd://{CLUSTER}/{ns}/{name}",
-        f"ArgoCD App: {name} ({sync}/{health})", text,
-        {"kind": "Application", "cluster": CLUSTER, "namespace": ns, "name": name,
-         "sync": sync, "health": health, "repo": repo, "dest_namespace": dns,
-         "component_category": "argocd"})
+    add(
+        f"argocd/app/{name}",
+        f"argocd://{CLUSTER}/{ns}/{name}",
+        f"ArgoCD App: {name} ({sync}/{health})",
+        text,
+        {
+            "kind": "Application",
+            "cluster": CLUSTER,
+            "namespace": ns,
+            "name": name,
+            "sync": sync,
+            "health": health,
+            "repo": repo,
+            "dest_namespace": dns,
+            "component_category": "argocd",
+        },
+    )
 
 # --- Deployments (apps/v1) ---
 deps = _get("/apis/apps/v1/deployments").get("items", [])
@@ -69,10 +88,21 @@ for d in deps:
         f"Replicas: {ready}/{replicas} ready. Images: {images}. "
         f"Containers: {', '.join(c.get('name', '?') for c in containers)}."
     )
-    add(f"k8s/deployment/{ns}/{name}", f"k8s://{CLUSTER}/{ns}/Deployment/{name}",
-        f"Deployment: {ns}/{name}", text,
-        {"kind": "Deployment", "cluster": CLUSTER, "namespace": ns, "name": name,
-         "replicas": replicas, "ready": ready, "component_category": "k8s"})
+    add(
+        f"k8s/deployment/{ns}/{name}",
+        f"k8s://{CLUSTER}/{ns}/Deployment/{name}",
+        f"Deployment: {ns}/{name}",
+        text,
+        {
+            "kind": "Deployment",
+            "cluster": CLUSTER,
+            "namespace": ns,
+            "name": name,
+            "replicas": replicas,
+            "ready": ready,
+            "component_category": "k8s",
+        },
+    )
 
 # --- Services (core/v1) ---
 svcs = _get("/api/v1/services").get("items", [])
@@ -85,10 +115,19 @@ for s in svcs:
         f"Type: {spec.get('type', 'ClusterIP')}. Ports: {ports or 'none'}. "
         f"ClusterIP: {spec.get('clusterIP', '?')}."
     )
-    add(f"k8s/service/{ns}/{name}", f"k8s://{CLUSTER}/{ns}/Service/{name}",
-        f"Service: {ns}/{name}", text,
-        {"kind": "Service", "cluster": CLUSTER, "namespace": ns, "name": name,
-         "component_category": "k8s"})
+    add(
+        f"k8s/service/{ns}/{name}",
+        f"k8s://{CLUSTER}/{ns}/Service/{name}",
+        f"Service: {ns}/{name}",
+        text,
+        {
+            "kind": "Service",
+            "cluster": CLUSTER,
+            "namespace": ns,
+            "name": name,
+            "component_category": "k8s",
+        },
+    )
 
 # --- Ingresses (networking.k8s.io/v1) ---
 try:
@@ -103,10 +142,19 @@ for i in ings:
         f"Kubernetes Ingress '{name}' in namespace {ns} on cluster {CLUSTER}. "
         f"Hosts: {hosts or 'none'}. IngressClass: {spec.get('ingressClassName', 'default')}."
     )
-    add(f"k8s/ingress/{ns}/{name}", f"k8s://{CLUSTER}/{ns}/Ingress/{name}",
-        f"Ingress: {ns}/{name}", text,
-        {"kind": "Ingress", "cluster": CLUSTER, "namespace": ns, "name": name,
-         "component_category": "k8s"})
+    add(
+        f"k8s/ingress/{ns}/{name}",
+        f"k8s://{CLUSTER}/{ns}/Ingress/{name}",
+        f"Ingress: {ns}/{name}",
+        text,
+        {
+            "kind": "Ingress",
+            "cluster": CLUSTER,
+            "namespace": ns,
+            "name": name,
+            "component_category": "k8s",
+        },
+    )
 
 json.dump(docs, open("/tmp/k8s_docs.json", "w"))
 by_kind: dict[str, int] = {}

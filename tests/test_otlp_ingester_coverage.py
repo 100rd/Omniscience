@@ -215,9 +215,7 @@ async def test_ingest_reuses_existing_source() -> None:
     await ingester.ingest(workspace_id=ws_id, parsed=_single_trace())
 
     # Source.add() must NOT have been called with a Source object
-    source_adds = [
-        c for c in session.add.call_args_list if isinstance(c.args[0], Source)
-    ]
+    source_adds = [c for c in session.add.call_args_list if isinstance(c.args[0], Source)]
     assert source_adds == []
 
 
@@ -428,9 +426,7 @@ async def test_ingest_entity_update_path_on_existing() -> None:
 
     # The existing trace entity was returned, so no new trace entity is added
     new_trace_entities = [
-        o
-        for o in added
-        if isinstance(o, Entity) and o.entity_type == OTEL_TRACE_ENTITY_TYPE
+        o for o in added if isinstance(o, Entity) and o.entity_type == OTEL_TRACE_ENTITY_TYPE
     ]
     assert len(new_trace_entities) == 0
     # metadata on existing entity was updated
