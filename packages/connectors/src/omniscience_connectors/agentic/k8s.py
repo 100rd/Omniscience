@@ -26,7 +26,10 @@ Config
     - ``api_server`` — Kubernetes API server URL (e.g. ``https://k8s.example.com``).
     - ``namespace`` — namespace to scope discovery; empty = all namespaces.
     - ``default_include_kinds`` — fallback list used when LLM fails (and the
-      sole source of kinds when ``use_llm_kind_selection=False``).
+      sole source of kinds when ``use_llm_kind_selection=False``).  A kind may
+      be expressed as a bare ``"Kind"`` (looked up in the built-in tables) or as
+      ``"group/Kind"`` (e.g. ``"argoproj.io/Application"``) which resolves to
+      ``/apis/<group>/<version>/<plural>``.
     - ``default_exclude_kinds`` — kinds always excluded regardless of LLM output.
     - ``verify_ssl`` — ``True`` (default) verifies with the system CA bundle;
       ``False`` disables verification (insecure escape hatch).  Ignored when a
@@ -37,8 +40,8 @@ Config
       same way as ``ca_cert_pem``.  ``ca_cert_pem`` takes precedence if both
       are provided.
     - ``use_llm_kind_selection`` — when ``False``, ``discover()`` skips the LLM
-      entirely and yields refs directly from ``default_include_kinds`` minus
-      ``default_exclude_kinds``.  Deterministic, no LLM dependency.
+      entirely and yields ONE ref PER RESOURCE INSTANCE (deterministic,
+      per-resource granularity, no LLM dependency).
 
 Secrets
 -------
@@ -57,9 +60,21 @@ When ``use_llm_kind_selection=True`` (default):
    parse failure.
 
 When ``use_llm_kind_selection=False``:
-1. Yield refs directly from ``default_include_kinds`` minus
-   ``default_exclude_kinds`` and ``_ALWAYS_EXCLUDE``.  No LLM call, no API
-   enumeration needed for kind selection (``/api`` / ``/apis`` are NOT called).
+1. For each kind in ``default_include_kinds`` minus ``default_exclude_kinds`` and
+   ``_ALWAYS_EXCLUDE``, list all instances via the Kubernetes API.
+2. Yield ONE ``DocumentRef`` per instance with metadata
+   ``{kind, cluster, namespace, name}``, a stable ``external_id``
+   ``k8s:{cluster}:{namespace}:{kind}:{name}``, and ``uri``
+   ``k8s://{cluster}/{namespace}/{kind}/{name}``.
+3. If the SA cannot list a kind (HTTP 403 / 404), log the error and skip that
+   kind — enumeration of the other kinds continues.
+
+``fetch()`` behaviour:
+- When the ref has a ``name`` key in metadata (per-resource ref from deterministic
+  discover), fetches that single resource and returns a concise human-readable
+  text body so embeddings are meaningful.
+- When the ref has no ``name`` key (LLM-path / legacy kind-level ref), falls
+  back to the previous list-all behaviour (returns raw JSON of the collection).
 
 Note: ``fetch()`` retrieves the resource as JSON and stores it as
 ``application/json`` bytes.  The downstream pipeline is responsible for further
@@ -158,6 +173,8 @@ _DEFAULT_INCLUDE_KINDS: list[str] = [
     "RoleBinding",
     "ClusterRole",
     "ClusterRoleBinding",
+    # ArgoCD CRD — expressed as "group/Kind" so the path resolver handles it.
+    "argoproj.io/Application",
 ]
 
 _DEFAULT_EXCLUDE_KINDS: list[str] = [
@@ -241,6 +258,15 @@ _KIND_AUTOSCALING: dict[str, str] = {
     "HorizontalPodAutoscaler": "horizontalpodautoscalers",
 }
 
+# CRD kinds expressed as "group/Kind" → (group, version, plural).
+# The resolver tries this table first before falling back to heuristics.
+_KIND_CRD: dict[str, tuple[str, str, str]] = {
+    "argoproj.io/Application": ("argoproj.io", "v1alpha1", "applications"),
+    "argoproj.io/AppProject": ("argoproj.io", "v1alpha1", "appprojects"),
+    "argoproj.io/ApplicationSet": ("argoproj.io", "v1alpha1", "applicationsets"),
+    "argoproj.io/Rollout": ("argoproj.io", "v1alpha1", "rollouts"),
+}
+
 # Core kinds that are cluster-scoped (no namespace segment in path).
 _CORE_CLUSTER_SCOPED: frozenset[str] = frozenset({"Namespace", "Node", "PersistentVolume"})
 
@@ -270,7 +296,9 @@ class K8sAgenticConfig(BaseModel):
         default_factory=lambda: list(_DEFAULT_INCLUDE_KINDS),
         description=(
             "Fallback list of resource kinds used when the LLM fails, "
-            "or the complete kind list when use_llm_kind_selection=False."
+            "or the complete kind list when use_llm_kind_selection=False. "
+            "A kind may be a bare name (e.g. 'Deployment') or a 'group/Kind' "
+            "qualified name (e.g. 'argoproj.io/Application')."
         ),
     )
 
@@ -308,9 +336,9 @@ class K8sAgenticConfig(BaseModel):
         default=True,
         description=(
             "When True (default), the LLM selects which resource kinds to index. "
-            "When False, discover() skips the LLM entirely and uses "
-            "default_include_kinds minus default_exclude_kinds directly "
-            "(deterministic, no LLM dependency)."
+            "When False, discover() skips the LLM entirely and enumerates "
+            "individual resource instances from default_include_kinds minus "
+            "default_exclude_kinds (deterministic, per-resource granularity)."
         ),
     )
 
@@ -390,7 +418,8 @@ class K8sAgenticConnector(AgenticConnector):
     ``config.default_exclude_kinds`` minus ``_ALWAYS_EXCLUDE``.
 
     When ``config.use_llm_kind_selection=False``, the LLM is never called;
-    ``default_include_kinds`` is used directly (deterministic mode).
+    ``default_include_kinds`` is used to enumerate individual resource instances
+    directly (deterministic per-resource mode).
     """
 
     connector_type: ClassVar[str] = "k8s-agentic"
@@ -524,7 +553,11 @@ class K8sAgenticConnector(AgenticConnector):
         config: BaseModel,
         secrets: dict[str, str],
     ) -> AsyncIterator[DocumentRef]:
-        """Yield refs for the configured default include kinds."""
+        """Yield refs for the configured default include kinds.
+
+        Used as the LLM fallback path (kind-level refs, not per-instance).
+        The deterministic discover path calls ``_list_kind_instances`` instead.
+        """
         cfg: K8sAgenticConfig = config  # type: ignore[assignment]
         effective_exclude = _ALWAYS_EXCLUDE | set(cfg.default_exclude_kinds)
         for kind in sorted(k for k in cfg.default_include_kinds if k not in effective_exclude):
@@ -548,11 +581,12 @@ class K8sAgenticConnector(AgenticConnector):
         config: BaseModel,
         secrets: dict[str, str],
     ) -> AsyncIterator[DocumentRef]:
-        """Enumerate available API resource kinds, then run the LLM loop.
+        """Enumerate resource instances (deterministic) or run the LLM loop.
 
         When ``config.use_llm_kind_selection`` is ``False``, the LLM is never
-        called; refs are yielded directly from ``default_include_kinds`` minus
-        ``default_exclude_kinds``.
+        called; for each kind in ``default_include_kinds`` minus exclusions, all
+        instances are listed and one ``DocumentRef`` is yielded per instance.
+        A kind that the SA cannot access (403/404) is skipped with a warning.
 
         Otherwise, overrides ``AgenticConnector.discover`` to first query the
         Kubernetes API for available resource kinds and inject them into the LLM
@@ -561,12 +595,17 @@ class K8sAgenticConnector(AgenticConnector):
         cfg: K8sAgenticConfig = config  # type: ignore[assignment]
 
         # ------------------------------------------------------------------
-        # Fast path: deterministic mode — no LLM, no API enumeration
+        # Fast path: deterministic mode — per-resource enumeration, no LLM
         # ------------------------------------------------------------------
         if not cfg.use_llm_kind_selection:
             logger.info("k8s_agentic.discover.deterministic_mode")
-            async for ref in self._default_document_refs(config, secrets):
-                yield ref
+            effective_exclude = _ALWAYS_EXCLUDE | set(cfg.default_exclude_kinds)
+            active_kinds = sorted(
+                k for k in cfg.default_include_kinds if k not in effective_exclude
+            )
+            for kind in active_kinds:
+                async for ref in self._list_kind_instances(cfg, secrets, kind):
+                    yield ref
             return
 
         # ------------------------------------------------------------------
@@ -624,7 +663,16 @@ class K8sAgenticConnector(AgenticConnector):
         secrets: dict[str, str],
         ref: DocumentRef,
     ) -> FetchedDocument:
-        """Fetch all instances of the resource kind as a JSON document."""
+        """Fetch a single resource (per-instance ref) or a kind collection.
+
+        When ``ref.metadata`` contains a ``"name"`` key (set by the deterministic
+        discover path), fetches that individual resource and returns a concise
+        human-readable text body suitable for embedding.
+
+        When ``ref.metadata`` has no ``"name"`` key (LLM-path / legacy kind-level
+        ref), falls back to the previous behaviour of listing all instances and
+        returning the raw JSON collection.
+        """
         cfg: K8sAgenticConfig = config  # type: ignore[assignment]
         kind = ref.metadata.get("kind", "")
         token = secrets.get("token") or secrets.get("kubeconfig", "")
@@ -634,7 +682,14 @@ class K8sAgenticConnector(AgenticConnector):
         if token:
             headers["Authorization"] = f"Bearer {token}"
 
-        path = _kind_to_api_path(kind, cfg.namespace)
+        name = ref.metadata.get("name", "")
+        namespace = ref.metadata.get("namespace", cfg.namespace)
+
+        if name:
+            path = _kind_to_resource_path(kind, namespace, name)
+        else:
+            path = _kind_to_api_path(kind, cfg.namespace)
+
         url = f"{cfg.api_server}{path}"
 
         try:
@@ -652,6 +707,15 @@ class K8sAgenticConnector(AgenticConnector):
             ) from exc
         except httpx.RequestError as exc:
             raise RuntimeError(f"K8s fetch request failed for {url}: {exc}") from exc
+
+        if name:
+            resource = resp.json()
+            text = _resource_to_text(resource, kind)
+            return FetchedDocument(
+                ref=ref,
+                content_bytes=text.encode("utf-8"),
+                content_type="text/plain",
+            )
 
         return FetchedDocument(
             ref=ref,
@@ -723,20 +787,121 @@ class K8sAgenticConnector(AgenticConnector):
 
         return sorted(kinds)
 
+    async def _list_kind_instances(
+        self,
+        cfg: K8sAgenticConfig,
+        secrets: dict[str, str],
+        kind: str,
+    ) -> AsyncIterator[DocumentRef]:
+        """List all instances of ``kind`` and yield one ``DocumentRef`` per item.
+
+        Gracefully skips the kind and logs a warning on HTTP 403/404 so
+        enumeration of the remaining kinds continues uninterrupted.
+
+        Args:
+            cfg: Validated connector config.
+            secrets: Runtime secrets.
+            kind: Kind name — may be bare (``"Deployment"``) or qualified
+                (``"argoproj.io/Application"``).
+
+        Yields:
+            One :class:`DocumentRef` per resource instance.
+        """
+        token = secrets.get("token") or secrets.get("kubeconfig", "")
+        verify = build_ssl_verify(cfg, secrets)
+        headers: dict[str, str] = {"Accept": "application/json"}
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+
+        list_path = _kind_to_api_path(kind, cfg.namespace)
+        url = f"{cfg.api_server}{list_path}"
+
+        try:
+            async with httpx.AsyncClient(
+                verify=verify,
+                headers=headers,
+                timeout=30.0,
+            ) as client:
+                resp = await client.get(url)
+        except httpx.RequestError as exc:
+            logger.warning(
+                "k8s_agentic.list_instances.request_error",
+                extra={"kind": kind, "url": url, "error": str(exc)},
+            )
+            return
+
+        if resp.status_code in (403, 404):
+            logger.warning(
+                "k8s_agentic.list_instances.skipped",
+                extra={"kind": kind, "status": resp.status_code},
+            )
+            return
+
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "k8s_agentic.list_instances.http_error",
+                extra={"kind": kind, "status": exc.response.status_code},
+            )
+            return
+
+        try:
+            data = resp.json()
+            items: list[dict[str, Any]] = data.get("items", [])
+        except Exception as exc:
+            logger.warning(
+                "k8s_agentic.list_instances.parse_error",
+                extra={"kind": kind, "error": str(exc)},
+            )
+            return
+
+        # Extract bare kind name for metadata (strip group prefix if qualified)
+        bare_kind = kind.split("/", 1)[1] if "/" in kind else kind
+
+        for item in items:
+            meta: dict[str, Any] = item.get("metadata", {})
+            name: str = meta.get("name", "")
+            namespace: str = meta.get("namespace", "")
+            if not name:
+                continue
+
+            external_id = f"k8s:{cfg.cluster_name}:{namespace}:{bare_kind}:{name}"
+            uri = f"k8s://{cfg.cluster_name}/{namespace}/{bare_kind}/{name}"
+            yield DocumentRef(
+                external_id=external_id,
+                uri=uri,
+                metadata={
+                    "kind": bare_kind,
+                    "cluster": cfg.cluster_name,
+                    "namespace": namespace,
+                    "name": name,
+                    "source": "deterministic",
+                },
+            )
+
 
 def _kind_to_api_path(kind: str, namespace: str) -> str:
     """Convert a Kubernetes resource kind to a REST API list path.
 
-    This is a best-effort mapping for well-known kinds.  Unknown kinds fall
-    back to the lowercase-plural convention under ``/apis/``.
+    Supports bare kind names (e.g. ``"Deployment"``) and qualified
+    ``"group/Kind"`` CRD names (e.g. ``"argoproj.io/Application"``).
+
+    For CRD kinds not in the built-in ``_KIND_CRD`` table, falls back to a
+    heuristic: ``/apis/<group>/<version>/<plural>`` where version defaults to
+    ``v1`` and plural is the lowercased kind with an ``s`` suffix.
 
     Args:
-        kind: Kubernetes resource kind (e.g. ``"Deployment"``).
+        kind: Kubernetes resource kind.  May be ``"Kind"`` or ``"group/Kind"``.
         namespace: Namespace filter; empty = all namespaces.
 
     Returns:
         API server path string (without base URL).
     """
+    # Handle qualified CRD kinds first ("group/Kind")
+    if "/" in kind:
+        return _crd_kind_to_api_path(kind, namespace)
+
     ns_segment = f"namespaces/{namespace}/" if namespace else ""
 
     if kind in _KIND_CORE:
@@ -767,6 +932,104 @@ def _kind_to_api_path(kind: str, namespace: str) -> str:
         plural = _KIND_AUTOSCALING[kind]
         return f"/apis/autoscaling/v2/{ns_segment}{plural}"
 
-    # Unknown kind — best-effort: lowercase plural under /apis/
+    # Unknown bare kind — best-effort: lowercase plural under /apis/
     plural_fallback = kind.lower() + "s"
     return f"/apis/{ns_segment}{plural_fallback}"
+
+
+def _crd_kind_to_api_path(qualified_kind: str, namespace: str) -> str:
+    """Resolve a ``"group/Kind"`` CRD spec to its REST list path.
+
+    Checks the built-in ``_KIND_CRD`` table first.  Falls back to a heuristic
+    for unknown CRDs: ``/apis/<group>/v1/<plural>`` where plural is the
+    lowercase kind name with an ``s`` suffix.
+
+    Args:
+        qualified_kind: CRD kind string in ``"group/Kind"`` format.
+        namespace: Namespace filter; empty = all namespaces (cluster-scoped CRDs
+            also receive ``""`` here and produce a path without a namespace
+            segment).
+
+    Returns:
+        API server list path (without base URL).
+    """
+    ns_segment = f"namespaces/{namespace}/" if namespace else ""
+
+    if qualified_kind in _KIND_CRD:
+        group, version, plural = _KIND_CRD[qualified_kind]
+        return f"/apis/{group}/{version}/{ns_segment}{plural}"
+
+    # Heuristic for unknown CRD groups
+    group, raw_kind = qualified_kind.split("/", 1)
+    plural = raw_kind.lower() + "s"
+    return f"/apis/{group}/v1/{ns_segment}{plural}"
+
+
+def _kind_to_resource_path(kind: str, namespace: str, name: str) -> str:
+    """Build the path for fetching a single named resource.
+
+    This is the single-resource equivalent of ``_kind_to_api_path``:
+    appends ``/<name>`` to the namespaced or cluster-scoped collection path.
+
+    Args:
+        kind: Resource kind (bare or qualified).
+        namespace: Namespace the resource lives in (may be empty for
+            cluster-scoped resources).
+        name: Resource name.
+
+    Returns:
+        API server path string for the individual resource (without base URL).
+    """
+    collection_path = _kind_to_api_path(kind, namespace)
+    return f"{collection_path}/{name}"
+
+
+def _resource_to_text(resource: dict[str, Any], kind: str) -> str:
+    """Produce a concise human-readable summary of a Kubernetes resource.
+
+    The text is intentionally terse — just enough signal for embeddings to be
+    meaningful without carrying the full YAML verbatim (which bloats vectors).
+
+    Args:
+        resource: Parsed JSON of a single Kubernetes resource.
+        kind: Resource kind (used as a label in the output).
+
+    Returns:
+        Plain-text summary string.
+    """
+    meta: dict[str, Any] = resource.get("metadata", {})
+    name: str = meta.get("name", "<unknown>")
+    namespace: str = meta.get("namespace", "")
+    labels: dict[str, str] = meta.get("labels", {})
+    annotations: dict[str, str] = meta.get("annotations", {})
+
+    lines: list[str] = [
+        f"Kind: {kind}",
+        f"Name: {name}",
+    ]
+    if namespace:
+        lines.append(f"Namespace: {namespace}")
+    if labels:
+        label_str = ", ".join(f"{k}={v}" for k, v in sorted(labels.items()))
+        lines.append(f"Labels: {label_str}")
+    if annotations:
+        # Include only non-system annotations (skip kubectl.kubernetes.io/* noise)
+        user_annotations = {
+            k: v for k, v in annotations.items() if not k.startswith("kubectl.kubernetes.io/")
+        }
+        if user_annotations:
+            ann_str = ", ".join(f"{k}={v}" for k, v in sorted(user_annotations.items()))
+            lines.append(f"Annotations: {ann_str}")
+
+    spec: dict[str, Any] = resource.get("spec", {})
+    if spec:
+        # Include a JSON snippet of spec capped at 500 chars to stay concise
+        spec_snippet = json.dumps(spec, separators=(",", ":"))[:500]
+        lines.append(f"Spec: {spec_snippet}")
+
+    status: dict[str, Any] = resource.get("status", {})
+    if status:
+        status_snippet = json.dumps(status, separators=(",", ":"))[:200]
+        lines.append(f"Status: {status_snippet}")
+
+    return "\n".join(lines)

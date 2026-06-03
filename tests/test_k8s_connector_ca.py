@@ -14,11 +14,11 @@ Coverage
     - invalid base64 in secrets → ValueError
 
 - use_llm_kind_selection=False (deterministic mode):
-    - discover() yields refs from default_include_kinds
+    - discover() yields per-instance refs (one per item returned by list calls)
     - LLM provider is NEVER instantiated / called
     - _enumerate_kinds is NEVER called
     - excluded kinds (default_exclude_kinds + _ALWAYS_EXCLUDE) are absent
-    - metadata source == "default-fallback"
+    - metadata source == "deterministic"
 
 - use_llm_kind_selection=True (existing LLM path, regression guards):
     - LLM is invoked as before
@@ -40,6 +40,7 @@ import json
 import ssl
 import subprocess
 import warnings
+from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -127,6 +128,43 @@ def _make_httpx_mock(response_data: Any = None, status: int = 200) -> tuple[Magi
     return mock_client_cls, mock_client
 
 
+def _stub_list_instances(
+    kinds_to_refs: dict[str, list[DocumentRef]],
+) -> Any:
+    """Build a patch-able _list_kind_instances that returns fixed refs per kind."""
+
+    async def _mock(
+        self: Any,
+        cfg: K8sAgenticConfig,
+        secrets: dict[str, str],
+        kind: str,
+    ) -> AsyncIterator[DocumentRef]:
+        for ref in kinds_to_refs.get(kind, []):
+            yield ref
+
+    return _mock
+
+
+def _make_per_instance_ref(
+    kind: str,
+    name: str,
+    namespace: str = "default",
+    cluster: str = "test-cluster",
+) -> DocumentRef:
+    bare_kind = kind.split("/", 1)[1] if "/" in kind else kind
+    return DocumentRef(
+        external_id=f"k8s:{cluster}:{namespace}:{bare_kind}:{name}",
+        uri=f"k8s://{cluster}/{namespace}/{bare_kind}/{name}",
+        metadata={
+            "kind": bare_kind,
+            "cluster": cluster,
+            "namespace": namespace,
+            "name": name,
+            "source": "deterministic",
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # 1. build_ssl_verify helper
 # ---------------------------------------------------------------------------
@@ -192,100 +230,160 @@ class TestBuildSslVerify:
 
 
 class TestDeterministicMode:
-    async def test_discover_yields_refs_from_default_include_kinds(self) -> None:
+    """Deterministic mode now enumerates instances via _list_kind_instances.
+
+    Tests use a stub for _list_kind_instances so no real HTTP calls are needed.
+    The important invariants are:
+    - LLM is never called
+    - _enumerate_kinds is never called
+    - Excluded kinds (default_exclude_kinds + _ALWAYS_EXCLUDE) are never listed
+    - Per-instance refs carry expected metadata
+    """
+
+    async def test_discover_yields_per_instance_refs(self) -> None:
         connector = K8sAgenticConnector()
         cfg = K8sAgenticConfig(
             cluster_name="eks-prod",
             use_llm_kind_selection=False,
+            default_include_kinds=["Deployment", "Service"],
+            default_exclude_kinds=[],
         )
-        # No LLM mock needed — we assert it is NEVER called
-        with patch("omniscience_connectors.agentic.llm.build_provider") as mock_build_provider:
+        dep_refs = [
+            _make_per_instance_ref("Deployment", "api", cluster="eks-prod"),
+            _make_per_instance_ref("Deployment", "worker", cluster="eks-prod"),
+        ]
+        svc_refs = [_make_per_instance_ref("Service", "api-svc", cluster="eks-prod")]
+        stub = _stub_list_instances({"Deployment": dep_refs, "Service": svc_refs})
+
+        with (
+            patch("omniscience_connectors.agentic.llm.build_provider") as mock_build_provider,
+            patch.object(K8sAgenticConnector, "_list_kind_instances", stub),
+        ):
             refs = await _collect_discover(connector, cfg)
             mock_build_provider.assert_not_called()
 
-        kinds = {r.metadata["kind"] for r in refs}
-        # All default_include_kinds (minus excluded) should be present
-        for kind in cfg.default_include_kinds:
-            if kind not in cfg.default_exclude_kinds and kind not in {
-                "Secret",
-                "Event",
-                "TokenReview",
-                "SubjectAccessReview",
-                "SelfSubjectAccessReview",
-                "SelfSubjectRulesReview",
-                "LocalSubjectAccessReview",
-            }:
-                assert kind in kinds, f"Expected {kind!r} in deterministic refs"
+        assert len(refs) == 3
+        names = {r.metadata["name"] for r in refs}
+        assert names == {"api", "worker", "api-svc"}
 
     async def test_llm_provider_never_invoked_in_deterministic_mode(self) -> None:
         connector = K8sAgenticConnector()
-        cfg = K8sAgenticConfig(use_llm_kind_selection=False)
+        cfg = K8sAgenticConfig(
+            use_llm_kind_selection=False,
+            default_include_kinds=["Service"],
+            default_exclude_kinds=[],
+        )
+        svc_refs = [_make_per_instance_ref("Service", "svc1")]
+        stub = _stub_list_instances({"Service": svc_refs})
 
         mock_provider = AsyncMock()
         mock_provider.complete = AsyncMock(side_effect=AssertionError("LLM must not be called"))
 
-        with patch(
-            "omniscience_connectors.agentic.llm.build_provider",
-            return_value=mock_provider,
-        ) as mock_build:
+        with (
+            patch(
+                "omniscience_connectors.agentic.llm.build_provider",
+                return_value=mock_provider,
+            ) as mock_build,
+            patch.object(K8sAgenticConnector, "_list_kind_instances", stub),
+        ):
             refs = await _collect_discover(connector, cfg)
             mock_build.assert_not_called()
             mock_provider.complete.assert_not_called()
 
-        assert len(refs) > 0
+        assert len(refs) == 1
 
     async def test_enumerate_kinds_never_called_in_deterministic_mode(self) -> None:
         connector = K8sAgenticConnector()
-        cfg = K8sAgenticConfig(use_llm_kind_selection=False)
+        cfg = K8sAgenticConfig(
+            use_llm_kind_selection=False,
+            default_include_kinds=["ConfigMap"],
+            default_exclude_kinds=[],
+        )
+        cm_refs = [_make_per_instance_ref("ConfigMap", "app-cfg")]
+        stub = _stub_list_instances({"ConfigMap": cm_refs})
 
-        with patch.object(
-            connector,
-            "_enumerate_kinds",
-            new=AsyncMock(side_effect=AssertionError("_enumerate_kinds must not be called")),
+        with (
+            patch.object(
+                connector,
+                "_enumerate_kinds",
+                new=AsyncMock(side_effect=AssertionError("_enumerate_kinds must not be called")),
+            ),
+            patch.object(K8sAgenticConnector, "_list_kind_instances", stub),
         ):
             refs = await _collect_discover(connector, cfg)
 
-        assert len(refs) > 0
+        assert len(refs) == 1
 
     async def test_deterministic_mode_excludes_default_exclude_kinds(self) -> None:
+        """Kinds in default_exclude_kinds are never passed to _list_kind_instances."""
+        listed_kinds: list[str] = []
+
+        async def _tracking_list(
+            self: Any,
+            cfg: K8sAgenticConfig,
+            secrets: dict[str, str],
+            kind: str,
+        ) -> AsyncIterator[DocumentRef]:
+            listed_kinds.append(kind)
+            yield _make_per_instance_ref(kind, "x")
+
         connector = K8sAgenticConnector()
         cfg = K8sAgenticConfig(
             use_llm_kind_selection=False,
+            default_include_kinds=["Deployment", "Pod", "ReplicaSet"],
             default_exclude_kinds=["Pod", "ReplicaSet"],
         )
-        with patch("omniscience_connectors.agentic.llm.build_provider"):
-            refs = await _collect_discover(connector, cfg)
+        with patch.object(K8sAgenticConnector, "_list_kind_instances", _tracking_list):
+            await _collect_discover(connector, cfg)
 
-        kinds = {r.metadata["kind"] for r in refs}
-        assert "Pod" not in kinds
-        assert "ReplicaSet" not in kinds
+        assert "Pod" not in listed_kinds
+        assert "ReplicaSet" not in listed_kinds
+        assert "Deployment" in listed_kinds
 
     async def test_deterministic_mode_excludes_always_exclude_kinds(self) -> None:
+        """_ALWAYS_EXCLUDE kinds (Secret, Event, …) are never listed."""
+        listed_kinds: list[str] = []
+
+        async def _tracking_list(
+            self: Any,
+            cfg: K8sAgenticConfig,
+            secrets: dict[str, str],
+            kind: str,
+        ) -> AsyncIterator[DocumentRef]:
+            listed_kinds.append(kind)
+            yield _make_per_instance_ref(kind, "x")
+
         connector = K8sAgenticConnector()
         cfg = K8sAgenticConfig(
             use_llm_kind_selection=False,
-            # Explicitly add Secret/Event to include list to verify they are still
-            # filtered by _ALWAYS_EXCLUDE inside _default_document_refs
             default_include_kinds=["Deployment", "Secret", "Event", "ConfigMap"],
             default_exclude_kinds=[],
         )
-        with patch("omniscience_connectors.agentic.llm.build_provider"):
-            refs = await _collect_discover(connector, cfg)
+        with patch.object(K8sAgenticConnector, "_list_kind_instances", _tracking_list):
+            await _collect_discover(connector, cfg)
 
-        kinds = {r.metadata["kind"] for r in refs}
-        assert "Secret" not in kinds
-        assert "Event" not in kinds
-        assert "Deployment" in kinds
-        assert "ConfigMap" in kinds
+        assert "Secret" not in listed_kinds
+        assert "Event" not in listed_kinds
+        assert "Deployment" in listed_kinds
+        assert "ConfigMap" in listed_kinds
 
-    async def test_deterministic_mode_metadata_source_is_default_fallback(self) -> None:
+    async def test_deterministic_mode_metadata_source_is_deterministic(self) -> None:
+        """Per-instance refs carry source='deterministic' (not 'default-fallback')."""
         connector = K8sAgenticConnector()
-        cfg = K8sAgenticConfig(use_llm_kind_selection=False, cluster_name="my-cluster")
-        with patch("omniscience_connectors.agentic.llm.build_provider"):
+        cfg = K8sAgenticConfig(
+            use_llm_kind_selection=False,
+            cluster_name="my-cluster",
+            default_include_kinds=["Service"],
+            default_exclude_kinds=[],
+        )
+        svc_refs = [_make_per_instance_ref("Service", "svc1", cluster="my-cluster")]
+        stub = _stub_list_instances({"Service": svc_refs})
+
+        with patch.object(K8sAgenticConnector, "_list_kind_instances", stub):
             refs = await _collect_discover(connector, cfg)
 
-        assert len(refs) > 0
-        assert all(r.metadata["source"] == "default-fallback" for r in refs)
+        assert len(refs) == 1
+        assert all(r.metadata["source"] == "deterministic" for r in refs)
         assert all(r.metadata["cluster"] == "my-cluster" for r in refs)
 
     async def test_llm_mode_still_invokes_llm_when_enabled(self) -> None:
