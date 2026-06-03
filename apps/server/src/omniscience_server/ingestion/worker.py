@@ -20,6 +20,20 @@ carry.  Doing this BEFORE the pipeline runs means:
    pipeline errors and are treated identically to other adapter
    failures — never swallowed.
 
+Discovery fan-out (spec: discovery-sync-worker.md)
+--------------------------------------------------
+
+A sync marker event (``external_id == "*"`` / ``uri.startswith("sync://")``)
+signals a full re-sync of the source.  For connectors that implement
+``discover()``, the worker calls it to obtain a stream of
+:class:`~omniscience_connectors.base.DocumentRef` objects, then runs the
+pipeline on each ref concurrently (bounded by :data:`_DISCOVERY_CONCURRENCY`).
+
+Config validation is **fail-closed**: invalid ``Source.config`` →
+``action="error"``, structured log, NAK — never silently falls back to
+``config=None``.  Secrets are resolved from ``source.secrets_ref`` (server-
+side), never from the event payload.
+
 Design decisions:
 - A ``nak()`` is issued on pipeline errors so the broker can redeliver
   up to ``max_deliver`` times.  After ``max_deliver`` the queue
@@ -36,16 +50,20 @@ Design decisions:
 
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
+from typing import Any
 
 import structlog
+from omniscience_connectors.base import Connector, DocumentRef
 from omniscience_connectors.registry import ConnectorRegistry
 from omniscience_core.db.models import Source
 from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.secrets import SecretsResolver
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_index.workspace import MissingWorkspaceError, resolve_source_workspace
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -76,6 +94,10 @@ _AGENTIC_ALLOWED_ENV: str = "OMNISCIENCE_K8S_AGENTIC_ALLOWED"
 # "no content change".
 _DEDUP_DROP_ACTION: str = "dedup_dropped"
 
+# Maximum number of discovered refs processed concurrently per sync event.
+# Limits simultaneous cluster-API / embedder pressure during discovery fan-out.
+_DISCOVERY_CONCURRENCY: int = 10
+
 log = structlog.get_logger(__name__)
 
 
@@ -87,8 +109,6 @@ class IngestionWorker:
         connector_registry: Registry used to look up connectors by source type.
         embedding_provider: Backend used to generate embedding vectors.
         index_writer: Writer for the Postgres operational metadata.
-        graph_store: Neo4j adapter used by the pipeline's graph stage.
-        vector_store: Qdrant adapter used by the pipeline's vector stage.
         session_factory: SQLAlchemy async session factory for run tracking
             and workspace resolution.
         secrets_resolver: Resolver for ``secrets_ref`` strings.  When ``None``
@@ -178,32 +198,26 @@ class IngestionWorker:
 
         Workflow per document:
 
-        1. Resolve ``workspace_id`` from the source row's ``tenant_id``.
-           A null tenant produces an error result (structured log
-           ``workspace_resolution_failed``) and the broker NAKs.
-        2. Resolve secrets from the event's ``secrets_ref`` (when set).
-        3. Run the per-document :class:`IngestionPipeline` with the
-           resolved workspace.
+        1. Load ``Source`` row and resolve ``workspace_id`` in one DB round-trip.
+        2. Validate ``Source.config`` via ``connector.config_schema``.
+           Invalid config → ``action="error"`` (fail-closed; never ``config=None``).
+        3. Resolve secrets from ``source.secrets_ref`` (server-side only).
+        4a. Sync marker (``external_id == "*"``): call ``connector.discover()``
+            and fan out per-ref with bounded concurrency.
+        4b. Single-doc event: run ``pipeline.run_ref`` with the validated config.
 
-        Resolution failures and adapter ``MissingWorkspaceError`` raises
-        surface as ``action="error"`` so the broker redelivers /
-        routes to the DLQ.
+        ACL invariant: ``workspace_id`` always from ``Source.tenant_id``, never
+        from event payload.
         """
-        try:
-            workspace_id = await self._resolve_workspace(event.source_id)
-        except MissingWorkspaceError as exc:
-            log.error(
-                "workspace_resolution_failed",
-                source_id=str(event.source_id),
-                source_name=exc.source_name,
-                external_id=event.external_id,
-            )
+        source, workspace_id = await self._load_source_and_workspace(event)
+        if source is None or workspace_id is None:
+            # Error already logged inside _load_source_and_workspace.
             return ProcessResult(
                 source_id=event.source_id,
                 external_id=event.external_id,
                 action="error",
                 duration_ms=0.0,
-                error=str(exc),
+                error="workspace_resolution_failed: tenant_id is null or source not found",
             )
 
         # Dedup gate (issue #164) — runs BEFORE the per-document pipeline so
@@ -214,7 +228,12 @@ class IngestionWorker:
         # adapter side and does not write new content into the graph;
         # blocking deletes by emitter would otherwise leave orphaned
         # rows when the operator's coverage shrinks.
-        if event.action != "deleted":
+        #
+        # Sync marker events (external_id=="*") are also exempt from the
+        # dedup gate — they are control messages, not documents.  The
+        # per-ref pipeline.run_ref calls that result from the fan-out each
+        # hit the dedup gate individually.
+        if event.action != "deleted" and not _is_sync_marker(event):
             decision = await self._dedup_gate.evaluate(
                 workspace_id=workspace_id,
                 event=event,
@@ -241,20 +260,35 @@ class IngestionWorker:
 
         connector = self._connector_registry.get(event.source_type)
 
-        # Resolve secrets for this source. The secrets_ref attribute may be
-        # added to DocumentChangeEvent in a future extension; for now we
-        # gracefully fall back to None (empty secrets) if not present.
-        secrets_ref: str | None = getattr(event, "secrets_ref", None)
-        secrets = self._secrets_resolver.resolve(secrets_ref)
+        # Validate config fail-closed: never fall back to config=None.
+        validated_config = self._validate_config(connector, source, event)
+        if validated_config is None:
+            return ProcessResult(
+                source_id=event.source_id,
+                external_id=event.external_id,
+                action="error",
+                duration_ms=0.0,
+                error="source_config_invalid",
+            )
+
+        secrets = self._secrets_resolver.resolve(source.secrets_ref)
 
         pipeline = IngestionPipeline(
             connector=connector,
             embedding_provider=self._embedding_provider,
             index_writer=self._index_writer,
         )
-        result = await pipeline.run(
+
+        if _is_sync_marker(event):
+            return await self._process_sync_event(
+                event, connector, validated_config, secrets, workspace_id, pipeline
+            )
+
+        ref = DocumentRef(external_id=event.external_id, uri=event.uri)
+        result = await pipeline.run_ref(
             event=event,
-            config=None,
+            ref=ref,
+            config=validated_config,
             secrets=secrets,
             workspace_id=workspace_id,
             ingestion_run_id=self._run_id,
@@ -266,36 +300,158 @@ class IngestionWorker:
         return result
 
     # ------------------------------------------------------------------
-    # Workspace resolution
+    # Discovery fan-out
     # ------------------------------------------------------------------
 
-    async def _resolve_workspace(self, source_id: uuid.UUID) -> uuid.UUID:
-        """Look up the ``Source`` and resolve its ``workspace_id``.
+    async def _process_sync_event(
+        self,
+        event: DocumentChangeEvent,
+        connector: Connector,
+        config: Any,
+        secrets: dict[str, str],
+        workspace_id: uuid.UUID,
+        pipeline: IngestionPipeline,
+    ) -> ProcessResult:
+        """Fan out pipeline.run_ref over every ref yielded by connector.discover().
+
+        Falls back to single-doc behaviour when ``connector.discover`` raises
+        :class:`NotImplementedError` (single-doc connectors without discovery).
+
+        Concurrency is bounded by :data:`_DISCOVERY_CONCURRENCY`.
+        """
+        log.info(
+            "discovery_sync_starting",
+            source_id=str(event.source_id),
+            source_type=event.source_type,
+        )
+
+        try:
+            refs = await _collect_refs(connector, config, secrets)
+        except NotImplementedError:
+            log.info(
+                "discovery_not_implemented_fallback",
+                source_id=str(event.source_id),
+                source_type=event.source_type,
+            )
+            ref = DocumentRef(
+                external_id=event.external_id,
+                uri=event.uri,
+            )
+            result = await pipeline.run_ref(
+                event=event,
+                ref=ref,
+                config=config,
+                secrets=secrets,
+                workspace_id=workspace_id,
+                ingestion_run_id=self._run_id,
+            )
+            INGESTION_DOCUMENTS_PROCESSED_TOTAL.labels(
+                source_type=event.source_type,
+                action=result.action,
+            ).inc()
+            return result
+
+        results = await _fan_out_refs(
+            refs=refs,
+            event=event,
+            pipeline=pipeline,
+            config=config,
+            secrets=secrets,
+            workspace_id=workspace_id,
+            run_id=self._run_id,
+            concurrency=_DISCOVERY_CONCURRENCY,
+        )
+
+        for r in results:
+            INGESTION_DOCUMENTS_PROCESSED_TOTAL.labels(
+                source_type=event.source_type,
+                action=r.action,
+            ).inc()
+
+        error_count = sum(1 for r in results if r.action == "error")
+        action = "error" if error_count == len(results) and results else "updated"
+        log.info(
+            "discovery_sync_complete",
+            source_id=str(event.source_id),
+            total=len(results),
+            errors=error_count,
+        )
+        return ProcessResult(
+            source_id=event.source_id,
+            external_id=event.external_id,
+            action=action,
+            duration_ms=0.0,
+        )
+
+    # ------------------------------------------------------------------
+    # Config validation
+    # ------------------------------------------------------------------
+
+    def _validate_config(
+        self,
+        connector: Connector,
+        source: Source,
+        event: DocumentChangeEvent,
+    ) -> Any:
+        """Validate ``source.config`` against ``connector.config_schema``.
+
+        Returns the validated config model on success, or ``None`` on failure.
+        Logs ``source_config_invalid`` without including the raw config values
+        (which may contain sensitive fields) in the log.
+        """
+        try:
+            return connector.config_schema.model_validate(source.config or {})
+        except ValidationError as exc:
+            log.error(
+                "source_config_invalid",
+                source_id=str(event.source_id),
+                source_type=event.source_type,
+                error_count=exc.error_count(),
+            )
+            return None
+
+    # ------------------------------------------------------------------
+    # Source / workspace loading (single DB round-trip)
+    # ------------------------------------------------------------------
+
+    async def _load_source_and_workspace(
+        self,
+        event: DocumentChangeEvent,
+    ) -> tuple[Source, uuid.UUID] | tuple[None, None]:
+        """Fetch the ``Source`` row and derive ``workspace_id`` in one query.
+
+        Returns ``(source, workspace_id)`` on success, or ``(None, None)``
+        on failure (missing row or null ``tenant_id``).  Error is logged
+        before returning ``(None, None)``.
 
         Reuses :func:`omniscience_index.workspace.resolve_source_workspace`
-        — the same helper the migration runner uses — so live ingestion
-        and the legacy backfill follow identical ACL rules.
-
-        Raises
-        ------
-        MissingWorkspaceError
-            When the source row is missing OR its ``tenant_id`` is null.
-            The worker treats both as the same hard failure: a document
-            has no business being indexed without a workspace anchor.
+        so live ingestion and the legacy backfill follow identical ACL rules.
         """
         async with self._session_factory() as session:
-            source = await self._fetch_source(session, source_id)
+            source = await self._fetch_source(session, event.source_id)
+
         if source is None:
-            # Treat a missing source row as the same fail-closed outcome
-            # as a tenant-less source — the worker has no workspace to
-            # write under either way.  We construct an explicit
-            # MissingWorkspaceError so the caller's error handling path
-            # is identical to the canonical case.
-            raise MissingWorkspaceError(
-                source_id=source_id,
+            log.error(
+                "workspace_resolution_failed",
+                source_id=str(event.source_id),
                 source_name="<source-not-found>",
+                external_id=event.external_id,
             )
-        return resolve_source_workspace(source)
+            return None, None
+
+        try:
+            workspace_id = resolve_source_workspace(source)
+        except MissingWorkspaceError as exc:
+            log.error(
+                "workspace_resolution_failed",
+                source_id=str(event.source_id),
+                source_name=exc.source_name,
+                external_id=event.external_id,
+                error=str(exc),
+            )
+            return None, None
+
+        return source, workspace_id
 
     @staticmethod
     async def _fetch_source(session: AsyncSession, source_id: uuid.UUID) -> Source | None:
@@ -334,6 +490,64 @@ class IngestionWorker:
         # silent on the run tracker: neither outcome represents work the
         # tracker should count.  The metric on
         # ``INGESTION_DOCUMENTS_PROCESSED_TOTAL`` already records both.
+
+
+# ---------------------------------------------------------------------------
+# Module-level helpers (pure / small — keep under 30 lines each)
+# ---------------------------------------------------------------------------
+
+
+def _is_sync_marker(event: DocumentChangeEvent) -> bool:
+    """Return True when *event* is a discovery sync marker.
+
+    A sync marker signals "re-sync the whole source" rather than a single
+    document change.  The sentinel values are set by ``trigger_sync`` in
+    ``rest/sources.py``.
+    """
+    return event.external_id == "*" or event.uri.startswith("sync://")
+
+
+async def _collect_refs(
+    connector: Connector,
+    config: Any,
+    secrets: dict[str, str],
+) -> list[DocumentRef]:
+    """Drain ``connector.discover()`` into a list.
+
+    Raises :class:`NotImplementedError` when the connector does not support
+    discovery (propagated from ``Connector.discover`` base implementation).
+    """
+    refs: list[DocumentRef] = []
+    async for ref in connector.discover(config, secrets):
+        refs.append(ref)
+    return refs
+
+
+async def _fan_out_refs(
+    refs: list[DocumentRef],
+    event: DocumentChangeEvent,
+    pipeline: IngestionPipeline,
+    config: Any,
+    secrets: dict[str, str],
+    workspace_id: uuid.UUID,
+    run_id: uuid.UUID | None,
+    concurrency: int,
+) -> list[ProcessResult]:
+    """Run ``pipeline.run_ref`` for every ref with bounded concurrency."""
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async def _run_one(ref: DocumentRef) -> ProcessResult:
+        async with semaphore:
+            return await pipeline.run_ref(
+                event=event,
+                ref=ref,
+                config=config,
+                secrets=secrets,
+                workspace_id=workspace_id,
+                ingestion_run_id=run_id,
+            )
+
+    return list(await asyncio.gather(*(_run_one(r) for r in refs)))
 
 
 __all__ = ["IngestionWorker"]

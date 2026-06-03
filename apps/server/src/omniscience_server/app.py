@@ -24,6 +24,7 @@ from urllib.parse import urlparse, urlunparse
 
 import structlog
 from fastapi import FastAPI
+from omniscience_connectors import K8sAgenticConnector
 from omniscience_connectors import default_registry as connector_registry
 from omniscience_core.config import Settings
 from omniscience_core.db import create_async_engine, create_session_factory
@@ -59,6 +60,14 @@ from omniscience_server.routes import health_router, tokens_router
 from omniscience_server.scheduler import SchedulerWorker
 
 log = structlog.get_logger(__name__)
+
+# The SourceType enum uses "k8s" for the legacy agentic connector; the connector
+# registers as "k8s-agentic".  Add an alias so the ingestion worker can look up
+# the connector by SourceType string without modifying existing source rows.
+connector_registry._connectors.setdefault(
+    "k8s",
+    connector_registry._connectors.get("k8s-agentic") or K8sAgenticConnector(),
+)
 
 
 # ---------------------------------------------------------------------------

@@ -771,11 +771,13 @@ class TestWorkerIntegration:
         from omniscience_core.db.models import Source
         from omniscience_server.ingestion.worker import IngestionWorker
 
-        # Source row used by _resolve_workspace.
+        # Source row used by _load_source_and_workspace.
         src = MagicMock(spec=Source)
         src.id = uuid.uuid4()
         src.tenant_id = uuid.uuid4()
         src.name = "test-source"
+        src.config = {}
+        src.secrets_ref = None
 
         # Session factory used by _resolve_workspace's _fetch_source.
         scalar = MagicMock()
@@ -789,8 +791,13 @@ class TestWorkerIntegration:
 
         # Connector
         from omniscience_connectors.base import DocumentRef, FetchedDocument
+        from pydantic import BaseModel as _BaseModel
+
+        class _EmptyConfig(_BaseModel):
+            pass
 
         connector = MagicMock()
+        connector.config_schema = _EmptyConfig
         connector.fetch = AsyncMock(
             return_value=FetchedDocument(
                 ref=DocumentRef(external_id="x", uri="kube://x"),

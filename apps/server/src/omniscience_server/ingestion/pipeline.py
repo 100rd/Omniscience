@@ -271,26 +271,61 @@ class IngestionPipeline:
         ``workspace_id`` is required and resolved by the caller (the
         worker) before this method runs.  It is never optional — the
         ACL invariant on Neo4j/Qdrant is non-negotiable.
+
+        Delegates to :meth:`run_ref` using a bare :class:`~omniscience_connectors.base.DocumentRef`
+        reconstructed from the event's ``external_id`` and ``uri``.  Use
+        :meth:`run_ref` directly when a pre-built ref with metadata is available
+        (e.g. from a discovery fan-out) so metadata reaches ``connector.fetch``.
+        """
+        ref = DocumentRef(external_id=event.external_id, uri=event.uri)
+        return await self.run_ref(
+            event=event,
+            ref=ref,
+            config=config,
+            secrets=secrets,
+            workspace_id=workspace_id,
+            ingestion_run_id=ingestion_run_id,
+        )
+
+    async def run_ref(
+        self,
+        event: DocumentChangeEvent,
+        ref: DocumentRef,
+        config: Any,
+        secrets: dict[str, str],
+        workspace_id: uuid.UUID,
+        ingestion_run_id: UUID | None = None,
+    ) -> ProcessResult:
+        """Execute all stages using a pre-built :class:`~omniscience_connectors.base.DocumentRef`.
+
+        Unlike :meth:`run`, this entry-point passes ``ref`` directly to
+        ``_stage_fetch``, preserving any metadata set by the connector's
+        ``discover()`` method (e.g. ``ref.metadata["kind"]`` for the K8s
+        agentic connector).  The ``event`` is still used for ACL /
+        metrics / logging — ``workspace_id`` is never sourced from it.
+
+        ``workspace_id`` is required and resolved by the caller (the
+        worker) before this method runs.
         """
         started = time.monotonic()
         bound = log.bind(
             source_id=str(event.source_id),
             source_type=event.source_type,
-            external_id=event.external_id,
+            external_id=ref.external_id,
             action=event.action,
             workspace_id=str(workspace_id),
         )
 
         try:
-            result = await self._execute(
-                event, config, secrets, workspace_id, ingestion_run_id, bound
+            result = await self._execute_ref(
+                event, ref, config, secrets, workspace_id, ingestion_run_id, bound
             )
         except Exception as exc:
             elapsed_ms = (time.monotonic() - started) * 1000
             bound.error("pipeline_unexpected_error", error=str(exc))
             return ProcessResult(
                 source_id=event.source_id,
-                external_id=event.external_id,
+                external_id=ref.external_id,
                 action="error",
                 duration_ms=elapsed_ms,
                 error=str(exc),
@@ -306,27 +341,30 @@ class IngestionPipeline:
     # Stage orchestration
     # ------------------------------------------------------------------
 
-    async def _execute(
+    async def _execute_ref(
         self,
         event: DocumentChangeEvent,
+        ref: DocumentRef,
         config: Any,
         secrets: dict[str, str],
         workspace_id: uuid.UUID,
         ingestion_run_id: UUID | None,
         bound: Any,
     ) -> ProcessResult:
-        """Inner execution — may raise; exceptions are caught by :meth:`run`."""
+        """Inner execution for a pre-built ref — may raise; caught by :meth:`run_ref`."""
         if event.action == "deleted":
             return await self._handle_delete(event, workspace_id, bound)
 
-        fetched = await self._stage_fetch(event, config, secrets, bound)
+        fetched = await self._stage_fetch(
+            ref, config, secrets, bound, source_type=event.source_type
+        )
         content_text = fetched.content_bytes.decode(errors="replace")
 
         unchanged = await self._stage_hash_check(event, content_text, bound)
         if unchanged:
             return ProcessResult(
                 source_id=event.source_id,
-                external_id=event.external_id,
+                external_id=ref.external_id,
                 action="unchanged",
                 duration_ms=0.0,
             )
@@ -337,11 +375,9 @@ class IngestionPipeline:
         chunks = self._build_chunks(chunks_text, embeddings)
 
         upsert_action, document_id = await self._stage_index(
-            event, fetched, content_text, chunks, workspace_id, ingestion_run_id, bound
+            event, ref, fetched, content_text, chunks, workspace_id, ingestion_run_id, bound
         )
 
-        # Symbol graph extraction — parser/extractor errors swallowed,
-        # orchestrated write via index_writer handles Neo4j.
         await self._stage_graph(
             event=event,
             content_bytes=fetched.content_bytes,
@@ -350,12 +386,11 @@ class IngestionPipeline:
             bound=bound,
         )
 
-        # Cross-source entity linking — optional, best-effort
         await self._stage_link(event, workspace_id, bound)
 
         return ProcessResult(
             source_id=event.source_id,
-            external_id=event.external_id,
+            external_id=ref.external_id,
             action=upsert_action,
             duration_ms=0.0,
         )
@@ -366,19 +401,25 @@ class IngestionPipeline:
 
     async def _stage_fetch(
         self,
-        event: DocumentChangeEvent,
+        ref: DocumentRef,
         config: Any,
         secrets: dict[str, str],
         bound: Any,
+        source_type: str = "unknown",
     ) -> FetchedDocument:
+        """Call ``connector.fetch`` with the supplied ref (metadata preserved).
+
+        The ref is passed through unchanged — metadata set by ``discover()``
+        (e.g. ``ref.metadata["kind"]`` for the K8s agentic connector) reaches
+        the connector intact.
+        """
         t0 = time.monotonic()
         try:
-            ref = DocumentRef(external_id=event.external_id, uri=event.uri)
             fetched = await self._connector.fetch(config, secrets, ref)
             bound.debug("stage_fetch_ok", content_bytes=len(fetched.content_bytes))
             return fetched
         except Exception as exc:
-            INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="fetch").inc()
+            INGESTION_ERRORS_TOTAL.labels(source_type=source_type, stage="fetch").inc()
             bound.error("stage_fetch_error", error=str(exc))
             raise
         finally:
@@ -482,6 +523,7 @@ class IngestionPipeline:
     async def _stage_index(
         self,
         event: DocumentChangeEvent,
+        ref: DocumentRef,
         fetched: FetchedDocument,
         content_text: str,
         chunks: list[_RawChunk],
@@ -489,14 +531,18 @@ class IngestionPipeline:
         ingestion_run_id: UUID | None,
         bound: Any,
     ) -> tuple[str, UUID]:
-        """Write chunks to the hybrid index (Postgres + Qdrant)."""
+        """Write chunks to the hybrid index (Postgres + Qdrant).
+
+        Uses ``ref`` (not ``event``) for ``external_id`` / ``uri`` / ``metadata``
+        so that discovered refs (with kind metadata) are indexed faithfully.
+        """
         t0 = time.monotonic()
         try:
             content_hash = _compute_content_hash(content_text)
             result = await self._index_writer.upsert_document(
                 source_id=event.source_id,
-                external_id=event.external_id,
-                uri=event.uri,
+                external_id=ref.external_id,
+                uri=ref.uri,
                 title=None,
                 content_hash=content_hash,
                 metadata=dict(fetched.ref.metadata),
