@@ -72,7 +72,9 @@ from omniscience_server.as_of import (
 )
 from omniscience_server.incidents import (
     ALERT_NOT_FOUND_CODE,
-    _validate_alert_id,  # re-used: same alert_id grammar as resolve_incident
+)
+from omniscience_server.incidents import (
+    validate_alert_id as _validate_alert_id,  # re-used: same alert_id grammar as resolve_incident
 )
 
 # ---------------------------------------------------------------------------
