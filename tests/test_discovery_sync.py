@@ -738,3 +738,30 @@ class TestIsSyncMarker:
             action="updated",
         )
         assert _is_sync_marker(event) is True
+
+
+# ---------------------------------------------------------------------------
+# 9. _mark_source_synced — stamps Source.last_sync_at on successful sync
+# ---------------------------------------------------------------------------
+
+
+class TestMarkSourceSynced:
+    async def test_mark_source_synced_issues_update_and_commits(self) -> None:
+        """_mark_source_synced runs an UPDATE setting last_sync_at and commits."""
+        from sqlalchemy.sql.dml import Update
+
+        worker = _make_worker(connector=MagicMock())
+        session = worker._session_factory.session  # type: ignore[attr-defined]
+        session.commit = AsyncMock()
+        sid = uuid.uuid4()
+
+        await worker._mark_source_synced(sid)
+
+        session.execute.assert_awaited_once()
+        stmt = session.execute.await_args.args[0]
+        assert isinstance(stmt, Update)
+        # The compiled statement targets the sources table's last_sync_at column.
+        compiled = str(stmt)
+        assert "sources" in compiled
+        assert "last_sync_at" in compiled
+        session.commit.assert_awaited_once()

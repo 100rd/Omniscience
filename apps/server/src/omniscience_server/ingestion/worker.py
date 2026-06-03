@@ -53,6 +53,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -64,7 +65,7 @@ from omniscience_core.secrets import SecretsResolver
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_index.workspace import MissingWorkspaceError, resolve_source_workspace
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from omniscience_server.ingestion.dedup import (
@@ -178,6 +179,7 @@ class IngestionWorker:
             if result.action == "error":
                 await msg.nak()
             else:
+                await self._mark_source_synced(result.source_id)
                 await msg.ack()
 
         log.info("ingestion_worker_stopped")
@@ -459,6 +461,21 @@ class IngestionWorker:
         stmt = select(Source).where(Source.id == source_id)
         result = await session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def _mark_source_synced(self, source_id: uuid.UUID) -> None:
+        """Stamp ``Source.last_sync_at`` after a document is successfully synced.
+
+        Runs in the broker callback's success path so the source's freshness
+        reflects real ingestion progress (the scheduler and admin UI read this).
+        Uses an atomic UPDATE — no read-modify-write — and never blocks the ack.
+        """
+        async with self._session_factory() as session:
+            await session.execute(
+                update(Source)
+                .where(Source.id == source_id)
+                .values(last_sync_at=datetime.now(UTC))
+            )
+            await session.commit()
 
     # ------------------------------------------------------------------
     # Run tracking helpers
