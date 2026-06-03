@@ -684,11 +684,14 @@ class K8sAgenticConnector(AgenticConnector):
 
         name = ref.metadata.get("name", "")
         namespace = ref.metadata.get("namespace", cfg.namespace)
+        # Path building must use the fully-qualified kind so CRDs resolve to
+        # /apis/<group>/<version>/...; the bare ``kind`` is display-only.
+        api_kind = ref.metadata.get("api_kind", kind)
 
         if name:
-            path = _kind_to_resource_path(kind, namespace, name)
+            path = _kind_to_resource_path(api_kind, namespace, name)
         else:
-            path = _kind_to_api_path(kind, cfg.namespace)
+            path = _kind_to_api_path(api_kind, cfg.namespace)
 
         url = f"{cfg.api_server}{path}"
 
@@ -873,6 +876,11 @@ class K8sAgenticConnector(AgenticConnector):
                 uri=uri,
                 metadata={
                     "kind": bare_kind,
+                    # Preserve the fully-qualified kind ("group/Kind") so fetch()
+                    # can rebuild the correct CRD path (/apis/<group>/<version>/...).
+                    # The bare kind alone loses the group and resolves to a wrong
+                    # core-style path for CRDs (e.g. ArgoCD Applications).
+                    "api_kind": kind,
                     "cluster": cfg.cluster_name,
                     "namespace": namespace,
                     "name": name,
