@@ -446,12 +446,15 @@ async def test_postmortem_400_invalid_format_from_render() -> None:
     app = _make_app(tok)
     report = _make_report()
 
-    with patch(
-        "omniscience_server.rest.postmortem.generate_postmortem",
-        new=AsyncMock(return_value=report),
-    ), patch(
-        "omniscience_server.rest.postmortem.render",
-        side_effect=PostmortemError(INVALID_FORMAT_CODE, "pdf"),
+    with (
+        patch(
+            "omniscience_server.rest.postmortem.generate_postmortem",
+            new=AsyncMock(return_value=report),
+        ),
+        patch(
+            "omniscience_server.rest.postmortem.render",
+            side_effect=PostmortemError(INVALID_FORMAT_CODE, "pdf"),
+        ),
     ):
         async with await _client(app) as c:
             resp = await c.get(

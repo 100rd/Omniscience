@@ -65,7 +65,8 @@ def upgrade() -> None:
     # ------------------------------------------------------------------
     # 2. Seed the default workspace
     # ------------------------------------------------------------------
-    from datetime import datetime, UTC
+    from datetime import UTC, datetime
+
     workspaces_table = sa.table(
         "workspaces",
         sa.column("id", postgresql.UUID(as_uuid=True)),

@@ -46,6 +46,7 @@ class EntityLinker:
 
     def __init__(self, graph_store: GraphStore) -> None:
         self._graph_store = graph_store
+
     async def link_entities(self, source_id: uuid.UUID, workspace_id: uuid.UUID) -> int:
         """Find and create cross-source edges for entities in *source_id*."""
         all_entities = await self._graph_store.get_all_entities(workspace_id=workspace_id)
@@ -94,7 +95,6 @@ class EntityLinker:
                 count=resolved,
             )
         return resolved
-
 
     def _compute_links(
         self,
@@ -147,5 +147,6 @@ class EntityLinker:
                 return score, "resource_name"
 
         return 0.0, ""
+
 
 __all__ = ["CROSS_REF_EDGE_TYPE", "EntityLinker"]

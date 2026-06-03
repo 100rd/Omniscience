@@ -102,9 +102,7 @@ class TestMcpServeStdio:
 class TestMcpServeHttp:
     def test_clean_exit_zero(self) -> None:
         with patch("subprocess.run", return_value=_proc(0)) as mock_run:
-            result = runner.invoke(
-                app, ["mcp", "serve", "--transport", "http"]
-            )
+            result = runner.invoke(app, ["mcp", "serve", "--transport", "http"])
         assert result.exit_code == 0
         cmd = mock_run.call_args[0][0]
         assert "uvicorn" in cmd
@@ -117,31 +115,23 @@ class TestMcpServeHttp:
 
     def test_custom_port(self) -> None:
         with patch("subprocess.run", return_value=_proc(0)) as mock_run:
-            runner.invoke(
-                app, ["mcp", "serve", "--transport", "http", "--port", "9090"]
-            )
+            runner.invoke(app, ["mcp", "serve", "--transport", "http", "--port", "9090"])
         cmd = mock_run.call_args[0][0]
         assert "9090" in cmd
 
     def test_nonzero_exit_aborts(self) -> None:
         with patch("subprocess.run", return_value=_proc(2)):
-            result = runner.invoke(
-                app, ["mcp", "serve", "--transport", "http"]
-            )
+            result = runner.invoke(app, ["mcp", "serve", "--transport", "http"])
         assert result.exit_code != 0
 
     def test_sigint_exit_clean(self) -> None:
         with patch("subprocess.run", return_value=_proc(-2)):
-            result = runner.invoke(
-                app, ["mcp", "serve", "--transport", "http"]
-            )
+            result = runner.invoke(app, ["mcp", "serve", "--transport", "http"])
         assert result.exit_code == 0
 
     def test_file_not_found_aborts(self) -> None:
         with patch("subprocess.run", side_effect=FileNotFoundError):
-            result = runner.invoke(
-                app, ["mcp", "serve", "--transport", "http"]
-            )
+            result = runner.invoke(app, ["mcp", "serve", "--transport", "http"])
         assert result.exit_code != 0
 
     def test_short_flags(self) -> None:

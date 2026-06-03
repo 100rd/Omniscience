@@ -35,7 +35,9 @@ async def main() -> None:
     await gs.connect()
 
     async with sf() as s:
-        src = (await s.execute(select(Source).where(Source.name == "k8s-qbiq-shared"))).scalar_one()
+        src = (
+            await s.execute(select(Source).where(Source.name == "k8s-qbiq-shared"))
+        ).scalar_one()
     src_id = src.id
 
     ents: dict[uuid.UUID, EntityUpsert] = {}
@@ -43,9 +45,15 @@ async def main() -> None:
 
     def ent(key: str, etype: str, name: str, meta: dict) -> uuid.UUID:
         i = eid(key)
-        ents[i] = EntityUpsert(id=i, source_id=src_id, entity_type=etype, name=name,
-                               display_name=name.split("/")[-1], chunk_id=None,
-                               metadata={**meta, "workspace_id": str(WS), "cluster": CLUSTER})
+        ents[i] = EntityUpsert(
+            id=i,
+            source_id=src_id,
+            entity_type=etype,
+            name=name,
+            display_name=name.split("/")[-1],
+            chunk_id=None,
+            metadata={**meta, "workspace_id": str(WS), "cluster": CLUSTER},
+        )
         return i
 
     for d in docs:
@@ -53,19 +61,37 @@ async def main() -> None:
         kind, ns, name = m["kind"], m.get("namespace", "default"), m["name"]
         ns_id = ent(f"ns/{ns}", "Namespace", ns, {"kind": "Namespace"})
         res_id = ent(f"{kind}/{ns}/{name}", kind, f"{ns}/{name}", m)
-        edges.append(EdgeUpsert(source_entity_id=res_id, target_entity_id=ns_id,
-                                edge_type="in_namespace", metadata={"workspace_id": str(WS)}))
+        edges.append(
+            EdgeUpsert(
+                source_entity_id=res_id,
+                target_entity_id=ns_id,
+                edge_type="in_namespace",
+                metadata={"workspace_id": str(WS)},
+            )
+        )
         if kind == "Application":
             repo = m.get("repo")
             if repo and repo != "?":
                 repo_id = ent(f"repo/{repo}", "GitRepository", repo, {"kind": "GitRepository"})
-                edges.append(EdgeUpsert(source_entity_id=res_id, target_entity_id=repo_id,
-                                        edge_type="sources_from", metadata={"workspace_id": str(WS)}))
+                edges.append(
+                    EdgeUpsert(
+                        source_entity_id=res_id,
+                        target_entity_id=repo_id,
+                        edge_type="sources_from",
+                        metadata={"workspace_id": str(WS)},
+                    )
+                )
             dns = m.get("dest_namespace")
             if dns and dns != "?":
                 dns_id = ent(f"ns/{dns}", "Namespace", dns, {"kind": "Namespace"})
-                edges.append(EdgeUpsert(source_entity_id=res_id, target_entity_id=dns_id,
-                                        edge_type="deploys_to", metadata={"workspace_id": str(WS)}))
+                edges.append(
+                    EdgeUpsert(
+                        source_entity_id=res_id,
+                        target_entity_id=dns_id,
+                        edge_type="deploys_to",
+                        metadata={"workspace_id": str(WS)},
+                    )
+                )
 
     for e in ents.values():
         await gs.upsert_entity(entity=e, workspace_id=WS)

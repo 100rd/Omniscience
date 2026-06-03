@@ -121,9 +121,7 @@ async def test_create_session_sets_cookies_for_admin_token() -> None:
     mock_token = _make_mock_token(plaintext, prefix, ["admin"], hashed)
     app = _make_session_app([mock_token])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/admin/session", json={"token": plaintext})
 
     assert response.status_code == 204
@@ -139,9 +137,7 @@ async def test_create_session_session_cookie_is_httponly() -> None:
     mock_token = _make_mock_token(plaintext, prefix, ["admin"], hashed)
     app = _make_session_app([mock_token])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/admin/session", json={"token": plaintext})
 
     raw = "\n".join(response.headers.get_list("set-cookie")).lower()
@@ -156,9 +152,7 @@ async def test_create_session_samesite_strict() -> None:
     mock_token = _make_mock_token(plaintext, prefix, ["admin"], hashed)
     app = _make_session_app([mock_token])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/admin/session", json={"token": plaintext})
 
     raw = "\n".join(response.headers.get_list("set-cookie")).lower()
@@ -175,9 +169,7 @@ async def test_create_session_rejects_unknown_token() -> None:
     """No matching token in DB -> 401."""
     app = _make_session_app([])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         plaintext, _ = generate_token("development")
         response = await client.post("/admin/session", json={"token": plaintext})
 
@@ -192,9 +184,7 @@ async def test_create_session_rejects_non_admin_scope() -> None:
     mock_token = _make_mock_token(plaintext, prefix, ["search"], hashed)
     app = _make_session_app([mock_token])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/admin/session", json={"token": plaintext})
 
     assert response.status_code == 403
@@ -205,9 +195,7 @@ async def test_create_session_rejects_empty_token() -> None:
     """Empty/whitespace token string -> 422 (pydantic validation)."""
     app = _make_session_app([])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.post("/admin/session", json={"token": "   "})
 
     assert response.status_code == 422
@@ -223,9 +211,7 @@ async def test_delete_session_clears_cookies() -> None:
     """DELETE /admin/session returns 204 and expires both cookies."""
     app = _make_session_app([])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.delete("/admin/session")
 
     assert response.status_code == 204
@@ -329,12 +315,8 @@ async def test_bearer_post_exempt_from_csrf() -> None:
     mock_token = _make_mock_token(plaintext, prefix, ["admin"], hashed)
     app = _make_protected_app([mock_token])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
-        response = await client.post(
-            "/mutate", headers={"Authorization": f"Bearer {plaintext}"}
-        )
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post("/mutate", headers={"Authorization": f"Bearer {plaintext}"})
 
     assert response.status_code == 200
 
@@ -367,9 +349,7 @@ async def test_no_auth_returns_401() -> None:
     """No bearer header and no session cookie -> 401."""
     app = _make_protected_app([])
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         response = await client.get("/probe")
 
     assert response.status_code == 401

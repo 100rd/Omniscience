@@ -103,7 +103,7 @@ class IndexWriter:
             if self._vector_store and workspace_id:
                 vector_metadata = dict(metadata)
                 vector_metadata["workspace_id"] = str(workspace_id)
-                
+
                 payloads: list[ChunkPayload] = [
                     {
                         "ord": c.ord,
@@ -118,7 +118,7 @@ class IndexWriter:
                     }
                     for c in chunks
                 ]
-                
+
                 await self._vector_store.upsert_chunks(
                     source_id=source_id,
                     external_id=external_id,
@@ -138,8 +138,8 @@ class IndexWriter:
             )
 
     async def tombstone(
-        self, 
-        source_id: uuid.UUID, 
+        self,
+        source_id: uuid.UUID,
         external_id: str,
         workspace_id: uuid.UUID | None = None,
     ) -> bool:
@@ -149,7 +149,7 @@ class IndexWriter:
             if doc is None:
                 return False
             doc.tombstoned_at = datetime.now(UTC)
-            
+
             if self._vector_store and workspace_id:
                 await self._vector_store.delete_by_document(
                     source_id=source_id,
@@ -199,7 +199,7 @@ class IndexWriter:
                 edges=edges,
                 snapshot_at=snapshot_at,
             )
-        
+
         # SQL-side graph storage is now deprecated and removed from ingestion path.
 
     # ------------------------------------------------------------------

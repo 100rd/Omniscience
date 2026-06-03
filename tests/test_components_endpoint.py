@@ -397,9 +397,7 @@ async def test_components_graceful_degrade_one_store_error() -> None:
     mock_broken_graph_store._config = MagicMock()
     mock_broken_graph_store._config.database = "neo4j"
     broken_driver = MagicMock()
-    broken_driver.session = MagicMock(
-        side_effect=RuntimeError("neo4j connection refused")
-    )
+    broken_driver.session = MagicMock(side_effect=RuntimeError("neo4j connection refused"))
     mock_broken_graph_store._driver = broken_driver
     app.state.graph_store = mock_broken_graph_store
 

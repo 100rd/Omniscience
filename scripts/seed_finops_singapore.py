@@ -31,8 +31,13 @@ DOCS: list[dict] = [
         "external_id": "finops/ebs-gp2-gp3-singapore-cost-analysis.md",
         "uri": "confluence://finops/ebs-gp2-gp3-singapore",
         "title": "EBS gp2 → gp3 Migration Cost Analysis — Singapore (ap-southeast-1)",
-        "metadata": {"region": "ap-southeast-1", "region_name": "Singapore",
-                     "service": "EBS", "doc_type": "cost_analysis", "team": "FinOps"},
+        "metadata": {
+            "region": "ap-southeast-1",
+            "region_name": "Singapore",
+            "service": "EBS",
+            "doc_type": "cost_analysis",
+            "team": "FinOps",
+        },
         "chunks": [
             # Headline answer
             "EBS gp2 to gp3 migration cost analysis for the Singapore (ap-southeast-1) "
@@ -70,8 +75,12 @@ DOCS: list[dict] = [
         "external_id": "finops/aws-ebs-pricing-ap-southeast-1.md",
         "uri": "confluence://finops/ebs-pricing-singapore",
         "title": "AWS EBS Pricing Reference — ap-southeast-1 (Singapore)",
-        "metadata": {"region": "ap-southeast-1", "region_name": "Singapore",
-                     "service": "EBS", "doc_type": "pricing_reference"},
+        "metadata": {
+            "region": "ap-southeast-1",
+            "region_name": "Singapore",
+            "service": "EBS",
+            "doc_type": "pricing_reference",
+        },
         "chunks": [
             "AWS EBS volume pricing in the Singapore region (ap-southeast-1), monthly: "
             "gp2 (General Purpose SSD) = $0.12 per GB-month. "
@@ -85,8 +94,12 @@ DOCS: list[dict] = [
         "external_id": "infra/singapore-ebs-inventory.md",
         "uri": "git://infra/inventory/singapore-ebs.md",
         "title": "Singapore Region Infrastructure Inventory — EBS Volumes",
-        "metadata": {"region": "ap-southeast-1", "region_name": "Singapore",
-                     "service": "EC2", "doc_type": "inventory"},
+        "metadata": {
+            "region": "ap-southeast-1",
+            "region_name": "Singapore",
+            "service": "EC2",
+            "doc_type": "inventory",
+        },
         "chunks": [
             "Singapore (ap-southeast-1) infrastructure inventory: approximately 200 EC2 "
             "instances across the prod, staging, and data tiers. Attached EBS storage totals "
@@ -134,11 +147,16 @@ async def seed() -> None:
     src_id = uuid.uuid4()
     async with session_factory() as session:
         await session.execute(delete(Source).where(Source.name == "finops-singapore"))
-        session.add(Source(
-            id=src_id, name="finops-singapore", type=SourceType.git,
-            config={"repo_url": "confluence://finops"},
-            tenant_id=WS_ID, status=SourceStatus.active,
-        ))
+        session.add(
+            Source(
+                id=src_id,
+                name="finops-singapore",
+                type=SourceType.git,
+                config={"repo_url": "confluence://finops"},
+                tenant_id=WS_ID,
+                status=SourceStatus.active,
+            )
+        )
         await session.commit()
 
     writer = IndexWriter(session_factory, graph_store, vector_store)
@@ -150,8 +168,11 @@ async def seed() -> None:
         vectors = await provider.embed(texts)  # real embeddings
         chunks = [
             ChunkData(
-                ord=i, text=t, embedding=vectors[i],
-                embedding_model=model_name, embedding_provider="ollama",
+                ord=i,
+                text=t,
+                embedding=vectors[i],
+                embedding_model=model_name,
+                embedding_provider="ollama",
                 metadata=doc["metadata"],
             )
             for i, t in enumerate(texts)

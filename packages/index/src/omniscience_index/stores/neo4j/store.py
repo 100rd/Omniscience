@@ -690,9 +690,7 @@ class Neo4jGraphStore:
             "limit": int(limit),
         }
         async with self._driver.session(database=self._config.database) as session:
-            rows = await session.execute_read(
-                _run_read_stmt, _LIST_WARM_TO_ARCHIVE_DATES, params
-            )
+            rows = await session.execute_read(_run_read_stmt, _LIST_WARM_TO_ARCHIVE_DATES, params)
         out: list[date] = []
         for row in rows:
             raw = row.get("snapshot_date")
@@ -769,9 +767,7 @@ class Neo4jGraphStore:
         """Return {'hot': int, 'warm': int} record counts for the workspace."""
         params: dict[str, Any] = {_WORKSPACE_PARAM: str(workspace_id)}
         async with self._driver.session(database=self._config.database) as session:
-            hot_rows = await session.execute_read(
-                _run_read_stmt, _COUNT_HOT_ENTITY_STATES, params
-            )
+            hot_rows = await session.execute_read(_run_read_stmt, _COUNT_HOT_ENTITY_STATES, params)
             warm_rows = await session.execute_read(
                 _run_read_stmt, _COUNT_WARM_ENTITY_SNAPSHOTS, params
             )

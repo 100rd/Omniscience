@@ -138,20 +138,24 @@ def _make_org_client(
             pag.paginate.return_value = iter([{"Roots": roots or [{"Id": "r-root"}]}])
 
         elif method == "list_organizational_units_for_parent":
+
             def _ou_pages(**kwargs: Any) -> Any:
                 parent_id = kwargs.get("ParentId", "")
                 items = (ous_by_parent or {}).get(parent_id, [])
                 return iter([{"OrganizationalUnits": items}])
+
             pag.paginate.side_effect = _ou_pages
 
         elif method == "list_accounts":
             pag.paginate.return_value = iter([{"Accounts": accounts or []}])
 
         elif method == "list_parents":
+
             def _parent_pages(**kwargs: Any) -> Any:
                 child_id = kwargs.get("ChildId", "")
                 items = (parents_by_child or {}).get(child_id, [])
                 return iter([{"Parents": items}])
+
             pag.paginate.side_effect = _parent_pages
 
         return pag
@@ -310,9 +314,7 @@ class TestDiscoverOrganizations:
             parents_by_child={"222222222222": [{"Id": OU_ID_1, "Type": "ORGANIZATIONAL_UNIT"}]},
         )
 
-        with patch(
-            "omniscience_connectors.aws.connector._org_client", return_value=client
-        ):
+        with patch("omniscience_connectors.aws.connector._org_client", return_value=client):
             refs = _discover_organizations(SECRETS, [])
 
         resource_types = {r.metadata["resource_type"] for r in refs}
@@ -482,9 +484,7 @@ class TestAwsConnectorDiscoverOrganizations:
                 "omniscience_connectors.aws.connector._get_account_id",
                 return_value=ACCOUNT_ID,
             ),
-            patch(
-                "omniscience_connectors.aws.connector._discover_organizations"
-            ) as mock_org,
+            patch("omniscience_connectors.aws.connector._discover_organizations") as mock_org,
         ):
             refs = [ref async for ref in connector.discover(config, SECRETS)]
 
@@ -545,16 +545,12 @@ class TestAwsConnectorFetchOrganizations:
             metadata=meta,
         )
 
-    async def test_fetch_organization(
-        self, connector: AwsConnector, config: AwsConfig
-    ) -> None:
+    async def test_fetch_organization(self, connector: AwsConnector, config: AwsConfig) -> None:
         mock_client = MagicMock()
         mock_client.describe_organization.return_value = {"Organization": _make_org()}
         ref = self._make_ref("aws_organization", org_id=ORG_ID)
 
-        with patch(
-            "omniscience_connectors.aws.connector._org_client", return_value=mock_client
-        ):
+        with patch("omniscience_connectors.aws.connector._org_client", return_value=mock_client):
             doc = await connector.fetch(config, SECRETS, ref)
 
         data = json.loads(doc.content_bytes)
@@ -569,9 +565,7 @@ class TestAwsConnectorFetchOrganizations:
         }
         ref = self._make_ref("aws_organizations_ou", ou_id=OU_ID_1)
 
-        with patch(
-            "omniscience_connectors.aws.connector._org_client", return_value=mock_client
-        ):
+        with patch("omniscience_connectors.aws.connector._org_client", return_value=mock_client):
             doc = await connector.fetch(config, SECRETS, ref)
 
         data = json.loads(doc.content_bytes)
@@ -581,14 +575,10 @@ class TestAwsConnectorFetchOrganizations:
     async def test_fetch_account(self, connector: AwsConnector, config: AwsConfig) -> None:
         acct_id = "777777777777"
         mock_client = MagicMock()
-        mock_client.describe_account.return_value = {
-            "Account": _make_account(acct_id, "prod")
-        }
+        mock_client.describe_account.return_value = {"Account": _make_account(acct_id, "prod")}
         ref = self._make_ref("aws_organizations_account", account_id=acct_id)
 
-        with patch(
-            "omniscience_connectors.aws.connector._org_client", return_value=mock_client
-        ):
+        with patch("omniscience_connectors.aws.connector._org_client", return_value=mock_client):
             doc = await connector.fetch(config, SECRETS, ref)
 
         data = json.loads(doc.content_bytes)

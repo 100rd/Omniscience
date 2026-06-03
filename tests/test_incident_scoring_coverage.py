@@ -841,9 +841,7 @@ class TestSaveWorkspaceConfig:
         ws_id = uuid.uuid4()
         cfg = IncidentScoringConfig(confidence_threshold=0.7)
 
-        with patch(
-            "omniscience_retrieval.incidents.scoring.flag_modified"
-        ) as mock_flag:
+        with patch("omniscience_retrieval.incidents.scoring.flag_modified") as mock_flag:
             await save_workspace_config(session, ws_id, cfg)
 
         # settings should now contain the SETTINGS_KEY

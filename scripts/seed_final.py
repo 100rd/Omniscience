@@ -18,9 +18,13 @@ async def seed():
     session_factory = create_session_factory(engine)
     graph_store = Neo4jGraphStore(config=Neo4jStoreConfig.from_settings(settings))
     vector_store = QdrantVectorStore(
-        config=QdrantConfig(host=settings.qdrant_host, grpc_port=settings.qdrant_grpc_port,
-                           http_port=settings.qdrant_http_port, api_key=settings.qdrant_api_key),
-        embedding_provider=create_embedding_provider(settings)
+        config=QdrantConfig(
+            host=settings.qdrant_host,
+            grpc_port=settings.qdrant_grpc_port,
+            http_port=settings.qdrant_http_port,
+            api_key=settings.qdrant_api_key,
+        ),
+        embedding_provider=create_embedding_provider(settings),
     )
     await graph_store.connect()
     await vector_store.connect()
@@ -35,8 +39,12 @@ async def seed():
     async with session_factory() as session:
         await session.execute(delete(Source).where(Source.name == "demo"))
         src = Source(
-            id=src_id, name="demo", type=SourceType.git,
-            config={}, tenant_id=ws_id, status=SourceStatus.active,
+            id=src_id,
+            name="demo",
+            type=SourceType.git,
+            config={},
+            tenant_id=ws_id,
+            status=SourceStatus.active,
         )
         session.add(src)
         await session.commit()
@@ -59,23 +67,43 @@ async def seed():
             self.metadata = {}
 
     # 1. Auth.py
-    res_a = await writer.upsert_document(src_id, "auth.py", "git://auth.py", "Auth", "h1", {},
-                                       [ChunkData(0, "def validate(): pass", [0.1]*768)], ws_id)
+    res_a = await writer.upsert_document(
+        src_id,
+        "auth.py",
+        "git://auth.py",
+        "Auth",
+        "h1",
+        {},
+        [ChunkData(0, "def validate(): pass", [0.1] * 768)],
+        ws_id,
+    )
     await writer.upsert_graph(src_id, res_a.document_id, [E("auth.validate")], [], ws_id)
 
     # 2. Payments.py (with edge to auth.validate)
-    res_p = await writer.upsert_document(src_id, "pay.py", "git://pay.py", "Pay", "h2", {},
-                                       [ChunkData(0, "auth.validate()", [0.2]*768)], ws_id)
+    res_p = await writer.upsert_document(
+        src_id,
+        "pay.py",
+        "git://pay.py",
+        "Pay",
+        "h2",
+        {},
+        [ChunkData(0, "auth.validate()", [0.2] * 768)],
+        ws_id,
+    )
     p_ent = E("payments.process")
     await writer.upsert_graph(
-        src_id, res_p.document_id, [p_ent],
-        [Edge(p_ent.id, "auth.validate", "calls")], ws_id,
+        src_id,
+        res_p.document_id,
+        [p_ent],
+        [Edge(p_ent.id, "auth.validate", "calls")],
+        ws_id,
     )
 
     await graph_store.resolve_pending_stubs(workspace_id=ws_id)
     print("DEMO_READY")
     await graph_store.close()
     await vector_store.close()
+
 
 if __name__ == "__main__":
     asyncio.run(seed())

@@ -161,8 +161,8 @@ class IndexWriterProtocol(Protocol):
     ) -> None: ...
 
     async def tombstone(
-        self, 
-        source_id: UUID, 
+        self,
+        source_id: UUID,
         external_id: str,
         workspace_id: UUID | None = None,
     ) -> bool: ...
@@ -542,8 +542,8 @@ class IngestionPipeline:
             if extracted is None:
                 return
             entities, edges = extracted
-            
-            # Orchestrated write: index_writer handles the workspace-tagging 
+
+            # Orchestrated write: index_writer handles the workspace-tagging
             # and Neo4j call.
             await self._index_writer.upsert_graph(
                 source_id=event.source_id,
@@ -621,7 +621,7 @@ class IngestionPipeline:
         t0 = time.monotonic()
         try:
             found = await self._index_writer.tombstone(
-                event.source_id, 
+                event.source_id,
                 event.external_id,
                 workspace_id=workspace_id,
             )
