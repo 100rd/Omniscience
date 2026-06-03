@@ -5,9 +5,10 @@ Public surface:
 * :class:`StatsService` — single entry point that aggregates rollups across
   Postgres (operational metadata), Neo4j (entities + edges), and Qdrant
   (chunk counts) for the admin UI dashboard.
-* :class:`StatsOverview`, :class:`SourceStatsRow`, :class:`KindHistogramEntry`,
-  :class:`EdgeTypeHistogramEntry` — Pydantic response models shared with the
-  REST layer (``apps/server/src/omniscience_server/rest/stats.py``).
+* :class:`StatsOverview`, :class:`ActivityResponse`, :class:`SourceStatsRow`,
+  :class:`KindHistogramEntry`, :class:`EdgeTypeHistogramEntry` — Pydantic
+  response models shared with the REST layer
+  (``apps/server/src/omniscience_server/rest/stats.py``).
 
 Design rules
 ------------
@@ -37,6 +38,7 @@ from omniscience_core.stats.clients import (
     ClientsStatsService,
 )
 from omniscience_core.stats.models import (
+    ActivityResponse,
     ClientsStatsResponse,
     EdgesByTypeResponse,
     EdgeTypeHistogramEntry,
@@ -53,6 +55,7 @@ from omniscience_core.stats.service import StatsService
 __all__ = [
     "CLIENTS_STATS_CACHE_TTL_SECONDS",
     "STATS_CACHE_TTL_SECONDS",
+    "ActivityResponse",
     "ClientsStatsResponse",
     "ClientsStatsService",
     "EdgeTypeHistogramEntry",

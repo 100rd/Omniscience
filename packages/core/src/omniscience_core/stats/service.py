@@ -37,6 +37,7 @@ from omniscience_core.auth.workspace import workspace_filter
 from omniscience_core.db.models import Chunk, Document, Source, SourceStatus
 from omniscience_core.stats.cache import STATS_CACHE_TTL_SECONDS, TTLCache
 from omniscience_core.stats.models import (
+    ActivityResponse,
     EdgesByTypeResponse,
     EdgeTypeHistogramEntry,
     EntitiesByKindResponse,
@@ -60,6 +61,10 @@ _METHOD_EDGES_BY_TYPE: Final[str] = "edges_by_type"
 # Window for "last 24h" deltas.  A constant keeps the SQL trivially
 # parameterised and the unit tests trivially controllable via fake clocks.
 _DELTA_WINDOW: Final[timedelta] = timedelta(hours=24)
+
+# Bounds for the windowed activity endpoint (hours).
+_ACTIVITY_HOURS_MIN: Final[int] = 1
+_ACTIVITY_HOURS_MAX: Final[int] = 8760  # 1 year
 
 
 class StatsService:
@@ -99,6 +104,74 @@ class StatsService:
             factory=_build,
         )
         return _as_overview(result)
+
+    async def activity(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        window_hours: int,
+    ) -> ActivityResponse:
+        """Return windowed document-activity counts for the given workspace.
+
+        Mirrors the three delta queries from :meth:`_postgres_overview`
+        but with a caller-supplied window instead of the fixed 24h
+        constant.  Not cached — the window parameter makes the cache key
+        unbounded; the Postgres queries are cheap aggregate SELECTs.
+
+        :param workspace_id: The workspace to scope the query to.
+        :param window_hours: Window width in hours (1..8760).  Callers
+            must validate this before calling; the method does not
+            re-validate (validation lives in the REST layer).
+        """
+        cutoff = datetime.now(tz=UTC) - timedelta(hours=window_hours)
+
+        async with self._session_factory() as session:
+            added_stmt = workspace_filter(
+                select(func.count())
+                .select_from(Document)
+                .join(Source)
+                .where(
+                    Document.indexed_at >= cutoff,
+                    Document.doc_version == 1,
+                ),
+                workspace_id,
+            )
+            updated_stmt = workspace_filter(
+                select(func.count())
+                .select_from(Document)
+                .join(Source)
+                .where(
+                    Document.indexed_at >= cutoff,
+                    Document.doc_version > 1,
+                ),
+                workspace_id,
+            )
+            tombstoned_stmt = workspace_filter(
+                select(func.count())
+                .select_from(Document)
+                .join(Source)
+                .where(Document.tombstoned_at >= cutoff),
+                workspace_id,
+            )
+
+            new_count = int((await session.execute(added_stmt)).scalar_one())
+            updated_count = int((await session.execute(updated_stmt)).scalar_one())
+            tombstoned_count = int((await session.execute(tombstoned_stmt)).scalar_one())
+
+        log.info(
+            "stats_activity",
+            workspace_id=str(workspace_id),
+            window_hours=window_hours,
+            new=new_count,
+            updated=updated_count,
+            tombstoned=tombstoned_count,
+        )
+        return ActivityResponse(
+            new=new_count,
+            updated=updated_count,
+            tombstoned=tombstoned_count,
+            window_hours=window_hours,
+        )
 
     async def sources(self, *, workspace_id: uuid.UUID) -> SourcesStatsResponse:
         """Per-source table for the dashboard."""
@@ -490,4 +563,4 @@ def _as_edges_type(value: object) -> EdgesByTypeResponse:
     return value
 
 
-__all__ = ["StatsService"]
+__all__ = ["_ACTIVITY_HOURS_MAX", "_ACTIVITY_HOURS_MIN", "StatsService"]
