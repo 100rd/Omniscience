@@ -269,7 +269,7 @@ services:
   # API key:          QDRANT__SERVICE__API_KEY env (unset in dev)
   # ==========================================================================
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    image: qdrant/qdrant:v1.17.1
     ports:
       - "127.0.0.1:16333:6333"
       - "127.0.0.1:16334:6334"

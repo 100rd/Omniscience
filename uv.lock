@@ -1434,7 +1434,7 @@ requires-dist = [
     { name = "neo4j", specifier = ">=5.19.0" },
     { name = "omniscience-core", editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
-    { name = "qdrant-client", specifier = ">=1.12.0" },
+    { name = "qdrant-client", specifier = ">=1.17,<1.18" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
     { name = "structlog", specifier = ">=24.1.0" },
 ]
