@@ -18,7 +18,12 @@ export type SourceType =
   | "jira"
   | "grafana"
   | "k8s"
-  | "terraform";
+  | "terraform"
+  | "s3"
+  | "aws"
+  | "alerts"
+  | "otel"
+  | "k8s_operator";
 
 export type SourceStatus = "active" | "paused" | "error";
 
@@ -57,6 +62,14 @@ export interface SourceCreate {
   status?: SourceStatus;
   freshness_sla_seconds?: number;
 }
+
+export interface SourceUpdate {
+  config?: Record<string, unknown>;
+  secrets_ref?: string | null;
+  status?: SourceStatus;
+  freshness_sla_seconds?: number | null;
+}
+
 
 export interface IngestionRun {
   id: string;
@@ -528,6 +541,10 @@ export class ApiClient {
 
   async createSource(payload: SourceCreate): Promise<Source> {
     return this.request<Source>("POST", "/api/v1/sources", payload);
+  }
+
+  async updateSource(id: string, patch: SourceUpdate): Promise<Source> {
+    return this.request<Source>("PATCH", `/api/v1/sources/${id}`, patch);
   }
 
   async deleteSource(id: string): Promise<void> {
