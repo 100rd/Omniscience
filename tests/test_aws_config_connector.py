@@ -508,6 +508,40 @@ class TestAwsConnectorDiscoverDescribeRegression:
         assert len(refs) == 1
         assert refs[0].metadata["kind"] == "aws_live"
 
+    async def test_access_denied_service_skipped_others_continue(self) -> None:
+        """An AccessDenied/SCP-deny on one service is skipped; others still yield.
+
+        Regression for the laptop smoke test: an org SCP denying
+        s3:ListAllMyBuckets aborted the whole sync. Now s3 is skipped and ec2
+        still ingests.
+        """
+        connector = AwsConnector()
+        cfg = AwsConfig(services=["s3", "ec2"], regions=["eu-west-1"])
+
+        ec2_ref = DocumentRef(
+            external_id=f"arn:aws:ec2:eu-west-1:{ACCOUNT}:instance/i-1",
+            uri=f"aws://{ACCOUNT}/eu-west-1/ec2/instance/i-1",
+            metadata={"resource_type": "aws_instance"},
+        )
+        with (
+            patch(
+                "omniscience_connectors.aws.connector._get_account_id",
+                return_value=ACCOUNT,
+            ),
+            patch(
+                "omniscience_connectors.aws.connector._discover_s3",
+                side_effect=_client_error("AccessDenied"),
+            ),
+            patch(
+                "omniscience_connectors.aws.connector._discover_ec2",
+                return_value=[ec2_ref],
+            ),
+        ):
+            refs = [r async for r in connector.discover(cfg, SECRETS)]
+
+        assert len(refs) == 1
+        assert refs[0].metadata["resource_type"] == "aws_instance"
+
 
 # ---------------------------------------------------------------------------
 # AwsConnector.fetch — config mode
