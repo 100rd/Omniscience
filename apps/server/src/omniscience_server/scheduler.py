@@ -95,6 +95,7 @@ class SchedulerWorker:
         "slack": 300,  # 5 min
         "jira": 600,  # 10 min
         "database": 3600,  # 1 hour
+        "k8s": 1800,  # 30 min — agentic connector; launchd/agent outage safety net
     }
 
     def __init__(

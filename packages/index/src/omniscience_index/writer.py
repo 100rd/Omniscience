@@ -100,6 +100,9 @@ class IndexWriter:
             await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
 
             # 2. Qdrant Vector Write (if adapter provided)
+            #    Executed inside session.begin() so that a Qdrant failure
+            #    causes the surrounding context-manager to roll back the PG
+            #    transaction before it is committed.
             if self._vector_store and workspace_id:
                 vector_metadata = dict(metadata)
                 vector_metadata["workspace_id"] = str(workspace_id)
@@ -161,9 +164,25 @@ class IndexWriter:
     async def purge_tombstones(self, older_than: timedelta) -> int:
         """Hard-delete tombstoned documents older than *older_than*.
 
-        Returns the number of documents removed (their chunks cascade-delete
-        automatically via the FK ``ON DELETE CASCADE`` constraint).
+        Deletion order: Qdrant points first, then Postgres rows.
+
+        Rationale: if Qdrant fails, Postgres rows survive and the document
+        remains visible to the next purge run — no data is lost.  The reverse
+        order (PG first) would leave orphan Qdrant vectors with no Postgres
+        anchor, causing ghost points to accumulate silently.  A surviving
+        Qdrant-side orphan (our failure mode) is a temporary space waste;
+        a dangling Postgres reference with no vector is an integrity violation
+        that breaks the hybrid query path.
+
+        When ``_vector_store`` is None the Qdrant step is skipped and only
+        the Postgres DELETE is executed (backward-compatible behaviour).
+
+        Returns the number of Postgres document rows removed (chunks
+        cascade-delete automatically via FK ``ON DELETE CASCADE``).
         """
+        if self._vector_store is not None:
+            await self._vector_store.delete_tombstoned(older_than)
+
         cutoff = datetime.now(UTC) - older_than
         async with self._session_factory() as session, session.begin():
             stmt = (
