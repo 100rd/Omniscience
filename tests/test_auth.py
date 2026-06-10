@@ -21,6 +21,7 @@ from omniscience_core.auth.tokens import (
     hash_token,
     verify_token,
 )
+from omniscience_core.auth.workspace import DEFAULT_WORKSPACE_ID, get_workspace_id
 from omniscience_core.db.models import ApiToken
 from omniscience_core.db.schemas import ApiTokenRead
 
@@ -492,3 +493,80 @@ def test_audit_token_deleted_logs() -> None:
         assert call_kwargs[0][0] == "audit.token.deleted"
         assert call_kwargs[1]["event_type"] == "token_deleted"
         assert call_kwargs[1]["token_prefix"] == "sk_dev_ab"
+
+
+# ---------------------------------------------------------------------------
+# get_workspace_id — fail-closed security tests
+# ---------------------------------------------------------------------------
+
+
+def _make_ws_token(workspace_id: uuid.UUID | None) -> ApiToken:
+    """Build a minimal ApiToken mock for workspace tests."""
+    tok: ApiToken = MagicMock(spec=ApiToken)
+    tok.id = uuid.uuid4()
+    tok.name = "ws-test-token"
+    tok.token_prefix = "sk_dev_x"
+    tok.scopes = ["search"]
+    tok.workspace_id = workspace_id
+    tok.created_at = datetime.now(tz=UTC)
+    tok.expires_at = None
+    tok.last_used_at = None
+    tok.is_active = True
+    tok.hashed_token = "placeholder"
+    return tok
+
+
+def test_get_workspace_id_returns_uuid_for_scoped_token() -> None:
+    """get_workspace_id returns the UUID when token has workspace_id set."""
+    ws_id = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+    token = _make_ws_token(workspace_id=ws_id)
+    assert get_workspace_id(token) == ws_id
+
+
+def test_get_workspace_id_returns_default_workspace_id() -> None:
+    """get_workspace_id returns the default workspace UUID when that is set."""
+    token = _make_ws_token(workspace_id=DEFAULT_WORKSPACE_ID)
+    assert get_workspace_id(token) == DEFAULT_WORKSPACE_ID
+
+
+def test_get_workspace_id_raises_permission_error_for_legacy_token() -> None:
+    """Security: get_workspace_id raises PermissionError when workspace_id is None.
+
+    A legacy token (workspace_id=None) must never be treated as 'see all'.
+    The correct production behaviour is to reject the request at the auth
+    layer with a 403 / forbidden error.  Returning None and skipping the
+    filter is the old, insecure behaviour that this test guards against.
+    """
+    token = _make_ws_token(workspace_id=None)
+    with pytest.raises(PermissionError, match="forbidden:workspace_required"):
+        get_workspace_id(token)
+
+
+def test_get_workspace_id_error_is_permission_error_not_value_error() -> None:
+    """PermissionError (not ValueError / AttributeError) is raised for legacy tokens."""
+    token = _make_ws_token(workspace_id=None)
+    try:
+        get_workspace_id(token)
+        raise AssertionError("Expected PermissionError")
+    except PermissionError:
+        pass  # correct
+    except Exception as exc:
+        raise AssertionError(f"Wrong exception type: {type(exc).__name__}") from exc
+
+
+def test_get_workspace_id_never_returns_none() -> None:
+    """get_workspace_id never returns None — it always raises for legacy tokens."""
+    token = _make_ws_token(workspace_id=None)
+    raised = False
+    try:
+        result = get_workspace_id(token)
+        # Belt-and-suspenders: if no exception, result must not be None.
+        assert result is not None, "get_workspace_id returned None instead of raising"
+    except PermissionError:
+        raised = True
+    assert raised, "get_workspace_id must raise PermissionError for None workspace_id"
+
+
+def test_get_workspace_id_default_workspace_constant_matches_migration() -> None:
+    """DEFAULT_WORKSPACE_ID matches the UUID seeded by migration 0003_workspaces."""
+    assert uuid.UUID("00000000-0000-0000-0000-000000000001") == DEFAULT_WORKSPACE_ID

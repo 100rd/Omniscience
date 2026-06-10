@@ -9,6 +9,16 @@ HTTP status codes map to error codes:
   404 -> *_not_found
   429 -> rate_limited
   500 -> internal
+
+PermissionError mapping
+-----------------------
+``get_workspace_id`` (``omniscience_core.auth.workspace``) raises a plain
+Python ``PermissionError("forbidden:workspace_required")`` when a bearer
+token carries no ``workspace_id`` (legacy pre-multitenancy token).  The
+``_permission_error_handler`` registered here translates that into a
+spec-compliant HTTP 403 response so every REST endpoint gets fail-closed
+behaviour for free — without needing its own ``try/except`` or ``if None``
+guard at the call site.
 """
 
 from __future__ import annotations
@@ -127,8 +137,23 @@ def register_error_handlers(app: FastAPI) -> None:
     """Register all REST API exception handlers on the given FastAPI app."""
     from fastapi.exceptions import HTTPException
 
-    # The handlers must match on HTTPException by status code
-    # We register a catch-all HTTPException handler that dispatches by status code
+    # PermissionError → 403 forbidden
+    # -----------------------------------------------------------------------
+    # ``get_workspace_id`` raises PermissionError("forbidden:workspace_required")
+    # for legacy tokens (workspace_id is None).  This handler converts that
+    # to a spec-compliant 403 so every endpoint is fail-closed without
+    # needing per-handler None-checks.  Registered *before* the generic
+    # Exception handler so it takes priority.
+    @app.exception_handler(PermissionError)
+    async def permission_error_handler(request: Request, exc: PermissionError) -> JSONResponse:
+        return error_response(
+            403,
+            "forbidden",
+            "A workspace-scoped token is required",
+        )
+
+    # The handlers must match on HTTPException by status code.
+    # We register a catch-all HTTPException handler that dispatches by status code.
     @app.exception_handler(HTTPException)
     async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
         if exc.status_code == 401:

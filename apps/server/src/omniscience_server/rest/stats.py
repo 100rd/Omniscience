@@ -106,27 +106,14 @@ def _resolve_service(request: Request) -> StatsService:
 
 
 def _require_workspace(token: ApiToken) -> uuid.UUID:
-    """Extract the caller's workspace_id or fail closed with 403.
+    """Return the caller's workspace_id.
 
     Stats endpoints aggregate counts from Neo4j and Qdrant, both of
-    which require an explicit workspace.  Letting an unscoped token
-    through here would either crash the underlying adapters (Qdrant)
-    or silently widen reads (the bug class from #117).  Fail closed.
+    which require an explicit workspace.  get_workspace_id raises
+    PermissionError("forbidden:workspace_required") for legacy tokens;
+    the global handler in rest/errors.py converts that to HTTP 403.
     """
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
-        log.warning(
-            "stats_request_rejected_no_workspace",
-            token_prefix=token.token_prefix,
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "forbidden",
-                "message": "Stats endpoints require a workspace-scoped token",
-            },
-        )
-    return workspace_id
+    return get_workspace_id(token)
 
 
 # ---------------------------------------------------------------------------

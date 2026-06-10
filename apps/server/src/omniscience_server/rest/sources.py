@@ -95,21 +95,14 @@ def _get_db_factory(request: Request) -> Any:
 
 
 def _require_workspace(token: ApiToken) -> uuid.UUID:
-    """Extract workspace_id from token; raise 403 fail-closed when absent."""
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
-        log.warning(
-            "sources_endpoint_rejected_no_workspace",
-            token_prefix=token.token_prefix,
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "forbidden",
-                "message": "Sources endpoints require a workspace-scoped token.",
-            },
-        )
-    return workspace_id
+    """Return workspace_id from token.
+
+    If the token has no workspace (legacy token, workspace_id is None),
+    get_workspace_id raises PermissionError("forbidden:workspace_required").
+    The global PermissionError handler in rest/errors.py converts that to
+    HTTP 403 — no per-endpoint guard needed here.
+    """
+    return get_workspace_id(token)
 
 
 async def _get_source_or_404(
