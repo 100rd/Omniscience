@@ -187,7 +187,18 @@ def test_init_stores_interval() -> None:
 
 def test_default_ttls_contains_expected_types() -> None:
     """DEFAULT_TTLS has entries for all documented source types."""
-    expected = {"git", "fs", "s3", "aws", "confluence", "notion", "slack", "jira", "database"}
+    expected = {
+        "git",
+        "fs",
+        "s3",
+        "aws",
+        "confluence",
+        "notion",
+        "slack",
+        "jira",
+        "database",
+        "k8s",
+    }
     assert expected == set(SchedulerWorker.DEFAULT_TTLS.keys())
 
 
@@ -196,6 +207,21 @@ def test_default_ttls_values_are_positive() -> None:
     for source_type, ttl in SchedulerWorker.DEFAULT_TTLS.items():
         assert isinstance(ttl, int), f"{source_type} TTL is not int"
         assert ttl > 0, f"{source_type} TTL is not positive"
+
+
+def test_default_ttls_k8s_present_and_correct() -> None:
+    """DEFAULT_TTLS must contain 'k8s' with a 30-minute (1800 s) TTL.
+
+    The k8s source type was absent prior to this fix, causing the scheduler
+    to silently skip all k8s sources (logged as 'no TTL applies').  6-day
+    blind spots went undetected when launchd/agent processes were down.
+    """
+    assert "k8s" in SchedulerWorker.DEFAULT_TTLS, (
+        "'k8s' missing from DEFAULT_TTLS — scheduler will never auto-trigger k8s sources"
+    )
+    assert SchedulerWorker.DEFAULT_TTLS["k8s"] == 1800, (
+        f"Expected k8s TTL=1800 (30 min), got {SchedulerWorker.DEFAULT_TTLS['k8s']}"
+    )
 
 
 # ===========================================================================

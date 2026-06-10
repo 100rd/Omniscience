@@ -50,6 +50,7 @@ _SRC_ID = uuid.uuid4()
 _DOC_ID = uuid.uuid4()
 _CHUNK_ID = uuid.uuid4()
 _RUN_ID = uuid.uuid4()
+_WS_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 
 
 def _make_source(
@@ -61,6 +62,7 @@ def _make_source(
     freshness_sla_seconds: int | None = 300,
     last_error: str | None = None,
     last_error_at: datetime | None = None,
+    tenant_id: uuid.UUID | None = None,
 ) -> MagicMock:
     s = MagicMock(spec=Source)
     s.id = src_id
@@ -71,6 +73,7 @@ def _make_source(
     s.freshness_sla_seconds = freshness_sla_seconds
     s.last_error = last_error
     s.last_error_at = last_error_at
+    s.tenant_id = tenant_id if tenant_id is not None else _WS_A
     return s
 
 
@@ -307,7 +310,7 @@ async def test_mcp_get_document_returns_document_and_chunks() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     app = _make_app(factory=factory)
-    result = await mcp_get_document(app=app, document_id=str(_DOC_ID))
+    result = await mcp_get_document(app=app, document_id=str(_DOC_ID), workspace_id=_WS_A)
 
     assert "document" in result
     assert "chunks" in result
@@ -327,7 +330,7 @@ async def test_mcp_get_document_raises_on_missing_doc() -> None:
 
     app = _make_app(factory=factory)
     with pytest.raises(ValueError, match="document_not_found"):
-        await mcp_get_document(app=app, document_id=str(uuid.uuid4()))
+        await mcp_get_document(app=app, document_id=str(uuid.uuid4()), workspace_id=_WS_A)
 
 
 @pytest.mark.asyncio
@@ -335,7 +338,7 @@ async def test_mcp_get_document_invalid_uuid() -> None:
     """mcp_get_document raises ValueError for malformed document_id."""
     app = _make_app(factory=MagicMock())
     with pytest.raises(ValueError):
-        await mcp_get_document(app=app, document_id="not-a-uuid")
+        await mcp_get_document(app=app, document_id="not-a-uuid", workspace_id=_WS_A)
 
 
 # ---------------------------------------------------------------------------
@@ -360,7 +363,7 @@ async def test_mcp_list_sources_returns_sources_key() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     app = _make_app(factory=factory)
-    result = await mcp_list_sources(app=app)
+    result = await mcp_list_sources(app=app, workspace_id=_WS_A)
 
     assert "sources" in result
     assert len(result["sources"]) == 1
@@ -389,7 +392,7 @@ async def test_mcp_list_sources_is_stale_when_no_sync() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     app = _make_app(factory=factory)
-    result = await mcp_list_sources(app=app)
+    result = await mcp_list_sources(app=app, workspace_id=_WS_A)
 
     assert result["sources"][0]["is_stale"] is True
 
@@ -414,7 +417,7 @@ async def test_mcp_list_sources_not_stale_when_recent() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     app = _make_app(factory=factory)
-    result = await mcp_list_sources(app=app)
+    result = await mcp_list_sources(app=app, workspace_id=_WS_A)
 
     assert result["sources"][0]["is_stale"] is False
 
@@ -447,7 +450,7 @@ async def test_mcp_source_stats_returns_full_stats() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     app = _make_app(factory=factory)
-    result = await mcp_source_stats(app=app, source_id=str(_SRC_ID))
+    result = await mcp_source_stats(app=app, source_id=str(_SRC_ID), workspace_id=_WS_A)
 
     assert result["indexed_document_count"] == 100
     assert result["indexed_chunk_count"] == 1500
@@ -478,7 +481,7 @@ async def test_mcp_source_stats_no_run() -> None:
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
 
     app = _make_app(factory=factory)
-    result = await mcp_source_stats(app=app, source_id=str(_SRC_ID))
+    result = await mcp_source_stats(app=app, source_id=str(_SRC_ID), workspace_id=_WS_A)
 
     assert result["last_ingestion_run"] is None
 
@@ -495,7 +498,7 @@ async def test_mcp_source_stats_raises_on_missing_source() -> None:
 
     app = _make_app(factory=factory)
     with pytest.raises(ValueError, match="source_not_found"):
-        await mcp_source_stats(app=app, source_id=str(uuid.uuid4()))
+        await mcp_source_stats(app=app, source_id=str(uuid.uuid4()), workspace_id=_WS_A)
 
 
 # ---------------------------------------------------------------------------

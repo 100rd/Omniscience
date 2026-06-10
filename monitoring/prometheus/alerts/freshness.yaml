@@ -1,0 +1,35 @@
+# Prometheus alert rules for source freshness SLO (issue #89 / scheduler blind-spot).
+#
+# Metric: omniscience_source_stale_total (Gauge)
+#   Defined in: packages/core/src/omniscience_core/telemetry/metrics.py
+#   Semantics: number of active sources currently exceeding their
+#              freshness_sla_seconds budget as evaluated by FreshnessChecker.
+#   Set to 0 when all sources are within SLA; increments per stale source.
+#
+# This file mirrors the alert that previously lived only in the inactive
+# Grafana profile (monitoring/grafana/dashboards/freshness.json, panel
+# "omniscience-freshness-stale-alert"). Promoting it to a Prometheus rule
+# ensures the alert fires regardless of Grafana availability and is picked up
+# by Alertmanager.
+#
+# Load this file via the standard `rule_files:` directive in prometheus.yml.
+groups:
+  - name: omniscience-freshness
+    interval: 1m
+    rules:
+      - alert: SourceFreshnessViolation
+        expr: omniscience_source_stale_total > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: freshness-checker
+        annotations:
+          summary: "One or more Omniscience sources have exceeded their freshness SLO"
+          description: |
+            {{ $value }} source(s) have been stale (exceeding freshness_sla_seconds)
+            for at least 5 minutes (omniscience_source_stale_total = {{ $value }}).
+            Common causes: scheduler worker not running, NATS publish failures,
+            or source has no freshness_sla_seconds set (seed_from_docs.py was not
+            updated). Check scheduler logs and verify last_sync_at is advancing.
+          runbook_url: "docs/runbooks/freshness.md#sourcefreshnessviolation"

@@ -1,8 +1,10 @@
 """Seed pre-fetched documents (JSON) into Omniscience with real Ollama embeddings.
 
 Reads /tmp/docs.json (list of {external_id, uri, title, text, metadata}) and a source
-name from argv, then upserts each as a single-chunk document via IndexWriter.
-Run inside the app container:  /app/.venv/bin/python /tmp/seed_from_docs.py <source_name>
+name (+ optional source type, default "k8s") from argv, then upserts each as a
+single-chunk document via IndexWriter.
+Run inside the app container:
+    /app/.venv/bin/python /tmp/seed_from_docs.py <source_name> [<source_type>]
 """
 
 import asyncio
@@ -19,10 +21,11 @@ from omniscience_index.stores.neo4j_store import Neo4jGraphStore, Neo4jStoreConf
 from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from omniscience_index.writer import ChunkData, IndexWriter
-from sqlalchemy import delete
+from sqlalchemy import select
 
 WS_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 SOURCE_NAME = sys.argv[1] if len(sys.argv) > 1 else "external-docs"
+SOURCE_TYPE = SourceType(sys.argv[2]) if len(sys.argv) > 2 else SourceType.k8s
 
 
 async def seed() -> None:
@@ -44,20 +47,29 @@ async def seed() -> None:
     await graph_store.connect()
     await vector_store.connect()
 
-    src_id = uuid.uuid4()
+    # Get-or-create the source: the (source_id, external_id) pair is the
+    # IndexWriter dedup key, so the source id must survive across runs —
+    # a fresh id per run orphans every previous run's Qdrant points.
     async with session_factory() as session:
-        await session.execute(delete(Source).where(Source.name == SOURCE_NAME))
-        session.add(
-            Source(
-                id=src_id,
+        src = (
+            await session.execute(
+                select(Source).where(Source.tenant_id == WS_ID, Source.name == SOURCE_NAME)
+            )
+        ).scalar_one_or_none()
+        if src is None:
+            src = Source(
+                id=uuid.uuid4(),
                 name=SOURCE_NAME,
-                type=SourceType.k8s,
-                config={"cluster": "qbiq-shared"},
+                type=SOURCE_TYPE,
+                config={"seeded_by": "seed_from_docs"},
                 tenant_id=WS_ID,
                 status=SourceStatus.active,
+                # 30 min SLA enables FreshnessChecker staleness alerts.
+                freshness_sla_seconds=1800,
             )
-        )
-        await session.commit()
+            session.add(src)
+            await session.commit()
+        src_id = src.id
 
     writer = IndexWriter(session_factory, graph_store, vector_store)
     model = getattr(settings, "ollama_embedding_model", None) or "nomic-embed-text"
@@ -65,6 +77,7 @@ async def seed() -> None:
     # Batch-embed all texts for speed.
     texts = [d["text"] for d in docs]
     vectors = await provider.embed(texts)
+    actions: dict[str, int] = {}
     for i, d in enumerate(docs):
         chunk = ChunkData(
             ord=0,
@@ -74,7 +87,7 @@ async def seed() -> None:
             embedding_provider="ollama",
             metadata=d.get("metadata", {}),
         )
-        await writer.upsert_document(
+        result = await writer.upsert_document(
             source_id=src_id,
             external_id=d["external_id"],
             uri=d["uri"],
@@ -84,7 +97,10 @@ async def seed() -> None:
             chunks=[chunk],
             workspace_id=WS_ID,
         )
-    print(f"Seeded {len(docs)} documents into source '{SOURCE_NAME}' (workspace {WS_ID})")
+        actions[result.action] = actions.get(result.action, 0) + 1
+    print(
+        f"Seeded {len(docs)} documents into source '{SOURCE_NAME}' (workspace {WS_ID}): {actions}"
+    )
     await vector_store.close()
     await graph_store.close()
     await engine.dispose()

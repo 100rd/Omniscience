@@ -319,8 +319,11 @@ async def get_document(
     _require_scope(token, Scope.search)
     _record_tool_invocation(tool_name="get_document", token=token)
 
+    workspace_id = get_workspace_id(token) if token is not None else None
     try:
-        return await mcp_get_document(app=_get_app(), document_id=document_id)
+        return await mcp_get_document(
+            app=_get_app(), document_id=document_id, workspace_id=workspace_id
+        )
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("document_not_found:"):
@@ -457,7 +460,8 @@ async def list_sources(
     _require_scope(token, Scope.sources_read)
     _record_tool_invocation(tool_name="list_sources", token=token)
 
-    return await mcp_list_sources(app=_get_app())
+    workspace_id = get_workspace_id(token) if token is not None else None
+    return await mcp_list_sources(app=_get_app(), workspace_id=workspace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -478,8 +482,11 @@ async def source_stats(
     _require_scope(token, Scope.sources_read)
     _record_tool_invocation(tool_name="source_stats", token=token)
 
+    workspace_id = get_workspace_id(token) if token is not None else None
     try:
-        return await mcp_source_stats(app=_get_app(), source_id=source_id)
+        return await mcp_source_stats(
+            app=_get_app(), source_id=source_id, workspace_id=workspace_id
+        )
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("source_not_found:"):

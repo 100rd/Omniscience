@@ -39,6 +39,8 @@ from omniscience_retrieval.models import QueryStats, SearchHit, SearchResult
 from omniscience_server.app import create_app
 from omniscience_server.rest.rate_limit import check_rate_limit, clear_all_buckets
 
+_WS_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -47,6 +49,7 @@ from omniscience_server.rest.rate_limit import check_rate_limit, clear_all_bucke
 def _make_token(
     scopes: list[str],
     plaintext: str | None = None,
+    workspace_id: uuid.UUID | None = None,
 ) -> tuple[ApiToken, str]:
     """Build an ApiToken mock and matching plaintext."""
     pt, prefix = generate_token("test")
@@ -59,6 +62,12 @@ def _make_token(
     tok.token_prefix = prefix
     tok.hashed_token = hashed
     tok.scopes = scopes
+    # workspace_id: use the explicitly supplied value when provided;
+    # otherwise leave the MagicMock spec attribute in place so that
+    # existing tests (which never set workspace_id) still route through
+    # _require_workspace without an explicit None.
+    if workspace_id is not None:
+        tok.workspace_id = workspace_id
     tok.expires_at = None
     tok.is_active = True
     tok.last_used_at = None
@@ -707,8 +716,9 @@ async def test_create_source_returns_201() -> None:
 @pytest.mark.asyncio
 async def test_delete_source_204() -> None:
     """DELETE /api/v1/sources/{id} returns 204 when source exists."""
-    tok, pt = _make_token(["sources:write"])
+    tok, pt = _make_token(["sources:write"], workspace_id=_WS_A)
     src = _make_source()
+    src.tenant_id = _WS_A
 
     auth_session = _make_session(scalars=[tok])
     del_session = _make_session(get_result=src)
@@ -794,8 +804,9 @@ async def test_update_source_requires_write_scope() -> None:
 @pytest.mark.asyncio
 async def test_trigger_sync_creates_run() -> None:
     """POST /api/v1/sources/{id}/sync creates a run and returns run_id."""
-    tok, pt = _make_token(["sources:write"])
+    tok, pt = _make_token(["sources:write"], workspace_id=_WS_A)
     src = _make_source()
+    src.tenant_id = _WS_A
     run_id = uuid.uuid4()
 
     auth_session = _make_session(scalars=[tok])
@@ -890,14 +901,25 @@ def _make_chunk(document_id: uuid.UUID) -> Chunk:
 @pytest.mark.asyncio
 async def test_get_document_returns_document_and_chunks() -> None:
     """GET /api/v1/documents/{id} returns document + chunks."""
-    tok, pt = _make_token(["search"])
+    tok, pt = _make_token(["search"], workspace_id=_WS_A)
     doc = _make_document()
     chunk = _make_chunk(doc.id)
+
+    # Source mock whose tenant_id matches the token's workspace.
+    from omniscience_core.db.models import Source as _Source
+
+    src_mock: Any = MagicMock(spec=_Source)
+    src_mock.id = doc.source_id
+    src_mock.tenant_id = _WS_A
+    src_mock.name = "test-source"
+    src_mock.type = SourceType.git
 
     auth_session = _make_session(scalars=[tok])
 
     doc_session = AsyncMock()
-    doc_session.get = AsyncMock(return_value=doc)
+    # First call: db.get(Document, id) → doc
+    # Second call: db.get(Source, doc.source_id) → src_mock
+    doc_session.get = AsyncMock(side_effect=[doc, src_mock])
 
     async def _execute(stmt: Any) -> Any:
         result = MagicMock()
