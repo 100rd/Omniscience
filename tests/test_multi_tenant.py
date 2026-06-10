@@ -2,15 +2,18 @@
 
 Coverage:
 - Workspace model and Pydantic schemas (WorkspaceCreate, WorkspaceRead)
-- get_workspace_id helper
-- workspace_filter helper applied to SELECT statements
+- get_workspace_id helper — including fail-closed behaviour for legacy tokens
+- workspace_filter helper applied to SELECT statements — strict equality only
 - ApiToken workspace_id field propagation
 - create_api_token with workspace_id argument
-- Backward-compat: tokens/queries without workspace_id
+- Security: NULL-tenant rows are NOT visible to any workspace token
+- Security: legacy token without workspace_id raises PermissionError
+- Backfill logic: workspace_filter no longer includes OR-NULL clause
 """
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -20,7 +23,11 @@ import pytest
 from omniscience_core.auth.tokens import (
     create_api_token,
 )
-from omniscience_core.auth.workspace import get_workspace_id, workspace_filter
+from omniscience_core.auth.workspace import (
+    DEFAULT_WORKSPACE_ID,
+    get_workspace_id,
+    workspace_filter,
+)
 from omniscience_core.db.models import ApiToken, Workspace
 from omniscience_core.db.schemas import (
     ApiTokenCreate,
@@ -38,6 +45,18 @@ from sqlalchemy.dialects.postgresql import UUID
 _DEFAULT_WS_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 _ALPHA_WS_ID = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 _BETA_WS_ID = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000002")
+
+# SQLAlchemy renders UUID literals without dashes when using literal_binds.
+_ALPHA_WS_HEX = _ALPHA_WS_ID.hex  # 'aaaaaaaa000000000000000000000001'
+_BETA_WS_HEX = _BETA_WS_ID.hex
+_DEFAULT_WS_HEX = _DEFAULT_WS_ID.hex  # '00000000000000000000000000000001'
+
+# Pattern that matches SQL "OR" as a keyword (word boundary), NOT as a
+# substring inside column names like "wORkspace_id".
+_RE_SQL_OR = re.compile(r"\bOR\b", re.IGNORECASE)
+
+# Pattern that matches IS NULL anywhere in the SQL string.
+_RE_IS_NULL = re.compile(r"\bIS\s+NULL\b", re.IGNORECASE)
 
 
 def _make_token(
@@ -73,6 +92,25 @@ def _make_workspace(
     ws.created_at = datetime.now(tz=UTC)
     ws.updated_at = datetime.now(tz=UTC)
     return ws
+
+
+def _make_table_with_cols(*col_names: str) -> Table:
+    """Build a bare SQLAlchemy Table with the specified column names."""
+    meta = MetaData()
+    cols = [Column("id", UUID(as_uuid=True), primary_key=True)]
+    for name in col_names:
+        cols.append(Column(name, UUID(as_uuid=True), nullable=True))
+    return Table("_test_table", meta, *cols)
+
+
+# ---------------------------------------------------------------------------
+# DEFAULT_WORKSPACE_ID constant
+# ---------------------------------------------------------------------------
+
+
+def test_default_workspace_id_matches_seeded_value() -> None:
+    """DEFAULT_WORKSPACE_ID must equal the UUID seeded by migration 0003."""
+    assert uuid.UUID("00000000-0000-0000-0000-000000000001") == DEFAULT_WORKSPACE_ID
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +185,7 @@ def test_workspace_read_different_ids() -> None:
 
 
 # ---------------------------------------------------------------------------
-# get_workspace_id
+# get_workspace_id — happy paths
 # ---------------------------------------------------------------------------
 
 
@@ -156,13 +194,6 @@ def test_get_workspace_id_returns_uuid_when_set() -> None:
     token = _make_token(workspace_id=_ALPHA_WS_ID)
     result = get_workspace_id(token)
     assert result == _ALPHA_WS_ID
-
-
-def test_get_workspace_id_returns_none_for_legacy_token() -> None:
-    """get_workspace_id returns None when workspace_id is not set."""
-    token = _make_token(workspace_id=None)
-    result = get_workspace_id(token)
-    assert result is None
 
 
 def test_get_workspace_id_default_workspace() -> None:
@@ -180,25 +211,47 @@ def test_get_workspace_id_different_workspaces() -> None:
 
 
 # ---------------------------------------------------------------------------
-# workspace_filter — pass-through cases
+# get_workspace_id — fail-closed for legacy tokens (workspace_id is None)
 # ---------------------------------------------------------------------------
 
 
-def _make_table_with_cols(*col_names: str) -> Table:
-    """Build a bare SQLAlchemy Table with the specified column names."""
-    meta = MetaData()
-    cols = [Column("id", UUID(as_uuid=True), primary_key=True)]
-    for name in col_names:
-        cols.append(Column(name, UUID(as_uuid=True), nullable=True))
-    return Table("_test_table", meta, *cols)
+def test_get_workspace_id_raises_for_legacy_token() -> None:
+    """get_workspace_id raises PermissionError when workspace_id is None.
+
+    Security invariant: a token without a workspace cannot see any data.
+    This replaces the previous behaviour of returning None (which callers
+    would treat as 'no restriction').
+    """
+    token = _make_token(workspace_id=None)
+    with pytest.raises(PermissionError, match="forbidden:workspace_required"):
+        get_workspace_id(token)
 
 
-def test_workspace_filter_passthrough_when_no_workspace_id() -> None:
-    """workspace_filter returns the query unchanged when workspace_id is None."""
-    tbl = _make_table_with_cols("workspace_id")
-    base_query = select(tbl)
-    result = workspace_filter(base_query, None)
-    assert result is base_query
+def test_get_workspace_id_legacy_token_never_returns_none() -> None:
+    """get_workspace_id never returns None — it always raises instead."""
+    token = _make_token(workspace_id=None)
+    raised = False
+    try:
+        result = get_workspace_id(token)
+        # If we get here, result must not be None (belt-and-suspenders).
+        assert result is not None
+    except PermissionError:
+        raised = True
+    assert raised, "Expected PermissionError for legacy token"
+
+
+def test_get_workspace_id_error_message_is_descriptive() -> None:
+    """PermissionError message contains 'forbidden' and 'workspace_required'."""
+    token = _make_token(workspace_id=None)
+    with pytest.raises(PermissionError) as exc_info:
+        get_workspace_id(token)
+    assert "forbidden" in str(exc_info.value)
+    assert "workspace_required" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# workspace_filter — pass-through for unscoped tables
+# ---------------------------------------------------------------------------
 
 
 def test_workspace_filter_passthrough_for_unscoped_table() -> None:
@@ -210,7 +263,7 @@ def test_workspace_filter_passthrough_for_unscoped_table() -> None:
 
 
 # ---------------------------------------------------------------------------
-# workspace_filter — workspace_id column
+# workspace_filter — strict equality on workspace_id column
 # ---------------------------------------------------------------------------
 
 
@@ -222,6 +275,24 @@ def test_workspace_filter_adds_clause_for_workspace_id_col() -> None:
     compiled = str(filtered.compile(compile_kwargs={"literal_binds": False}))
     assert "workspace_id" in compiled
     assert filtered is not base_query
+
+
+def test_workspace_filter_does_not_include_null_branch_for_workspace_id_col() -> None:
+    """Security: workspace_filter must NOT emit OR workspace_id IS NULL.
+
+    Before migration 0010_backfill_null_tenant, the helper used
+    ``or_(col == ws, col == null())`` which exposed NULL-tenant rows to every
+    workspace token.  After backfill, only strict equality is emitted.
+
+    Note: _RE_SQL_OR uses word boundary (\\bOR\\b) to avoid false positives
+    from 'OR' appearing inside column names like 'wORkspace_id'.
+    """
+    tbl = _make_table_with_cols("workspace_id")
+    base_query = select(tbl)
+    filtered = workspace_filter(base_query, _ALPHA_WS_ID)
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    assert not _RE_IS_NULL.search(compiled), "IS NULL must not appear in compiled SQL"
+    assert not _RE_SQL_OR.search(compiled), "OR keyword must not appear in compiled SQL"
 
 
 def test_workspace_filter_different_workspace_ids_produce_different_queries() -> None:
@@ -244,7 +315,7 @@ def test_workspace_filter_different_workspace_ids_produce_different_queries() ->
 
 
 # ---------------------------------------------------------------------------
-# workspace_filter — tenant_id column (legacy sources table)
+# workspace_filter — strict equality on tenant_id column (legacy sources table)
 # ---------------------------------------------------------------------------
 
 
@@ -258,12 +329,98 @@ def test_workspace_filter_uses_tenant_id_col_as_fallback() -> None:
     assert filtered is not base_query
 
 
-def test_workspace_filter_tenant_id_passthrough_when_workspace_id_none() -> None:
-    """workspace_filter returns query unchanged for tenant_id tables when workspace is None."""
+def test_workspace_filter_does_not_include_null_branch_for_tenant_id_col() -> None:
+    """Security: workspace_filter must NOT emit OR tenant_id IS NULL.
+
+    This is the critical cross-tenant vector: prior to migration 0010 a row
+    in ``sources`` with tenant_id IS NULL was returned to *every* workspace
+    token because of the ``or_(col == ws, col == null())`` clause.  After
+    backfill and this fix, only ``tenant_id = :workspace_id`` is emitted.
+    """
     tbl = _make_table_with_cols("tenant_id")
     base_query = select(tbl)
-    result = workspace_filter(base_query, None)
-    assert result is base_query
+    filtered = workspace_filter(base_query, _ALPHA_WS_ID)
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    assert not _RE_IS_NULL.search(compiled), "IS NULL must not appear in compiled SQL"
+    assert not _RE_SQL_OR.search(compiled), "OR keyword must not appear in compiled SQL"
+
+
+def test_workspace_filter_null_tenant_row_not_visible_to_alpha() -> None:
+    """Security: a NULL-tenant row does NOT satisfy the alpha workspace filter.
+
+    After backfill, workspace_filter(q, _ALPHA_WS_ID) only matches
+    tenant_id = _ALPHA_WS_ID.  A row with tenant_id IS NULL would not match.
+    SQLAlchemy renders UUID literal without dashes; we check hex form.
+    """
+    tbl = _make_table_with_cols("tenant_id")
+    base_query = select(tbl)
+    filtered = workspace_filter(base_query, _ALPHA_WS_ID)
+    compiled_literal = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    # The literal bind must be the ALPHA UUID hex (no dashes in SA render).
+    assert _ALPHA_WS_HEX in compiled_literal
+    assert not _RE_IS_NULL.search(compiled_literal)
+
+
+def test_workspace_filter_alpha_and_beta_produce_disjoint_filters_for_tenant_id() -> None:
+    """Filters for alpha and beta workspaces are structurally equal but bind-param different."""
+    tbl = _make_table_with_cols("tenant_id")
+    base_query = select(tbl)
+    q_alpha = workspace_filter(base_query, _ALPHA_WS_ID)
+    q_beta = workspace_filter(base_query, _BETA_WS_ID)
+    alpha_params = q_alpha.compile().params
+    beta_params = q_beta.compile().params
+    assert any(
+        alpha_params.get(k) != beta_params.get(k) for k in set(alpha_params) | set(beta_params)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Backfill migration logic: default workspace constant aligns with migration
+# ---------------------------------------------------------------------------
+
+
+def test_backfill_default_workspace_id_constant() -> None:
+    """The DEFAULT_WORKSPACE_ID exported from workspace.py matches migration 0003.
+
+    Migration 0003_workspaces seeds ``00000000-0000-0000-0000-000000000001``
+    as the default workspace.  Migration 0010_backfill_null_tenant assigns
+    this same UUID to all NULL-tenant rows.  This test ensures the constant
+    used at runtime matches that seeded value.
+    """
+    assert uuid.UUID("00000000-0000-0000-0000-000000000001") == DEFAULT_WORKSPACE_ID
+
+
+def test_backfill_workspace_filter_after_backfill_returns_default_rows() -> None:
+    """After backfill, default-workspace token can read ex-NULL rows.
+
+    Before backfill: NULL rows were readable by everyone via OR-NULL clause.
+    After backfill: NULL rows become tenant_id=DEFAULT_WS rows; they are
+    now readable only by the default workspace token (strict equality match).
+    SQLAlchemy renders UUID literals without dashes; we compare using .hex.
+    """
+    tbl = _make_table_with_cols("tenant_id")
+    base_query = select(tbl)
+    filtered = workspace_filter(base_query, _DEFAULT_WS_ID)
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": True}))
+    # Should contain the default workspace UUID hex literal.
+    assert _DEFAULT_WS_HEX in compiled
+    assert not _RE_IS_NULL.search(compiled)
+
+
+def test_backfill_workspace_filter_alpha_does_not_match_default_rows() -> None:
+    """After backfill, alpha workspace cannot read default-workspace rows.
+
+    The strict equality filter ``tenant_id = :alpha_uuid`` will never match
+    rows that now carry ``tenant_id = :default_uuid``.
+    SQLAlchemy renders UUID literals without dashes; we compare using .hex.
+    """
+    tbl = _make_table_with_cols("tenant_id")
+    base_query = select(tbl)
+    filtered_alpha = workspace_filter(base_query, _ALPHA_WS_ID)
+    compiled = str(filtered_alpha.compile(compile_kwargs={"literal_binds": True}))
+    # Alpha UUID hex is bound, not the default UUID hex.
+    assert _ALPHA_WS_HEX in compiled
+    assert _DEFAULT_WS_HEX not in compiled
 
 
 # ---------------------------------------------------------------------------
@@ -307,7 +464,7 @@ def test_api_token_read_includes_workspace_id() -> None:
 
 
 def test_api_token_read_workspace_id_none_for_legacy() -> None:
-    """ApiTokenRead returns None workspace_id for legacy tokens."""
+    """ApiTokenRead returns None workspace_id for legacy tokens (schema preserves raw value)."""
     token = _make_token(workspace_id=None)
     read = ApiTokenRead.model_validate(token)
     assert read.workspace_id is None
@@ -404,6 +561,11 @@ def test_api_token_has_workspace_id_column() -> None:
 
 
 def test_api_token_workspace_id_is_nullable() -> None:
-    """ApiToken.workspace_id column is nullable for backward compatibility."""
+    """ApiToken.workspace_id column is nullable (for DB-level backward compat).
+
+    Note: the Python layer enforces non-null via get_workspace_id() raising
+    PermissionError.  The DB column remains nullable so that migration 0010
+    can run as a plain UPDATE without schema changes.
+    """
     col = ApiToken.__table__.c["workspace_id"]
     assert col.nullable is True

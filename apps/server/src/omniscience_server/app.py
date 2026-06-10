@@ -53,6 +53,7 @@ from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.mcp.server import mcp_server
 from omniscience_server.middleware import TelemetryMiddleware, TracingMiddleware
+from omniscience_server.reconcile_worker import ReconcileWorker
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.rest.otlp_ingester import OtlpIngester
 from omniscience_server.retention_worker import RetentionWorker
@@ -322,6 +323,20 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.retention_worker = None
         log.info("retention_worker_disabled")
 
+    # --- Reconcile worker ---
+    reconcile_worker = ReconcileWorker(
+        session_factory=session_factory,
+        vector_store=qdrant_store,
+        graph_store=neo4j_graph_store,
+        settings=settings,
+    )
+    reconcile_task = asyncio.create_task(reconcile_worker.start())
+    app.state.reconcile_worker = reconcile_worker
+    log.info(
+        "reconcile_worker_started",
+        tick_seconds=getattr(settings, "reconcile_tick_seconds", 3600),
+    )
+
     # --- Scheduler worker ---
     scheduler_task: asyncio.Task[None] | None = None
     scheduler: SchedulerWorker | None = None
@@ -357,6 +372,9 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     freshness_worker.stop()
     freshness_task.cancel()
+
+    reconcile_worker.stop()
+    reconcile_task.cancel()
 
     if scheduler is not None and scheduler_task is not None:
         await scheduler.stop()

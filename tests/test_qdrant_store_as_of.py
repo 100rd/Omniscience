@@ -464,35 +464,42 @@ async def test_cross_workspace_isolation_under_as_of(
 async def test_as_of_none_no_regression_on_filter_shape(
     qdrant_store: QdrantVectorStore,
 ) -> None:
-    """The ``as_of=None`` filter has no ``valid_*`` clauses — pre-#134 wire shape.
+    """The ``as_of=None`` filter shape after Stage 1 (refactor/bitemporal-vector-hybrid).
 
-    Compares the wire-shape filter the adapter emits when ``as_of=None``
-    against the filter the same builder emits today (no bitemporal
-    clauses).  Byte-identity at the structural level is the strongest
-    no-regression assertion: a current-state search pays exactly the
-    same predicate cost as before #134.
+    Stage 1 amendment: ``as_of=None`` now includes ``with_current_only()``
+    (``valid_to IS NULL``) so end-dated historical chunk versions from the
+    write-path end-dating are excluded from current-state results.  The
+    structural comparison is therefore against
+    ``exclude_tombstoned().with_current_only()`` — not the plain pre-#134
+    ``exclude_tombstoned()`` shape.  ``valid_from`` is still absent from
+    the current-state filter; only ``valid_to IS NULL`` (an IsNullCondition,
+    not a FieldCondition with a ``key``) is added.
     """
     from omniscience_index.stores.qdrant_constants import (
         PAYLOAD_VALID_FROM as _VF,
     )
-    from omniscience_index.stores.qdrant_constants import (
-        PAYLOAD_VALID_TO as _VT,
-    )
     from omniscience_index.stores.qdrant_filters import QdrantFilterBuilder
     from omniscience_retrieval.models import SearchRequest
+    from qdrant_client import models as qm
 
     ws = uuid.uuid4()
     request = SearchRequest(query="x", top_k=5)
     flt_with_none = qdrant_store._request_to_filter(  # type: ignore[attr-defined]
         request=request, workspace_id=ws, as_of=None
     )
-    flt_legacy = QdrantFilterBuilder(workspace_id=ws).exclude_tombstoned().build()
-    # The two filters must serialise identically.
-    assert flt_with_none.model_dump() == flt_legacy.model_dump()
-    # And no valid_* keys are present.
-    keys = [c.key for c in (flt_with_none.must or []) if isinstance(c, qm.FieldCondition)]
-    assert _VF not in keys
-    assert _VT not in keys
+    # Stage 1: current-state filter = workspace + exclude_tombstoned + current_only.
+    flt_stage1 = (
+        QdrantFilterBuilder(workspace_id=ws).exclude_tombstoned().with_current_only().build()
+    )
+    assert flt_with_none.model_dump() == flt_stage1.model_dump()
+    # valid_from is NOT a FieldCondition key in the current-state filter.
+    field_keys = [c.key for c in (flt_with_none.must or []) if isinstance(c, qm.FieldCondition)]
+    assert _VF not in field_keys
+    # valid_to IS present — but as an IsNullCondition, not a FieldCondition key.
+    null_conditions = [c for c in (flt_with_none.must or []) if isinstance(c, qm.IsNullCondition)]
+    # There should be exactly two IsNullCondition clauses:
+    # one for tombstoned_at, one for valid_to.
+    assert len(null_conditions) == 2
 
 
 @pytest.mark.asyncio
@@ -607,7 +614,16 @@ async def test_count_chunks_honours_as_of(
         valid_to=None,
         external_id="c3",
     )
+    # Stage 1 (refactor/bitemporal-vector-hybrid): count_chunks(as_of=None)
+    # applies ``with_current_only()`` (valid_to IS NULL) so only the
+    # still-open current generation is counted.  Of the three planted
+    # chunks, only c3 has ``valid_to=None`` — c1 and c2 have explicit
+    # closed windows that Stage 1 treats as historical versions.
     total = await qdrant_store.count_chunks(workspace_id=ws)
     at_t1 = await qdrant_store.count_chunks(workspace_id=ws, as_of=_T1)
-    assert total == 3
+    assert total == 1, (
+        f"count_chunks(as_of=None) must count only current-gen points "
+        f"(valid_to IS NULL); c1+c2 have closed valid_to, only c3 is current. "
+        f"Got {total}."
+    )
     assert at_t1 == 1

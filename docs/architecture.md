@@ -28,14 +28,14 @@
                                           │
                            ┌──────────────▼───────────────────┐
                            │      Retrieval Service            │
-                           │  hybrid: vector + tsvector +      │
+                           │  hybrid: Qdrant dense+sparse RRF + │
                            │  graph traversal + ACL filter +   │
                            │  freshness filter                 │
                            └──────────────┬───────────────────┘
                                           │
                 ┌─────────────────────────▼─────────────────────┐
                 │                 Index Layer                    │
-                │  pgvector · tsvector · symbol graph ·          │
+                │  Qdrant (dense+sparse) · Neo4j graph ·          │
                 │  tombstones · content-hash dedup               │
                 └─────────────────────────┬─────────────────────┘
                                           │
@@ -81,46 +81,36 @@ Failures flow to DLQ. Retries are bounded with exponential backoff. Freshness SL
 
 ### 3. Index layer (`packages/index/`)
 
-PostgreSQL-backed:
+**v0.2+ backend split** (ADR-0005 + ADR-0006; see also [ADR-0008](decisions/0008-bitemporal-schema-for-neo4j.md)):
 
-- `documents` — one row per source doc, with `content_hash` and `tombstoned_at`
-- `chunks` — one row per chunk, with `embedding vector`, `text_tsv`, `metadata jsonb`
-- HNSW index on embeddings (cosine)
-- GIN index on tsvector (full-text)
+- **Postgres** (`documents`, `chunks`, `ingestion_runs`, `sources`) — operational metadata, lineage, content-hash dedup, tombstones. No embeddings column after cutover.
+- **Qdrant** — chunk embeddings (named vector `dense_primary`) + sparse BM25 vectors (named vector `sparse_bm25`) + per-point payload (workspace_id, source_id, text, metadata, bitemporal fields). One collection per embedding model × dimension.
+- **Neo4j** — entities, edges, ownership / dependency graph. Bitemporal properties (`valid_from`, `valid_to`, `recorded_at`) per ADR-0008.
 
-Single source of truth. No separate vector DB.
+**Bitemporal write path** (Stage 1, `refactor/bitemporal-vector-hybrid`): when a document's `content_hash` changes, old Qdrant points are **end-dated** (`valid_to = now()`) rather than hard-deleted. `as_of=T` queries on Qdrant return the chunk version valid at T, consistent with the Neo4j graph state at T (ADR-0008 §6).
+
+**Enumerate mode** (Stage 4): `enumerate_chunks` / `count_enumerate` bypass HNSW and use Qdrant payload indexes + `count(exact=True)` + `scroll` for 100% recall on "list all X / count all Y" queries.
 
 ### 4. Retrieval service (`packages/retrieval/`)
 
-Hybrid search — **staged**, see [ADR 0004](decisions/0004-retrieval-strategy-staged.md).
+Hybrid search — **staged**, see [ADR-0004](decisions/0004-retrieval-strategy-staged.md) and its Stage 3 amendment.
 
-#### v0.1 — Hybrid baseline
+`GraphRAGComposer` dispatches per `retrieval_strategy`:
 
-1. **Vector** — pgvector HNSW top-K
-2. **BM25-like** — tsvector ranking
-3. **Merge** — reciprocal rank fusion
-4. **Filter** — ACL, source subset, freshness cap
+| `retrieval_strategy` | Dense (Qdrant HNSW) | Sparse (Qdrant BM25) | Graph (Neo4j) |
+|---|---|---|---|
+| `"hybrid"` (default) | yes | yes — RRF merge | anchor stage |
+| `"auto"` | yes | yes — RRF merge | anchor stage |
+| `"keyword"` | no | yes — sparse only | anchor stage |
+| `"structural"` | yes — dense only | no | anchor stage |
 
-#### v0.2 — Adaptive retrieval
+**RRF merge** (k=60, Cormack et al. 2009): `score(d) = Σ 1/(60 + rank_i(d))` over dense and sparse ranked lists. Graph-affinity re-scoring is applied on top by `GraphRAGComposer._run_merge_stage`.
 
-Add structural strategies using edges already present in source data (no LLM extraction):
+**`retrieval_strategy` was accepted but ignored before Stage 3** (branch `refactor/bitemporal-vector-hybrid`). All four values now drive real dispatch.
 
-- **Code**: imports, calls, class inheritance — from tree-sitter output
-- **Infrastructure**: DEPENDS_ON from Terraform state, k8s ownerReferences, Helm chart deps
-- **Docs**: markdown links, ADR supersedes
-- **Cross-source entity linking**: resource-name matching across connectors
+**Bitemporal search** (`as_of` parameter): both graph traversal and Qdrant vector search honour `as_of=T`, returning the system state as it was at T. The open-closed predicate `valid_from <= T AND (T < valid_to OR valid_to IS NULL)` is applied via `QdrantFilterBuilder.with_as_of()`.
 
-Storage: same Postgres, new `entities` + `edges` tables. Queries via recursive CTEs or Apache AGE (Cypher). **No separate graph database.**
-
-Callers (or an internal `"auto"` classifier) select the strategy per query via the `retrieval_strategy` parameter.
-
-#### v0.3+ — Full GraphRAG (optional, triggered by evidence)
-
-LLM-extracted entities + community detection — only if v0.2 structural coverage leaves clear gaps on text-heavy sources (ADRs, post-mortems, wikis).
-
-#### v0.3 — Re-ranking
-
-Cross-encoder second pass over top-N to boost precision. Cheap quality win.
+**Degraded detector**: when an anchor entity is not found in the graph at `as_of` AND the vector layer also returns empty, `SearchResult.meta.degraded_response = "as_of_before_recorded_history"` signals that the query precedes any recorded history for that entity. After Stage 1 end-dating this is a genuine signal — not a content-rewrite artefact.
 
 Returns chunks with citations and provenance.
 
@@ -221,11 +211,12 @@ MCP client (Claude Code)
 ┌──────────────────┐
 │ Retrieval service│
 │  1. embed(query) │
-│  2. vector top-K │──┐
-│  3. tsvector rank│──┤
-│  4. RRF merge    │◀─┘
-│  5. ACL filter   │
-│  6. freshness    │
+│  2. Qdrant dense │──┐
+│  3. Qdrant sparse│──┤
+│  4. RRF(k=60)    │◀─┘
+│  5. graph anchor │
+│  6. ACL filter   │
+│  7. freshness    │
 │     filter       │
 └────────┬─────────┘
          ▼

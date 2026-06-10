@@ -10,7 +10,8 @@ The handler extracts workspace_id from the bearer token and verifies that
 the document's parent Source belongs to the same workspace.  A mismatch
 returns 404 — not 403 — to avoid leaking document/source existence to
 other tenants.  Legacy tokens without workspace_id are rejected fail-closed
-with 403.
+with 403: ``get_workspace_id`` raises ``PermissionError`` which the global
+handler in ``rest/errors.py`` converts to HTTP 403.
 """
 
 from __future__ import annotations
@@ -59,23 +60,14 @@ async def get_document(
 
     Returns 404 when the document does not exist OR when its parent source
     belongs to a different workspace than the caller's token.
-    Legacy tokens (no workspace_id) are rejected fail-closed with 403.
+    Legacy tokens (no workspace_id) are rejected fail-closed with 403:
+    get_workspace_id raises PermissionError, caught by the global handler.
 
     Requires scope: ``search``
     """
+    # PermissionError from get_workspace_id (legacy token) is caught by the
+    # global handler in rest/errors.py and rendered as HTTP 403.
     workspace_id = get_workspace_id(token)
-    if workspace_id is None:
-        log.warning(
-            "documents_endpoint_rejected_no_workspace",
-            token_prefix=token.token_prefix,
-        )
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "forbidden",
-                "message": "Documents endpoint requires a workspace-scoped token.",
-            },
-        )
 
     factory = getattr(request.app.state, "db_session_factory", None)
     if factory is None:
