@@ -176,3 +176,46 @@ GRAPH_END_DATED_TOTAL: Counter = Counter(
     ),
     labelnames=["kind", "reason"],
 )
+
+# ---------------------------------------------------------------------------
+# Reconcile worker metrics
+# ---------------------------------------------------------------------------
+#
+# The reconcile worker periodically cross-checks three stores
+# (Postgres, Qdrant, Neo4j) and repairs drift idempotently.
+# Three drift types are tracked:
+#
+#   * ``pg_missing_qdrant``  — document in Postgres but no Qdrant chunks
+#     (write succeeded in PG, Qdrant write failed or was never issued).
+#     Action: log + mark ingestion_run partial + expose metric for alert.
+#
+#   * ``qdrant_orphan``      — chunks in Qdrant for a source that has no
+#     corresponding Postgres document.  Typical cause: seed-script or
+#     partial tombstone.  Action: hard-delete the orphan chunks.
+#
+#   * ``neo4j_orphan``       — entity nodes in Neo4j for a source_id that
+#     carries no active Postgres documents.  Action: log + expose metric;
+#     hard cleanup is deferred to the retention worker (end-dating path).
+#
+# Label ``drift_type`` takes one of the three string values above.
+
+RECONCILE_DRIFT_TOTAL: Counter = Counter(
+    name="omniscience_reconcile_drift_total",
+    documentation=(
+        "Total drift incidents detected by the reconcile worker, partitioned "
+        "by drift_type: 'pg_missing_qdrant' | 'qdrant_orphan' | 'neo4j_orphan'. "
+        "Incremented per affected source per run."
+    ),
+    labelnames=["drift_type"],
+)
+
+RECONCILE_WORKER_RUNS_TOTAL: Counter = Counter(
+    name="omniscience_reconcile_worker_runs_total",
+    documentation="Total number of reconcile worker ticks completed (including no-drift runs).",
+)
+
+RECONCILE_WORKER_DURATION_SECONDS: Histogram = Histogram(
+    name="omniscience_reconcile_worker_duration_seconds",
+    documentation="Wall-clock time in seconds for one full reconcile tick across all workspaces.",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
+)
