@@ -12,10 +12,11 @@ import hashlib
 import json
 import sys
 import uuid
+from datetime import UTC, datetime
 
 from omniscience_core.config import Settings
 from omniscience_core.db import create_async_engine, create_session_factory
-from omniscience_core.db.models import Source, SourceStatus, SourceType
+from omniscience_core.db.models import Source, SourceStatus, SourceType, SyncMode
 from omniscience_embeddings.factory import create_embedding_provider
 from omniscience_index.stores.neo4j_store import Neo4jGraphStore, Neo4jStoreConfig
 from omniscience_index.stores.qdrant_config import QdrantConfig
@@ -50,6 +51,15 @@ async def seed() -> None:
     # Get-or-create the source: the (source_id, external_id) pair is the
     # IndexWriter dedup key, so the source id must survive across runs —
     # a fresh id per run orphans every previous run's Qdrant points.
+    #
+    # sync_mode="push": this source is driven exclusively by this script
+    # (and the launchd job that invokes it).  The in-stack scheduler must
+    # not auto-trigger it — doing so would cause the discovery worker to
+    # attempt reaching kubernetes.default.svc from an off-cluster host.
+    #
+    # last_sync_at is updated on EVERY run so that the FreshnessChecker can
+    # detect a launchd/script outage (source goes stale → warning alert).
+    now = datetime.now(tz=UTC)
     async with session_factory() as session:
         src = (
             await session.execute(
@@ -64,11 +74,20 @@ async def seed() -> None:
                 config={"seeded_by": "seed_from_docs"},
                 tenant_id=WS_ID,
                 status=SourceStatus.active,
-                # 30 min SLA enables FreshnessChecker staleness alerts.
+                sync_mode=SyncMode.push,
+                # 30 min SLA enables FreshnessChecker staleness alerts:
+                # if this script stops running, the source goes stale after 30 min.
                 freshness_sla_seconds=1800,
+                last_sync_at=now,
             )
             session.add(src)
-            await session.commit()
+        else:
+            # Update last_sync_at on every run so FreshnessChecker knows the
+            # push process is healthy.  Also ensure existing sources that
+            # pre-date the sync_mode column are promoted to push mode.
+            src.last_sync_at = now
+            src.sync_mode = SyncMode.push
+        await session.commit()
         src_id = src.id
 
     writer = IndexWriter(session_factory, graph_store, vector_store)

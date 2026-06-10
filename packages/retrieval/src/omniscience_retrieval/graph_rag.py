@@ -515,6 +515,26 @@ class GraphRAGComposer:
         therefore mechanical — the candidate subgraph from the graph
         anchor stage and the chunk filter from the vector stage both
         reflect the world at ``as_of``.
+
+        Stage 3 (fix/push-sources-and-graphrag-sparse): the vector
+        stage now respects ``request.retrieval_strategy`` end-to-end.
+        :func:`_widen_request` preserves the strategy so the store
+        dispatch routes correctly:
+
+        - ``"hybrid"`` / ``"auto"`` → :meth:`QdrantVectorStore._search_hybrid_rrf`
+          (dense + sparse BM25, merged via RRF).
+          ``QueryStats.text_matches`` is set to the number of sparse hits,
+          giving MCP callers a reliable non-zero signal when keyword tokens
+          match.
+        - ``"keyword"`` → :meth:`QdrantVectorStore._search_sparse` (BM25 only).
+        - ``"structural"`` → :meth:`QdrantVectorStore._search_dense` (dense
+          only; graph-anchor source scoping is already applied via
+          ``request.sources`` by :func:`_widen_request`).
+
+        The ``text_matches`` value returned by the store is preserved
+        through ``_run_merge_stage`` and the ``model_copy`` in
+        :meth:`search`, so ``QueryStats.text_matches`` in the MCP
+        response reflects the real sparse-hit count.
         """
         stage_start = time.monotonic()
         widened = _widen_request(request, anchor=anchor)
@@ -625,17 +645,34 @@ def _widen_request(
     - The ``graphrag_anchor`` filter key is stripped before the request
       is forwarded to the vector store so downstream stores do not see
       composition-internal hints.
+    - ``retrieval_strategy`` is **explicitly preserved** so the Qdrant
+      adapter dispatches to the correct search sub-path:
+      ``"hybrid"`` / ``"auto"`` → RRF dense+sparse;
+      ``"keyword"`` → sparse BM25 only;
+      ``"structural"`` → dense only (graph-anchor source scoping already
+      applied via ``sources``).
+
+    Stage 3 note: before Stage 3, ``QdrantVectorStore.search`` was
+    dense-only and ignored ``retrieval_strategy``.  Now that the
+    dispatch is live, the strategy must flow through this function
+    unchanged so MCP callers receive a real
+    ``QueryStats.text_matches`` (non-zero for keyword/hybrid queries).
     """
     widened_top_k = request.top_k * CANDIDATE_EXPANSION_FACTOR
     sources: list[str] | None = (
         list(anchor.candidate_source_ids) if anchor.candidate_source_ids else request.sources
     )
     clean_filters = _strip_anchor_filter(request.filters)
+    # ``retrieval_strategy`` is included explicitly in the update dict so it
+    # is always forwarded to the vector store, regardless of future changes to
+    # ``model_copy`` defaults.  This prevents a silent regression to dense-only
+    # if pydantic changes how unmentioned fields are handled in ``model_copy``.
     return request.model_copy(
         update={
             "top_k": widened_top_k,
             "sources": sources,
             "filters": clean_filters,
+            "retrieval_strategy": request.retrieval_strategy,
         }
     )
 
