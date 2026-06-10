@@ -804,3 +804,194 @@ class TestAsOfThreading:
 
 # Silence unused-import warning on Any (used only in annotations above).
 _ = CollectorRegistry
+
+
+# ---------------------------------------------------------------------------
+# Stage 3: text_matches flow-through (fix/push-sources-and-graphrag-sparse)
+# ---------------------------------------------------------------------------
+
+
+def _make_result_with_text_matches(
+    hits: list[SearchHit], *, text_matches: int = 0
+) -> SearchResult:
+    """Build a ``SearchResult`` with an explicit ``text_matches`` value.
+
+    Used to verify that non-zero sparse-hit counts flow through the
+    merge stage unchanged.
+    """
+    return SearchResult(
+        hits=hits,
+        query_stats=QueryStats(
+            total_matches_before_filters=len(hits),
+            vector_matches=max(len(hits) - text_matches, 0),
+            text_matches=text_matches,
+            duration_ms=1.0,
+        ),
+    )
+
+
+class _StrategyCapturingVectorStore:
+    """VectorStore fake that returns a configured result AND records the strategy used.
+
+    Unlike ``_FakeVectorStore`` it returns a result whose ``text_matches``
+    mirrors what a real RRF search would return — non-zero when the strategy
+    is ``"hybrid"`` or ``"keyword"``, zero for ``"structural"``.  This lets
+    the flow-through tests assert without mocking the strategy dispatch.
+    """
+
+    def __init__(
+        self,
+        hits: list[SearchHit],
+        *,
+        text_matches_per_strategy: dict[str, int] | None = None,
+    ) -> None:
+        self._hits = hits
+        # default: hybrid/keyword → non-zero, structural → 0
+        self._tm_map: dict[str, int] = text_matches_per_strategy or {
+            "hybrid": len(hits),
+            "auto": len(hits),
+            "keyword": len(hits),
+            "structural": 0,
+        }
+        self.search_calls: list[dict[str, Any]] = []
+
+    async def search(
+        self,
+        *,
+        request: SearchRequest,
+        workspace_id: uuid.UUID,
+        as_of: datetime | None = None,
+    ) -> SearchResult:
+        self.search_calls.append(
+            {"request": request, "workspace_id": workspace_id, "as_of": as_of}
+        )
+        tm = self._tm_map.get(request.retrieval_strategy, 0)
+        return _make_result_with_text_matches(self._hits, text_matches=tm)
+
+
+@pytest.mark.asyncio
+class TestHybridTextMatchesFlow:
+    """Stage 3: verify text_matches from vector store flows through GraphRAG pipeline.
+
+    The core regression: before Stage 3 QdrantVectorStore was dense-only and
+    always returned text_matches=0.  After Stage 3 the store dispatches to
+    _search_hybrid_rrf / _search_sparse which return real counts.  This class
+    asserts that GraphRAGComposer does NOT zero-out text_matches on its way
+    through the merge and stamp stages.
+
+    ACL invariant: workspace_id is forwarded on every search call.
+    """
+
+    async def test_hybrid_strategy_text_matches_nonzero(self, force_graphrag: None) -> None:
+        """hybrid strategy → real text_matches propagated to QueryStats."""
+        hit = _make_hit(score=0.8)
+        v = _StrategyCapturingVectorStore([hit])
+        g = _FakeGraphStore()
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="nginx crash", retrieval_strategy="hybrid")
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        assert result.query_stats.text_matches == 1
+        # Confirm the strategy was forwarded to the vector store.
+        assert v.search_calls[0]["request"].retrieval_strategy == "hybrid"
+
+    async def test_keyword_strategy_text_matches_nonzero(self, force_graphrag: None) -> None:
+        """keyword strategy → text_matches equals hit count (sparse-only)."""
+        hit = _make_hit(score=0.7)
+        v = _StrategyCapturingVectorStore([hit])
+        g = _FakeGraphStore()
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="OOMKilled", retrieval_strategy="keyword")
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        assert result.query_stats.text_matches == 1
+        assert v.search_calls[0]["request"].retrieval_strategy == "keyword"
+
+    async def test_structural_strategy_text_matches_zero(self, force_graphrag: None) -> None:
+        """structural strategy → dense-only, text_matches stays 0."""
+        hit = _make_hit(score=0.6)
+        v = _StrategyCapturingVectorStore([hit])
+        g = _FakeGraphStore()
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="k8s pod", retrieval_strategy="structural")
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        assert result.query_stats.text_matches == 0
+        assert v.search_calls[0]["request"].retrieval_strategy == "structural"
+
+    async def test_auto_strategy_text_matches_nonzero(self, force_graphrag: None) -> None:
+        """auto strategy → treated as hybrid, text_matches is non-zero."""
+        hit = _make_hit(score=0.75)
+        v = _StrategyCapturingVectorStore([hit])
+        g = _FakeGraphStore()
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(query="connection refused", retrieval_strategy="auto")
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        assert result.query_stats.text_matches == 1
+        assert v.search_calls[0]["request"].retrieval_strategy == "auto"
+
+    async def test_text_matches_preserved_after_graph_affinity_merge(
+        self, force_graphrag: None
+    ) -> None:
+        """text_matches from vector stage survives the graph-affinity merge stage.
+
+        The merge stage reorders hits and slices to top_k; it must NOT
+        recalculate query_stats from scratch (which would zero text_matches).
+        """
+        seed_src = uuid.uuid4()
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed_src, related=[]))
+        hit1 = _make_hit(source_id=seed_src, score=0.9)
+        hit2 = _make_hit(score=0.7)
+        v = _StrategyCapturingVectorStore([hit1, hit2])
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(
+            query="service failure",
+            retrieval_strategy="hybrid",
+            filters={ANCHOR_FILTER_KEY: "AuthService"},
+        )
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+        # After merge (graph-affinity reorder) text_matches must still be 2.
+        assert result.query_stats.text_matches == 2
+
+    async def test_retrieval_strategy_forwarded_with_anchor(self, force_graphrag: None) -> None:
+        """When anchor is present, retrieval_strategy still flows to vector store.
+
+        Regression guard: _widen_request sets request.sources from the anchor
+        candidates; it must NOT reset retrieval_strategy to 'structural' as an
+        implicit side-effect of setting sources.
+        """
+        seed_src = uuid.uuid4()
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=seed_src, related=[]))
+        hit = _make_hit(source_id=seed_src, score=0.8)
+        v = _StrategyCapturingVectorStore([hit])
+        legacy = _FakeLegacyService(_make_result([]))
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g), vector_store=v, legacy_service=legacy
+        )
+        req = SearchRequest(
+            query="database timeout",
+            retrieval_strategy="hybrid",
+            filters={ANCHOR_FILTER_KEY: "DBService"},
+        )
+        ws = uuid.uuid4()
+        result = await composer.search(req, workspace_id=ws)
+        # Vector store received the anchor-scoped sources AND hybrid strategy.
+        v_req: SearchRequest = v.search_calls[0]["request"]
+        assert v_req.retrieval_strategy == "hybrid"
+        assert v_req.sources == [str(seed_src)]
+        # text_matches flows through.
+        assert result.query_stats.text_matches == 1
+        # workspace_id forwarded.
+        assert v.search_calls[0]["workspace_id"] == ws
