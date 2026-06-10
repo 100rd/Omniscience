@@ -108,10 +108,12 @@ def upgrade() -> None:
     default_ws = str(_DEFAULT_WORKSPACE_ID)
 
     # 1. sources.tenant_id ------------------------------------------------
+    # Cast the bound string to uuid explicitly: both columns are Postgres
+    # ``uuid`` and asyncpg will not implicitly coerce a VARCHAR parameter.
     op.execute(
-        sa.text("UPDATE sources SET tenant_id = :ws_id WHERE tenant_id IS NULL").bindparams(
-            ws_id=default_ws
-        )
+        sa.text(
+            "UPDATE sources SET tenant_id = CAST(:ws_id AS uuid) WHERE tenant_id IS NULL"
+        ).bindparams(ws_id=default_ws)
     )
 
     # 2. api_tokens.workspace_id ------------------------------------------
@@ -120,7 +122,7 @@ def upgrade() -> None:
     # integrity as long as that row has not been manually deleted.
     op.execute(
         sa.text(
-            "UPDATE api_tokens SET workspace_id = :ws_id WHERE workspace_id IS NULL"
+            "UPDATE api_tokens SET workspace_id = CAST(:ws_id AS uuid) WHERE workspace_id IS NULL"
         ).bindparams(ws_id=default_ws)
     )
 
