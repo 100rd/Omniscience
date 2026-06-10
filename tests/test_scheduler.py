@@ -31,6 +31,11 @@ Covers:
 28. app.py: scheduler starts when scheduler_enabled=True (state set)
 29. app.py: scheduler not started when scheduler_enabled=False
 30. Multiple stale sources: all triggered, count matches
+31. _is_push returns True for push source, False for pull source
+32. _check_and_trigger skips push source even when stale
+33. _check_and_trigger triggers pull source but not push source in same batch
+34. _check_and_trigger push source with no TTL is still skipped (push takes precedence)
+35. _check_and_trigger push source with explicit SLA is still skipped (push takes precedence)
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from omniscience_core.config import Settings
-from omniscience_core.db.models import Source, SourceStatus, SourceType
+from omniscience_core.db.models import Source, SourceStatus, SourceType, SyncMode
 from omniscience_server.scheduler import SchedulerWorker
 
 # ---------------------------------------------------------------------------
@@ -71,6 +76,7 @@ def _make_source(
     status: SourceStatus = SourceStatus.active,
     freshness_sla_seconds: int | None = None,
     last_sync_at: datetime | None = None,
+    sync_mode: SyncMode = SyncMode.pull,
 ) -> MagicMock:
     s = MagicMock(spec=Source)
     s.id = src_id
@@ -79,6 +85,7 @@ def _make_source(
     s.status = status
     s.freshness_sla_seconds = freshness_sla_seconds
     s.last_sync_at = last_sync_at
+    s.sync_mode = sync_mode
     return s
 
 
@@ -87,6 +94,7 @@ def _fresh_source(
     age_seconds: float = 60.0,
     src_id: uuid.UUID = _SRC_ID,
     source_type: SourceType = SourceType.git,
+    sync_mode: SyncMode = SyncMode.pull,
 ) -> MagicMock:
     """A source synced ``age_seconds`` ago with an explicit SLA of ``ttl``."""
     last_sync = _NOW - timedelta(seconds=age_seconds)
@@ -95,6 +103,7 @@ def _fresh_source(
         source_type=source_type,
         freshness_sla_seconds=ttl,
         last_sync_at=last_sync,
+        sync_mode=sync_mode,
     )
 
 
@@ -103,6 +112,7 @@ def _stale_source(
     age_seconds: float = 600.0,
     src_id: uuid.UUID = _SRC_ID,
     source_type: SourceType = SourceType.git,
+    sync_mode: SyncMode = SyncMode.pull,
 ) -> MagicMock:
     """A source synced ``age_seconds`` ago, past its SLA of ``ttl``."""
     last_sync = _NOW - timedelta(seconds=age_seconds)
@@ -111,6 +121,7 @@ def _stale_source(
         source_type=source_type,
         freshness_sla_seconds=ttl,
         last_sync_at=last_sync,
+        sync_mode=sync_mode,
     )
 
 
@@ -384,6 +395,7 @@ async def test_check_and_trigger_triggers_never_synced_source() -> None:
         source_type=SourceType.fs,
         freshness_sla_seconds=None,  # use DEFAULT_TTLS["fs"]
         last_sync_at=None,
+        sync_mode=SyncMode.pull,
     )
     nats = _make_nats_conn()
     sw = _make_scheduler(sources=[src], nats_conn=nats)
@@ -622,3 +634,141 @@ async def test_multiple_stale_sources_all_triggered() -> None:
 
     assert count == 2
     assert nats.jetstream.publish.call_count == 2
+
+
+# ===========================================================================
+# 31. _is_push
+# ===========================================================================
+
+
+def test_is_push_returns_true_for_push_source() -> None:
+    """_is_push returns True when sync_mode is SyncMode.push."""
+    src = _make_source(sync_mode=SyncMode.push)
+    assert SchedulerWorker._is_push(src) is True
+
+
+def test_is_push_returns_false_for_pull_source() -> None:
+    """_is_push returns False when sync_mode is SyncMode.pull."""
+    src = _make_source(sync_mode=SyncMode.pull)
+    assert SchedulerWorker._is_push(src) is False
+
+
+# ===========================================================================
+# 32. push source is skipped even when stale
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_check_and_trigger_skips_push_source_when_stale() -> None:
+    """A push source that is stale is NOT triggered — external process owns it.
+
+    Without this behaviour the scheduler would attempt to trigger an in-cluster
+    discovery worker from an off-cluster host, producing cascading connection
+    errors (the original k8s bug).
+    """
+    src = _stale_source(
+        src_id=_SRC_ID,
+        source_type=SourceType.k8s,
+        ttl=1800,
+        age_seconds=3600,
+        sync_mode=SyncMode.push,
+    )
+    nats = _make_nats_conn()
+    sw = _make_scheduler(sources=[src], nats_conn=nats)
+
+    with patch("omniscience_server.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        count = await sw._check_and_trigger()
+
+    assert count == 0
+    nats.jetstream.publish.assert_not_called()
+
+
+# ===========================================================================
+# 33. push + pull in same batch: only pull is triggered
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_check_and_trigger_triggers_pull_skips_push_in_same_batch() -> None:
+    """In a mixed batch only pull sources are triggered; push sources are skipped."""
+    pull_src = _stale_source(
+        src_id=_SRC_ID,
+        source_type=SourceType.git,
+        ttl=300,
+        age_seconds=600,
+        sync_mode=SyncMode.pull,
+    )
+    push_src = _stale_source(
+        src_id=_SRC_ID_2,
+        source_type=SourceType.k8s,
+        ttl=1800,
+        age_seconds=3600,
+        sync_mode=SyncMode.push,
+    )
+    nats = _make_nats_conn()
+    factory = _session_factory_for(pull_src, push_src)
+    sw = SchedulerWorker(session_factory=factory, nats_conn=nats)
+
+    with patch("omniscience_server.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        count = await sw._check_and_trigger()
+
+    # Only the pull source is triggered.
+    assert count == 1
+    assert nats.jetstream.publish.call_count == 1
+
+
+# ===========================================================================
+# 34. push source with no TTL is still skipped (push takes precedence)
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_check_and_trigger_push_source_no_ttl_still_skipped() -> None:
+    """Push source without a TTL/SLA is skipped before even reaching TTL logic."""
+    src = _make_source(
+        source_type=SourceType.grafana,
+        freshness_sla_seconds=None,
+        last_sync_at=None,
+        sync_mode=SyncMode.push,
+    )
+    nats = _make_nats_conn()
+    sw = _make_scheduler(sources=[src], nats_conn=nats)
+
+    with patch("omniscience_server.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        count = await sw._check_and_trigger()
+
+    assert count == 0
+    nats.jetstream.publish.assert_not_called()
+
+
+# ===========================================================================
+# 35. push source with explicit SLA is still skipped
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_check_and_trigger_push_source_with_sla_still_skipped() -> None:
+    """A push source with an explicit freshness SLA is skipped by the scheduler.
+
+    The SLA is still evaluated by the FreshnessChecker (external process
+    monitoring), but the scheduler must not trigger a discovery run.
+    """
+    src = _stale_source(
+        src_id=_SRC_ID,
+        source_type=SourceType.fs,
+        ttl=60,
+        age_seconds=9999,
+        sync_mode=SyncMode.push,
+    )
+    nats = _make_nats_conn()
+    sw = _make_scheduler(sources=[src], nats_conn=nats)
+
+    with patch("omniscience_server.scheduler.datetime") as mock_dt:
+        mock_dt.now.return_value = _NOW
+        count = await sw._check_and_trigger()
+
+    assert count == 0
+    nats.jetstream.publish.assert_not_called()

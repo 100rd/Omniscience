@@ -8,13 +8,19 @@ of the server process.  On each tick it:
    - If the source has ``freshness_sla_seconds`` set, that value is used.
    - Otherwise the per-type default from :data:`SchedulerWorker.DEFAULT_TTLS` applies.
    - Sources with no explicit SLA **and** no per-type default are skipped.
-3. Compares ``last_sync_at`` against the effective TTL.  A source is *stale*
+3. Skips sources whose ``sync_mode`` is ``"push"`` — these are driven by an
+   external process (launchd, seed scripts) and must not be auto-triggered
+   by the scheduler.  Attempting to trigger a push source would cause the
+   discovery worker to try reaching an in-cluster URL (e.g.
+   ``kubernetes.default.svc``) from an off-cluster host, producing cascading
+   connection errors.
+4. Compares ``last_sync_at`` against the effective TTL.  A source is *stale*
    when ``now - last_sync_at > ttl``, or when it has never been synced.
-4. For every stale source, publishes a
+5. For every stale pull source, publishes a
    :class:`~omniscience_server.ingestion.events.DocumentChangeEvent`
    to ``ingest.changes.{source_type}`` via NATS JetStream — the same
    subject used by the manual ``POST /api/v1/sources/{id}/sync`` endpoint.
-5. Updates Prometheus counters and emits structured logs.
+6. Updates Prometheus counters and emits structured logs.
 
 Usage in ``app.py`` lifespan::
 
@@ -38,8 +44,10 @@ Design notes
 - The worker skips a cycle gracefully when NATS is unavailable rather than
   crashing.  A counter tracks publish failures so operators can alert on
   ``omniscience_scheduler_syncs_triggered_total`` not growing as expected.
-- ``last_sync_at`` is ``None`` (never synced) → always triggers.
+- ``last_sync_at`` is ``None`` (never synced) → always triggers for pull
+  sources.
 - Paused sources are skipped (``status != active``).
+- Push sources are skipped regardless of TTL or staleness state.
 - A single DB read per cycle keeps the implementation O(n) without
   per-source queries.
 """
@@ -53,7 +61,7 @@ from datetime import UTC, datetime
 from typing import ClassVar
 
 import structlog
-from omniscience_core.db.models import Source, SourceStatus
+from omniscience_core.db.models import Source, SourceStatus, SyncMode
 from omniscience_core.queue.producer import QueueProducer
 from omniscience_core.telemetry.metrics import (
     SCHEDULER_CHECK_DURATION_SECONDS,
@@ -76,6 +84,9 @@ class SchedulerWorker:
     :attr:`DEFAULT_TTLS` is used instead.  If a source is stale a full-sync
     trigger is published to NATS.
 
+    Sources with ``sync_mode == SyncMode.push`` are **always skipped** — they
+    are managed by external processes and must not be auto-triggered.
+
     Args:
         session_factory: SQLAlchemy async session factory.
         nats_conn: Active NATS connection object that exposes a ``jetstream``
@@ -85,6 +96,7 @@ class SchedulerWorker:
     """
 
     # Per-type default TTLs (seconds) applied when a source has no explicit SLA.
+    # Only relevant for pull-mode sources; push sources are never auto-triggered.
     DEFAULT_TTLS: ClassVar[dict[str, int]] = {
         "git": 300,  # 5 min — webhook covers most; this is a safety net
         "fs": 60,  # 1 min
@@ -144,7 +156,10 @@ class SchedulerWorker:
     # ------------------------------------------------------------------
 
     async def _check_and_trigger(self) -> int:
-        """Evaluate all active sources and publish triggers for stale ones.
+        """Evaluate all active pull sources and publish triggers for stale ones.
+
+        Push sources are silently skipped — they are managed by external
+        processes and must not be auto-triggered by the scheduler.
 
         Returns:
             The number of sync triggers successfully published in this cycle.
@@ -157,6 +172,18 @@ class SchedulerWorker:
             now = datetime.now(tz=UTC)
 
             for source in sources:
+                # Skip push sources entirely — they are driven by external
+                # processes (launchd, seed scripts).  Triggering them from
+                # here would cause the discovery worker to attempt in-cluster
+                # connections from an off-cluster host.
+                if self._is_push(source):
+                    log.debug(
+                        "scheduler_skip_push_source",
+                        source_id=str(source.id),
+                        source_name=source.name,
+                    )
+                    continue
+
                 ttl = self._effective_ttl(source)
                 if ttl is None:
                     # No SLA and no per-type default — skip.
@@ -197,6 +224,14 @@ class SchedulerWorker:
             )
             return list(result.scalars().all())
 
+    @staticmethod
+    def _is_push(source: Source) -> bool:
+        """Return True when *source* is externally managed (push mode).
+
+        Push sources must not be auto-triggered by the scheduler.
+        """
+        return source.sync_mode == SyncMode.push
+
     def _effective_ttl(self, source: Source) -> int | None:
         """Return the TTL (seconds) to use for *source*.
 
@@ -204,6 +239,9 @@ class SchedulerWorker:
         1. ``source.freshness_sla_seconds`` when explicitly set.
         2. :attr:`DEFAULT_TTLS` entry for the source type.
         3. ``None`` — no TTL applies, source is never auto-triggered.
+
+        This method is only called for pull-mode sources; push sources are
+        filtered out before reaching this step.
         """
         if source.freshness_sla_seconds is not None:
             return source.freshness_sla_seconds
