@@ -69,6 +69,7 @@ import logging
 import re
 import time
 import uuid
+import zlib
 from collections import Counter as _Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -1600,9 +1601,13 @@ def _tokenize_to_sparse(text: str) -> qm.SparseVector:
     1. Lowercase + split on non-alphanumeric characters.
     2. Remove stopwords and single-character tokens.
     3. Count term frequencies.
-    4. Map tokens to integer indices via a deterministic hash
-       (hash(token) mod SPARSE_VOCAB_SIZE).  Collisions are rare
+    4. Map tokens to integer indices via a process-stable hash
+       (crc32(token) mod SPARSE_VOCAB_SIZE).  Collisions are rare
        at 2^20 slots and acceptable for retrieval purposes.
+       NOTE: the builtin ``hash()`` MUST NOT be used here — string
+       hashing is salted per-process (PYTHONHASHSEED), so an index-time
+       token and a query-time token would map to different slots in
+       different processes and never match. crc32 is deterministic.
     5. Normalise values to [0, 1] (max-TF normalisation).
 
     This approximates BM25 without a corpus-level IDF pass.  For the
@@ -1618,7 +1623,7 @@ def _tokenize_to_sparse(text: str) -> qm.SparseVector:
     for tok in tokens:
         if len(tok) <= 1 or tok in _STOPWORDS:
             continue
-        idx = hash(tok) % _SPARSE_VOCAB_SIZE
+        idx = zlib.crc32(tok.encode("utf-8")) % _SPARSE_VOCAB_SIZE
         counts[idx] += 1
     if not counts:
         return qm.SparseVector(indices=[], values=[])

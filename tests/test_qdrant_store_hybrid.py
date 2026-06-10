@@ -140,6 +140,47 @@ def test_tokenize_deterministic() -> None:
     assert a.values == b.values
 
 
+def test_tokenize_indices_are_golden_crc32() -> None:
+    """Index-time and query-time tokens must map to the SAME slots.
+
+    Regression guard for the builtin hash() bug: string hashing is salted
+    per-process (PYTHONHASHSEED), so hash()-based indices differed between
+    the seed process and the search process, breaking sparse search entirely.
+    These golden values come from crc32(token) % 2**20 and are stable across
+    processes — if someone reverts to hash(), this assertion fails.
+    """
+    sv = _tokenize_to_sparse("cilium gateway loadbalancer")
+    # crc32("cilium")=...%2**20=909609, "gateway"=974207, "loadbalancer"=602382
+    assert sorted(sv.indices) == sorted([909609, 974207, 602382])
+
+
+def test_tokenize_stable_across_processes() -> None:
+    """A fresh interpreter (different PYTHONHASHSEED) yields identical indices.
+
+    This is the cross-process check the in-process determinism test cannot
+    make: builtin hash() would pass test_tokenize_deterministic but fail here.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "from omniscience_index.stores.qdrant_store import _tokenize_to_sparse;"
+        "sv=_tokenize_to_sparse('cilium gateway loadbalancer');"
+        "print(sorted(sv.indices))"
+    )
+    runs = [
+        subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            env={"PYTHONHASHSEED": seed, "PATH": __import__("os").environ.get("PATH", "")},
+            check=True,
+        ).stdout.strip()
+        for seed in ("0", "1", "12345")
+    ]
+    assert runs[0] == runs[1] == runs[2], f"indices vary across PYTHONHASHSEED: {runs}"
+
+
 def test_tokenize_empty_string() -> None:
     sv = _tokenize_to_sparse("")
     assert sv.indices == []
