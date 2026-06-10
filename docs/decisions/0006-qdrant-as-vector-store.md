@@ -271,3 +271,50 @@ Rejected. Cassandra's vector support via StargateQL is young, the filter-then-AN
 - Amends: [ADR-0004](0004-retrieval-strategy-staged.md) on the vector-store-choice dimension only
 - ACL carry-forward: [#117](https://github.com/100rd/Omniscience/issues/117)
 - Lineage schema: [#24](https://github.com/100rd/Omniscience/issues/24)
+
+---
+
+## Amendment — Bitemporal cross-store contract (refactor/bitemporal-vector-hybrid, 2026-06-10)
+
+**Status**: Implemented (branch `refactor/bitemporal-vector-hybrid`)
+
+### What changed
+
+ADR-0008 §6 specified that the vector store must honour the bitemporal contract:
+`as_of=T` on Qdrant must return the same logical state as `as_of=T` on Neo4j.
+Before this amendment, `QdrantVectorStore._write_document` hard-deleted old chunk
+points when the `content_hash` changed — so `as_of=T` (where T preceded the update)
+returned empty results even though Neo4j correctly returned the pre-update graph state.
+
+### Implementation (Stage 1)
+
+**End-dating on content update**: When `content_hash` changes, old chunk points are now
+**end-dated** (`valid_to = now()` via `set_payload`) instead of hard-deleted.  New chunk
+points are inserted with `valid_from = now()` and `valid_to = null`.
+
+**`_find_document` scoped to current generation**: `_find_document` adds
+`with_current_only()` (`valid_to IS NULL`) so it cannot see end-dated historical versions
+when computing `content_hash` and `doc_version` for the update path.
+
+**Current-state reads**: `count()`, `count_chunks()`, `count_chunks_by_source()` add
+`with_current_only()` when `as_of=None` so end-dated historical points are not counted
+as active documents.
+
+### Write-path cost
+
+End-dating is more expensive than hard deletion: one additional `set_payload` call per
+content-update write.  This is an accepted trade-off: the alternative (hard delete + empty
+`as_of` results) violates ADR-0008 §6 cross-store consistency.  The retention worker
+(ADR-0009) still hard-deletes end-dated points when they age past the warm-tier window,
+so storage growth is bounded.
+
+### `valid_from` / `valid_to` payload indexes
+
+Both fields are added to `INDEXED_PAYLOAD_FIELDS` (confirmed per ADR-0008 §6 cross-doc
+consequences note) so the `as_of` predicate is index-backed on every read path.
+
+### Cross-reference
+
+See **ADR-0008** for the canonical bitemporal contract (open-closed interval
+`[valid_from, valid_to)`, `null` / missing sentinel for still-valid, ISO-8601 datetime,
+and the `as_of` predicate `valid_from <= T AND (T < valid_to OR valid_to IS NULL)`).

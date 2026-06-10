@@ -327,3 +327,56 @@ The same discipline ADR-0005 mandated for the Neo4j adapter and ADR-0006 mandate
 - ACL carry-forward: [#117](https://github.com/100rd/Omniscience/issues/117), [#119](https://github.com/100rd/Omniscience/issues/119), [ADR-0005](0005-neo4j-as-graph-store.md) §Consequences-security
 - Vision sections: [`docs/vision.md`](../vision.md) §5.3 (line 71-77), §11 (line 177)
 - Adapter touched by future migration (this ADR specifies, [#130](https://github.com/100rd/Omniscience/issues/130) implements): [`packages/index/src/omniscience_index/stores/neo4j_store.py`](../../packages/index/src/omniscience_index/stores/neo4j_store.py)
+
+---
+
+## Amendment — Vector-layer end-dating and `valid_to IS NULL` current-state reads (refactor/bitemporal-vector-hybrid, 2026-06-10)
+
+**Status**: Implemented (branch `refactor/bitemporal-vector-hybrid`)
+
+### Accepted compromise: end-dating on the write path
+
+ADR-0008 §6 required the vector store to honour the bitemporal contract but deferred
+implementation.  This amendment records the actual implementation and its trade-offs.
+
+**Previous behaviour (violated §6)**: `_write_document` called `_delete_points` on
+content-hash change.  `as_of=T` searches returned empty for updated documents.
+
+**Implemented behaviour**: Old chunk points are end-dated (`valid_to = now()`) via
+`set_payload`.  The write path is now:
+
+```
+1. _find_document(current_only=True)  → get current content_hash + doc_version
+2. content_hash unchanged?            → skip (no write)
+3. content_hash changed?
+   a. _end_date_points(old_ids, valid_to=now())   [set_payload, wait=True]
+   b. insert new points with valid_from=now(), valid_to=null
+```
+
+**Cost**: one extra `set_payload` round-trip per update.  Mitigated by: (a) updates are
+less frequent than first-time ingests; (b) `wait=True` is required for durability anyway;
+(c) the retention worker (ADR-0009) eventually hard-deletes end-dated points so storage
+growth is bounded.
+
+### `valid_to IS NULL` current-state reads
+
+After end-dating, the collection contains both old (end-dated) and new (current) points for
+the same `(source_id, external_id)`.  Current-state reads must filter to `valid_to IS NULL`
+to avoid double-counting.  The following methods add `with_current_only()` when `as_of=None`:
+
+- `_find_document` — always, so content-hash comparison and doc_version increment are correct.
+- `count()` — when `as_of=None`.
+- `count_chunks()` — when `as_of=None`.
+- `count_chunks_by_source()` — when `as_of=None`.
+
+The `search()` hot path (`as_of=None`) does NOT add `valid_to IS NULL` — most end-dated points
+are already excluded by the tombstone filter, and the performance overhead on the HNSW path is
+undesirable.  If a strict "only current points" requirement emerges for the search path, that
+is a separate amendment.
+
+### Cross-store consistency (§6)
+
+After this amendment: `as_of=T` on Neo4j and `as_of=T` on Qdrant both return the state
+valid at T.  The bitemporal contract described in ADR-0008 §6 is now satisfied.
+
+See **ADR-0006** amendment (same branch) for the Qdrant-side implementation details.

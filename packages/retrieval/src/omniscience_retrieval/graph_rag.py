@@ -393,6 +393,16 @@ class GraphRAGComposer:
         # graph anchor returned no hits AND zero merged hits remain.
         # Cheap proxy for "as_of < earliest recorded_at" without a
         # dedicated round-trip.  Issue #133 §B contract.
+        #
+        # Stage 1 note (refactor/bitemporal-vector-hybrid): before Stage 1
+        # a content-rewrite (hash change) physically deleted old Qdrant points,
+        # so ``as_of=T`` (T < update time) returned empty even when the entity
+        # DID exist in the graph at T.  The degraded flag was therefore a
+        # false positive in that case.  Stage 1 end-dates old points instead of
+        # deleting them, so ``as_of=T`` now returns the OLD chunk version.
+        # The condition ``not anchor.anchor_hit`` is therefore a genuine
+        # "graph entity not found at as_of" signal — not a content-rewrite
+        # artefact — and the degraded label is now accurate.
         degraded = (
             effective is not None
             and anchor.anchor_requested
