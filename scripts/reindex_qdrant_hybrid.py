@@ -143,6 +143,7 @@ async def _reindex(
     dry_run: bool,
     batch_size: int,
     verbose: bool,
+    https: bool = False,
 ) -> None:
     """Core reindex loop — connects to Qdrant and backfills sparse vectors."""
     try:
@@ -155,11 +156,15 @@ async def _reindex(
         )
         raise SystemExit(1) from exc
 
+    # https defaults to False: a self-hosted Qdrant over plaintext gRPC is the
+    # common case. Passing api_key alone would otherwise make the client attempt
+    # a TLS handshake and fail against a non-TLS listener.
     client = AsyncQdrantClient(
         host=host,
         grpc_port=port,
         prefer_grpc=True,
         api_key=api_key,
+        https=https,
     )
     try:
         await _do_reindex(
@@ -427,6 +432,11 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Emit per-point DEBUG logging.",
     )
+    parser.add_argument(
+        "--https",
+        action="store_true",
+        help="Connect to Qdrant over TLS (default: plaintext, for self-hosted).",
+    )
     return parser.parse_args(argv)
 
 
@@ -463,6 +473,7 @@ def main(argv: list[str] | None = None) -> None:
             dry_run=args.dry_run,
             batch_size=args.batch_size,
             verbose=args.verbose,
+            https=args.https,
         )
     )
 
