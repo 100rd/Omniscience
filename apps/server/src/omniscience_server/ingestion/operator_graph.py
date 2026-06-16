@@ -40,15 +40,18 @@ Supported kinds (this bridge): ``Cluster``, ``Namespace``, ``StorageClass``
 ``metadata["storage_class_name"]``).  Unknown kinds map to a node with NO
 derived edges rather than being dropped — fail-open on coverage, never on ACL.
 
-Deferred wiring
----------------
+Wiring
+------
 The pure mapper and the thin async :func:`route_operator_event_to_graph` are
-delivered and unit-tested here.  Invoking the router from the ingestion worker's
-operator-event path (``worker.py`` -> ``pipeline.py``) is intentionally left as
-a follow-up: the server's ``DocumentChangeEvent`` model does not yet carry
-``metadata``/``topology_edges`` (``events.py``), so the worker cannot reach this
-payload without a model + dedup-path change that is out of scope for this
-bridge.  The router is the single call-site the worker will use once that lands.
+delivered and unit-tested here.  The ingestion worker invokes the router from
+its single-document operator-event path
+(:meth:`omniscience_server.ingestion.worker.IngestionWorker._maybe_route_operator_graph`):
+``DocumentChangeEvent`` now carries optional ``metadata``/``topology_edges``
+fields (``events.py``), which the worker projects onto :class:`OperatorEvent`
+(stamping the *server-resolved* ``workspace_id`` from ``Source.tenant_id`` —
+never a payload field) and hands to this router AFTER the vector pipeline runs.
+The vector path is untouched; routing is a no-op for non-operator events and
+for operator events without a ``metadata`` payload.
 """
 
 from __future__ import annotations

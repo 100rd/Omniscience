@@ -76,6 +76,11 @@ from omniscience_server.ingestion.dedup import (
 )
 from omniscience_server.ingestion.events import DocumentChangeEvent, ProcessResult
 from omniscience_server.ingestion.metrics import INGESTION_DOCUMENTS_PROCESSED_TOTAL
+from omniscience_server.ingestion.operator_graph import (
+    OperatorEvent,
+    OperatorEventEdge,
+    route_operator_event_to_graph,
+)
 from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.run_tracker import RunTracker
 
@@ -99,6 +104,12 @@ _DEDUP_DROP_ACTION: str = "dedup_dropped"
 # Limits simultaneous cluster-API / embedder pressure during discovery fan-out.
 _DISCOVERY_CONCURRENCY: int = 10
 
+# source_type the in-cluster Go operator stamps on its events
+# (``operator/internal/entity/entity.go``).  Only events from this emitter
+# carry the rich ``metadata``/``topology_edges`` payload the graph bridge
+# (Gap A) consumes; everything else flows through the vector path only.
+_OPERATOR_SOURCE_TYPE: str = "k8s-operator"
+
 log = structlog.get_logger(__name__)
 
 
@@ -115,6 +126,11 @@ class IngestionWorker:
         secrets_resolver: Resolver for ``secrets_ref`` strings.  When ``None``
             a default :class:`~omniscience_core.secrets.SecretsResolver` is
             created automatically.
+        graph_store: Optional ``GraphStore`` used to route operator-sourced
+            events (``source_type == "k8s-operator"``) into the Neo4j graph
+            (Gap A bridge).  When ``None`` the operator->graph routing is
+            disabled and only the vector pipeline runs — the previous
+            behaviour, preserved verbatim for non-operator deployments.
     """
 
     def __init__(
@@ -126,6 +142,7 @@ class IngestionWorker:
         session_factory: async_sessionmaker[AsyncSession],
         secrets_resolver: SecretsResolver | None = None,
         dedup_gate: DedupGate | None = None,
+        graph_store: Any | None = None,
     ) -> None:
         self._consumer = queue_consumer
         self._connector_registry = connector_registry
@@ -134,6 +151,11 @@ class IngestionWorker:
         self._session_factory = session_factory
         self._run_tracker = RunTracker(session_factory)
         self._secrets_resolver = secrets_resolver or SecretsResolver()
+        # Optional GraphStore for the operator->graph bridge (Gap A).  Kept
+        # separate from the orchestrated ``index_writer`` so the additive
+        # operator-event routing never perturbs the symbol-graph write path
+        # the pipeline already drives through ``index_writer.upsert_graph``.
+        self._graph_store = graph_store
         self._run_id: uuid.UUID | None = None
         self._error_count = 0
 
@@ -295,10 +317,82 @@ class IngestionWorker:
             workspace_id=workspace_id,
             ingestion_run_id=self._run_id,
         )
+
+        # Gap A bridge: operator-sourced events ALSO upsert into Neo4j.  This
+        # runs AFTER the vector pipeline so the additive graph write never
+        # changes the existing vector path's outcome.  Only created/updated
+        # operator events carrying the rich payload are routed; a graph-store
+        # adapter failure converts the result to ``error`` so the broker
+        # redelivers (the upsert is idempotent — replay is safe).  The
+        # workspace is the server-resolved one (ACL invariant) — NEVER taken
+        # from the event payload.
+        result = await self._maybe_route_operator_graph(event, result, workspace_id)
+
         INGESTION_DOCUMENTS_PROCESSED_TOTAL.labels(
             source_type=event.source_type,
             action=result.action,
         ).inc()
+        return result
+
+    # ------------------------------------------------------------------
+    # Operator -> Neo4j graph bridge (Gap A)
+    # ------------------------------------------------------------------
+
+    async def _maybe_route_operator_graph(
+        self,
+        event: DocumentChangeEvent,
+        result: ProcessResult,
+        workspace_id: uuid.UUID,
+    ) -> ProcessResult:
+        """Route an operator event into the Neo4j graph, if applicable.
+
+        No-op (returns ``result`` unchanged) unless ALL of:
+          * a ``graph_store`` is configured on the worker,
+          * the event came from the operator emitter,
+          * the vector pipeline did not error and produced new content
+            (``created``/``updated`` — never ``unchanged``/``deleted``), and
+          * the event carries the rich operator ``metadata`` payload.
+
+        Deletes are deliberately excluded — tombstoning is owned by the
+        existing delete path, not this bridge (matching
+        :func:`route_operator_event_to_graph`'s contract).
+
+        On a graph adapter error the result is converted to ``action="error"``
+        so the broker NAKs and redelivers; the operator upsert is idempotent
+        (deterministic node ids), so re-running the vector path on redelivery
+        is safe.
+        """
+        if self._graph_store is None:
+            return result
+        if event.source_type != _OPERATOR_SOURCE_TYPE:
+            return result
+        if result.action not in ("created", "updated"):
+            return result
+        if not event.metadata:
+            return result
+
+        operator_event = _to_operator_event(event, workspace_id)
+        try:
+            entities_written, edges_written = await route_operator_event_to_graph(
+                graph_store=self._graph_store,
+                event=operator_event,
+            )
+        except Exception as exc:
+            log.error(
+                "operator_graph_routing_failed",
+                source_id=str(event.source_id),
+                external_id=event.external_id,
+                error=str(exc),
+            )
+            return result.model_copy(update={"action": "error", "error": str(exc)})
+
+        log.debug(
+            "operator_graph_routed",
+            source_id=str(event.source_id),
+            external_id=event.external_id,
+            entities=entities_written,
+            edges=edges_written,
+        )
         return result
 
     # ------------------------------------------------------------------
@@ -510,6 +604,31 @@ class IngestionWorker:
 # ---------------------------------------------------------------------------
 # Module-level helpers (pure / small — keep under 30 lines each)
 # ---------------------------------------------------------------------------
+
+
+def _to_operator_event(event: DocumentChangeEvent, workspace_id: uuid.UUID) -> OperatorEvent:
+    """Project a ``DocumentChangeEvent`` onto the bridge's ``OperatorEvent``.
+
+    ``workspace_id`` is the **server-resolved** workspace (from
+    ``Source.tenant_id``), NOT any field on the wire payload — the ACL
+    invariant.  ``metadata``/``topology_edges`` are carried through verbatim;
+    callers must only invoke this for operator events that actually carry a
+    ``metadata`` payload (the worker gates on that).
+    """
+    edges = [
+        OperatorEventEdge(kind=e.kind, target_external_id=e.target_external_id)
+        for e in (event.topology_edges or [])
+    ]
+    return OperatorEvent(
+        source_id=event.source_id,
+        source_type=event.source_type,
+        external_id=event.external_id,
+        uri=event.uri,
+        action=event.action,
+        workspace_id=workspace_id,
+        metadata=dict(event.metadata or {}),
+        topology_edges=edges,
+    )
 
 
 def _is_sync_marker(event: DocumentChangeEvent) -> bool:
