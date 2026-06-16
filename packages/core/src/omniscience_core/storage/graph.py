@@ -208,6 +208,27 @@ class GraphStore(Protocol):
         edge_types: list[str] | None = None,
     ) -> GraphResultView: ...
 
+    async def list_entities(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        kind: str,
+        cluster: str | None = None,
+        name: str | None = None,
+        as_of: datetime | None = None,
+    ) -> list[EntityNodeView]:
+        """List entities of ``kind`` within ``workspace_id``, optionally
+        filtered by the indexed ``cluster`` property and/or exact ``name``.
+
+        Answers deterministic platform-state questions such as "which
+        StorageClasses exist in cluster X" and "does a StorageClass named
+        'gold' exist in cluster X" for the change-validation gate.  The
+        ``cluster`` filter matches a first-class indexed node property
+        (never a metadata substring scan).  ``as_of`` returns the version
+        valid at T per ADR-0008 §5; the workspace predicate always leads.
+        """
+        ...
+
     async def find_entities_by_metadata(
         self,
         *,
