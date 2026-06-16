@@ -5,6 +5,7 @@ Registers seven tools:
 - get_document        (requires scope: search)
 - get_entity          (requires scope: search + workspace-scoped token)
 - get_related_entities (requires scope: search + workspace-scoped token)
+- list_entities       (requires scope: search + workspace-scoped token)
 - list_sources        (requires scope: sources:read)
 - source_stats        (requires scope: sources:read)
 - resolve_incident    (requires scope: search + workspace-scoped token)
@@ -88,6 +89,7 @@ from omniscience_server.mcp.tools import (
     mcp_get_document,
     mcp_get_entity,
     mcp_get_related_entities,
+    mcp_list_entities,
     mcp_list_sources,
     mcp_resolve_incident,
     mcp_search,
@@ -436,6 +438,63 @@ async def get_entity(
         app=_get_app(),
         entity_name=entity_name,
         workspace_id=workspace_id,
+        as_of=parsed_as_of,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Tool: list_entities
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="list_entities",
+    description=(
+        "List entities of a given kind within the caller's workspace, "
+        "optionally filtered by the indexed `cluster` property and/or an "
+        "exact `name`. Answers deterministic platform-state questions such "
+        "as 'which StorageClasses exist in cluster X' or 'does StorageClass "
+        '"gold" exist in cluster X\'. Returns a list of entities (same '
+        "per-entity shape as get_entity). Optional `as_of` (ISO-8601 UTC "
+        "datetime) returns the state at that time per ADR-0008 §5; default "
+        "is the still-current state. Requires a workspace-scoped token."
+    ),
+)
+async def list_entities(
+    kind: str,
+    ctx: Context[Any, Any, Any],
+    cluster: str | None = None,
+    name: str | None = None,
+    as_of: str | None = None,
+) -> dict[str, Any]:
+    """list_entities tool — requires scope 'search' AND a workspace-scoped token.
+
+    Mirrors the auth posture of :func:`get_entity` — graph reads are
+    workspace-scoped, fail-closed, and reject unscoped tokens.  Delegates
+    to ``mcp_list_entities`` -> ``GraphStore.list_entities`` (committed in
+    f8240b7).  ``as_of`` is optional; when set it is parsed per the
+    ADR-0008 §5 contract and forwarded to the bitemporal store query.
+    """
+    token = await _resolve_token(ctx)
+    _require_scope(token, Scope.search)
+    _record_tool_invocation(tool_name="list_entities", token=token)
+    assert token is not None  # noqa: S101 — narrows type for mypy
+
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        log.warning(
+            "mcp_list_entities_rejected_no_workspace",
+            token_prefix=token.token_prefix,
+        )
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+
+    parsed_as_of = _parse_as_of(as_of)
+    return await mcp_list_entities(
+        app=_get_app(),
+        workspace_id=workspace_id,
+        kind=kind,
+        cluster=cluster,
+        name=name,
         as_of=parsed_as_of,
     )
 
