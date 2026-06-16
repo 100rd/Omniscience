@@ -4,15 +4,6 @@
 
 Retrieval-only by design: Omniscience returns **linked evidence with citations and confidence** — graph entities, related artifacts, and source chunks — and the calling LLM synthesizes the answer. No embedded LLM, no opinionated chat, no vendor lock-in. (Write actions against infrastructure are an explicit non-goal of this product; see Action Mode in [docs/vision.md](docs/vision.md#4-product-modes).)
 
-[![MCP Registry](https://img.shields.io/badge/MCP-Registry-blue?logo=anthropic)](https://registry.modelcontextprotocol.io/)
-[![PulseMCP](https://img.shields.io/badge/PulseMCP-listed-orange)](https://www.pulsemcp.com/servers/omniscience)
-[![Cline Marketplace](https://img.shields.io/badge/Cline-Marketplace-7C3AED)](https://github.com/cline/mcp-marketplace)
-[![mcp.directory](https://img.shields.io/badge/mcp.directory-listed-green)](https://mcp.directory/server/omniscience)
-[![Awesome MCP](https://img.shields.io/badge/Awesome-MCP-yellow)](https://github.com/punkpeye/awesome-mcp-servers)
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-
-> Registry badges marked `listed` are **pending** until the submissions tracked in [docs/mcp-catalog-submission.md](docs/mcp-catalog-submission.md) are merged by each catalog's maintainers. The badges will resolve automatically once they land.
-
 ## Why it exists
 
 When a cluster degrades at 03:00, the bottleneck is **context assembly, not the fix**. Git knows what *should* be, Terraform what was *ordered*, Kubernetes what is *running*, Slack *why* it broke last time — and no single system says *these are the same entity*. AI agents layered on top of fragmented data produce plausible but ungrounded hypotheses. Omniscience links those sources into one graph an agent can traverse, so retrieval returns grounded, cited evidence instead of disconnected search hits.
