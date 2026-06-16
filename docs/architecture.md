@@ -13,44 +13,19 @@
 
 ## System overview
 
-```
-                           ┌──────────────────────────────────┐
-                           │  AI clients                       │
-                           │  Claude Code · Cursor · Gemini    │
-                           │  multiqlti · custom agents        │
-                           └──────────────┬───────────────────┘
-                                          │ MCP (stdio / streamable-http)
-                                          │ REST (secondary)
-                           ┌──────────────▼───────────────────┐
-                           │         API Gateway               │
-                           │  MCP server  │  REST + Auth       │
-                           └──────────────┬───────────────────┘
-                                          │
-                           ┌──────────────▼───────────────────┐
-                           │      Retrieval Service            │
-                           │  hybrid: vector + tsvector +      │
-                           │  graph traversal + ACL filter +   │
-                           │  freshness filter                 │
-                           └──────────────┬───────────────────┘
-                                          │
-                ┌─────────────────────────▼─────────────────────┐
-                │                 Index Layer                    │
-                │  pgvector · tsvector · symbol graph ·          │
-                │  tombstones · content-hash dedup               │
-                └─────────────────────────┬─────────────────────┘
-                                          │
-                ┌─────────────────────────▼─────────────────────┐
-                │            Ingestion Pipeline                  │
-                │  queue(NATS) → parser → chunker → embedder →  │
-                │  index-writer  +  DLQ + retry                  │
-                └─────────────────────────┬─────────────────────┘
-                                          │
-                ┌─────────────────────────▼─────────────────────┐
-                │          Source Connector Framework            │
-                │  git · fs · Confluence · Notion · Slack ·     │
-                │  Jira/Linear · Grafana · ArgoCD · k8s · tf-state│
-                │  (push via webhooks · pull via polling)        │
-                └────────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+    AIC["AI clients<br/>Claude Code · Cursor · Gemini · custom agents"]
+    AIC -->|"MCP (stdio / streamable-http) · REST (secondary)"| GW["API Gateway<br/>MCP server · REST + Auth"]
+    GW --> RET["Retrieval Service<br/>hybrid (vector + BM25) + graph traversal<br/>GraphRAG composer · ACL &amp; freshness filters"]
+    RET -->|"reads"| STORES
+    subgraph STORES["Stores (v0.2)"]
+        NEO["Neo4j<br/>entities + edges · bitemporal"]
+        QD["Qdrant<br/>embeddings + payload index"]
+        PG["Postgres<br/>metadata · lineage · tokens"]
+    end
+    ING["Ingestion Pipeline<br/>NATS → parse → chunk → embed → extract → index<br/>DLQ + retry · content-hash dedup · tombstones"] -->|"writes"| STORES
+    CONN["Source Connector Framework<br/>git · fs · Slack · Jira · Grafana · ArgoCD · k8s · AWS · tf-state<br/>push via webhooks · pull via polling · watch"] -->|"document.changed"| ING
 ```
 
 ## Components
@@ -81,14 +56,13 @@ Failures flow to DLQ. Retries are bounded with exponential backoff. Freshness SL
 
 ### 3. Index layer (`packages/index/`)
 
-PostgreSQL-backed:
+Three specialized stores behind one writer (v0.2, Epic #96):
 
-- `documents` — one row per source doc, with `content_hash` and `tombstoned_at`
-- `chunks` — one row per chunk, with `embedding vector`, `text_tsv`, `metadata jsonb`
-- HNSW index on embeddings (cosine)
-- GIN index on tsvector (full-text)
+- **Postgres** — operational metadata: `sources`, `documents` (with `content_hash` + `tombstoned_at`), `chunks` (text + lineage), `ingestion_runs`, `api_tokens`, workspaces.
+- **Qdrant** — chunk embeddings + payload index. Powers the vector leg of hybrid search and the exact `enumerate`/`count` path.
+- **Neo4j** — entities + edges with the bitemporal triple (`valid_from`, `valid_to`, `recorded_at`); see [ADR-0008](decisions/0008-bitemporal-schema-for-neo4j.md).
 
-Single source of truth. No separate vector DB.
+A reconcile worker keeps the three stores consistent. (For the v0.1 single-store pgvector layout, see the `v0.1.x` tag.)
 
 ### 4. Retrieval service (`packages/retrieval/`)
 
@@ -128,7 +102,7 @@ Returns chunks with citations and provenance.
 
 Two transports:
 
-- **MCP server** (primary) — stdio + streamable-http. Tools: `search`, `get_document`, `list_sources`, `source_stats`.
+- **MCP server** (primary) — stdio + streamable-http. Tools: `search`, `get_document`, `get_entity`, `get_related_entities`, `resolve_incident`, `incident_timeline`, `blast_radius`, `replay_context`, `suggest_runbook`, `find_similar_incidents`, `generate_postmortem`, `list_sources`, `source_stats`. See [api/mcp.md](api/mcp.md).
 - **REST** (secondary) — `/search`, `/sources`, `/documents/:id`, `/ingest/webhook/:source`, `/health`.
 
 Both hit the same retrieval service.
@@ -170,70 +144,63 @@ Most of Omniscience is deterministic. The exception is **AgenticConnector** — 
 
 ## Data flow: a source update
 
-```
-GitHub push webhook
-       │
-       ▼
-┌──────────────┐     ┌──────────────┐     ┌─────────────┐
-│ REST webhook │────▶│  NATS stream │────▶│  Ingestion  │
-│  receiver    │     │  git.events  │     │   worker    │
-└──────────────┘     └──────────────┘     └──────┬──────┘
-                                                  │
-                     ┌────────────────────────────┴──────────┐
-                     │                                        │
-                     ▼                                        ▼
-              ┌─────────────┐                         ┌─────────────┐
-              │  Fetch diff │                         │ Determine    │
-              │  vs last    │                         │ affected     │
-              │  indexed    │                         │ docs         │
-              └──────┬──────┘                         └──────┬──────┘
-                     │                                        │
-                     └────────────────────┬───────────────────┘
-                                          ▼
-                               ┌──────────────────┐
-                               │  Parse → chunk → │
-                               │  embed → index   │
-                               └────────┬─────────┘
-                                        │
-                                        ▼
-                               ┌──────────────────┐
-                               │  Content-hash    │
-                               │  dedup           │
-                               └────────┬─────────┘
-                                        │
-                                        ▼
-                               ┌──────────────────┐
-                               │  Upsert + emit   │
-                               │  `doc.indexed`   │
-                               └──────────────────┘
+Connectors emit change events onto NATS JetStream; the ingestion worker parses, chunks,
+embeds, and extracts entities/edges, then writes each store and a reconcile worker keeps
+them consistent. Content-hash dedup skips cosmetic changes; removals are tombstoned, not deleted.
+
+```mermaid
+flowchart TB
+    subgraph SRC["Sources"]
+        S1["Git / FS<br/>code · IaC · docs"]
+        S2["Slack<br/>incident chat"]
+        S3["AWS<br/>Config / resources"]
+        S4["S3<br/>Terraform state"]
+        S5["GitHub<br/>PRs / MRs"]
+        S6["Datadog · PagerDuty · OTel"]
+        S7["Kubernetes<br/>operator (watch)"]
+    end
+    SRC -->|"webhook push · poll · watch"| CONN["Source Connectors<br/>packages/connectors"]
+    CONN -->|"document.changed events"| NATS["NATS JetStream<br/>per-source streams + DLQ"]
+    NATS --> WK["Ingestion Worker<br/>bounded retry · DLQ"]
+    WK --> P["Parse<br/>tree-sitter (code) · markdown<br/>infra: terraform / tfstate / k8s"]
+    P --> C["Chunk<br/>strategy per source"]
+    C --> E["Embed<br/>Ollama (default) · OpenAI / Voyage"]
+    P --> G["Extract entities + edges<br/>+ cross-source identity resolution"]
+    E --> DEDUP["Content-hash dedup<br/>tombstones, not deletes"]
+    G --> DEDUP
+    DEDUP --> PG[("Postgres<br/>sources · documents<br/>chunks (text + lineage)<br/>ingestion_runs · tokens")]
+    DEDUP --> QD[("Qdrant<br/>chunk embeddings<br/>+ payload index")]
+    DEDUP --> NEO[("Neo4j<br/>entities + edges<br/>bitemporal: valid_from/to · recorded_at")]
+    PG <-->|"consistency"| RC["Reconcile Worker"]
+    QD <--> RC
+    NEO <--> RC
 ```
 
 ## Data flow: a search query
 
-```
-MCP client (Claude Code)
-         │  search(query="how does auth work", topK=10, max_age=3600)
-         ▼
-┌──────────────────┐
-│  MCP server      │ authenticate token, derive ACL
-└────────┬─────────┘
-         ▼
-┌──────────────────┐
-│ Retrieval service│
-│  1. embed(query) │
-│  2. vector top-K │──┐
-│  3. tsvector rank│──┤
-│  4. RRF merge    │◀─┘
-│  5. ACL filter   │
-│  6. freshness    │
-│     filter       │
-└────────┬─────────┘
-         ▼
-┌──────────────────┐
-│  Response        │
-│  [chunk, ...]    │  each with: text, score, source, uri,
-│                  │             indexed_at, doc_version
-└──────────────────┘
+Plain `search` runs hybrid retrieval (vector kNN + BM25, reciprocal-rank fusion). The graph
+and incident tools run **GraphRAG composition**: anchor on an entity in Neo4j (honoring
+`as_of`), traverse causal/ownership/dependency edges to a candidate set, scope the vector step
+to those candidates, then compose a ranked bundle. ACL/workspace, source, freshness, and
+tombstone filters apply to both; every response carries citations, lineage, confidence, and
+`effective_as_of`. See [ADR-0004](decisions/0004-retrieval-strategy-staged.md).
+
+```mermaid
+flowchart TB
+    CLIENT["MCP client<br/>tool call + token + optional as_of"] --> MCP["MCP Server<br/>authenticate · derive workspace + ACL · parse as_of"]
+    MCP --> ROUTE{"Which tool"}
+
+    ROUTE -->|"search (hybrid, default)"| HY["Hybrid retrieval<br/>vector kNN (Qdrant) + BM25 (tsvector)<br/>reciprocal-rank fusion"]
+
+    ROUTE -->|"get_entity · get_related_entities<br/>resolve_incident · blast_radius · timeline"| GA["Graph anchor (Neo4j, as_of-aware)<br/>resolve subject entity"]
+    GA --> TRAV["Traverse causal / ownership / dependency edges<br/>→ candidate set"]
+    TRAV --> SCOPE["Scope vector search to candidates"]
+    HY -.->|"reused as the vector step"| SCOPE
+    SCOPE --> BUNDLE["Compose ranked bundle (GraphRAG)"]
+
+    HY --> FILT["Filters<br/>workspace / ACL · source / type · freshness · tombstones"]
+    BUNDLE --> FILT
+    FILT --> RESP["Response<br/>chunks + entities · citations · lineage<br/>confidence · effective_as_of"]
 ```
 
 ## Multi-tenancy (v0.2+)
