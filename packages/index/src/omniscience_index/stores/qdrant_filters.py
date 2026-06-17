@@ -46,6 +46,17 @@ from omniscience_index.stores.qdrant_constants import (
     PAYLOAD_WORKSPACE_ID,
 )
 
+# Type alias for the long union Qdrant uses in its ``must`` lists.
+_MustClause = (
+    qm.FieldCondition
+    | qm.IsEmptyCondition
+    | qm.IsNullCondition
+    | qm.HasIdCondition
+    | qm.HasVectorCondition
+    | qm.NestedCondition
+    | qm.Filter
+)
+
 
 @dataclass(frozen=True, slots=True)
 class QdrantFilterBuilder:
@@ -62,7 +73,9 @@ class QdrantFilterBuilder:
     document_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
     external_id: str | None = None
     exclude_tombstoned_flag: bool = False
+    current_only_flag: bool = False
     as_of: datetime | None = None
+    metadata_filters: tuple[tuple[str, str], ...] = field(default_factory=tuple)
 
     def with_source_ids(self, source_ids: list[uuid.UUID]) -> QdrantFilterBuilder:
         """Return a new builder narrowed to the given sources."""
@@ -80,6 +93,23 @@ class QdrantFilterBuilder:
         """Return a new builder that excludes tombstoned points."""
         return replace(self, exclude_tombstoned_flag=True)
 
+    def with_current_only(self) -> QdrantFilterBuilder:
+        """Return a new builder that excludes end-dated (historical) points.
+
+        Stage 1 (bitemporal end-dating, refactor/bitemporal-vector-hybrid):
+        After a content-hash change, old chunk points are end-dated
+        (``valid_to`` set to now) rather than deleted.  Callers that
+        want ONLY the still-valid current generation — e.g.
+        ``_find_document`` — must add this clause so they don't see
+        end-dated points alongside current ones.
+
+        Adds ``IsNullCondition`` on ``valid_to``.  This is the same
+        "still-open" clause that ``build_end_date_chunks_filter`` uses
+        to select candidates for end-dating.  Compose with
+        ``.exclude_tombstoned()`` for full current-state semantics.
+        """
+        return replace(self, current_only_flag=True)
+
     def with_as_of(self, as_of: datetime | None) -> QdrantFilterBuilder:
         """Return a new builder that applies the ADR-0008 §5 ``as_of`` predicate.
 
@@ -92,6 +122,16 @@ class QdrantFilterBuilder:
         """
         return replace(self, as_of=as_of)
 
+    def with_metadata_filter(self, key: str, value: str) -> QdrantFilterBuilder:
+        """Return a new builder narrowed by a ``metadata.<key>`` payload field.
+
+        Stage 4 (enumerate mode): payload-indexed metadata sub-fields
+        (service, resource_type, account_id, kind, namespace) allow
+        O(index) enumeration without HNSW.  Keys are expected to match
+        the constants in ``ENUMERATE_PAYLOAD_INDEXES`` (qdrant_constants).
+        """
+        return replace(self, metadata_filters=(*self.metadata_filters, (key, value)))
+
     def build(self) -> qm.Filter:
         """Emit the concrete Qdrant filter.
 
@@ -99,17 +139,7 @@ class QdrantFilterBuilder:
         ``must`` clause.  This invariant is re-asserted in a unit
         test to guard against future refactors.
         """
-        # Type annotated as the full union Qdrant accepts so mypy
-        # --strict does not reject list invariance.
-        must: list[
-            qm.FieldCondition
-            | qm.IsEmptyCondition
-            | qm.IsNullCondition
-            | qm.HasIdCondition
-            | qm.HasVectorCondition
-            | qm.NestedCondition
-            | qm.Filter
-        ] = [
+        must: list[_MustClause] = [
             qm.FieldCondition(
                 key=PAYLOAD_WORKSPACE_ID,
                 match=qm.MatchValue(value=str(self.workspace_id)),
@@ -141,25 +171,27 @@ class QdrantFilterBuilder:
             # clause keeps the selection tight rather than relying on
             # must_not/not-matching semantics.
             must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_TOMBSTONED_AT)))
+        if self.current_only_flag:
+            # Exclude end-dated points (valid_to IS NOT NULL means the
+            # chunk has been superseded).  Combined with exclude_tombstoned
+            # this gives the full "currently alive" predicate.
+            must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)))
         if self.as_of is not None:
             # ADR-0008 §5 canonical open-closed predicate, ADR-0006 §6
             # cross-store alignment.  Layered as additional ``must``
             # clauses on top of workspace_id — never replaces it.
             must.extend(_as_of_must_clauses(self.as_of))
+        for meta_key, meta_value in self.metadata_filters:
+            must.append(
+                qm.FieldCondition(
+                    key=meta_key,
+                    match=qm.MatchValue(value=meta_value),
+                )
+            )
         return qm.Filter(must=must)
 
 
-def _as_of_must_clauses(
-    as_of: datetime,
-) -> list[
-    qm.FieldCondition
-    | qm.IsEmptyCondition
-    | qm.IsNullCondition
-    | qm.HasIdCondition
-    | qm.HasVectorCondition
-    | qm.NestedCondition
-    | qm.Filter
-]:
+def _as_of_must_clauses(as_of: datetime) -> list[_MustClause]:
     """Build the ADR-0008 §5 ``as_of`` predicate as Qdrant ``must`` clauses.
 
     The canonical predicate is
@@ -181,27 +213,11 @@ def _as_of_must_clauses(
     for ensuring ``as_of`` is timezone-aware (the ``SearchRequest``
     validator at the public API surface enforces this).
     """
-    valid_from_clause: (
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ) = qm.FieldCondition(
+    valid_from_clause: _MustClause = qm.FieldCondition(
         key=PAYLOAD_VALID_FROM,
         range=qm.DatetimeRange(lte=as_of),
     )
-    valid_to_open_clause: (
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ) = qm.Filter(
+    valid_to_open_clause: _MustClause = qm.Filter(
         should=[
             qm.FieldCondition(
                 key=PAYLOAD_VALID_TO,
@@ -232,6 +248,35 @@ def build_as_of_filter(
     return builder.build()
 
 
+def build_enumerate_filter(
+    *,
+    workspace_id: uuid.UUID,
+    metadata_key: str,
+    metadata_value: str,
+    source_id: uuid.UUID | None = None,
+) -> qm.Filter:
+    """Build a workspace-scoped filter for enumerate-mode payload scanning.
+
+    Stage 4 (enumerate mode, refactor/bitemporal-vector-hybrid):
+    Enumerate queries ("all X matching Y") bypass HNSW and use
+    ``exact=True`` Qdrant count + scroll on payload indexes.
+    This helper constructs the appropriate filter for a
+    ``metadata.<key>`` dimension (service, resource_type, etc.).
+
+    The filter selects current-only (``valid_to IS NULL``) non-tombstoned
+    points.  Workspace scoping is mandatory per ADR-0006 §ACL.
+    """
+    builder = (
+        QdrantFilterBuilder(workspace_id=workspace_id)
+        .exclude_tombstoned()
+        .with_current_only()
+        .with_metadata_filter(metadata_key, metadata_value)
+    )
+    if source_id is not None:
+        builder = builder.with_source_ids([source_id])
+    return builder.build()
+
+
 def build_retention_eligible_filter(
     *,
     workspace_id: uuid.UUID,
@@ -251,15 +296,7 @@ def build_retention_eligible_filter(
     entirely (re-embedding from archive is not supported in v1, see
     ADR-0009 §5).
     """
-    must: list[
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ] = [
+    must: list[_MustClause] = [
         qm.FieldCondition(
             key=PAYLOAD_WORKSPACE_ID,
             match=qm.MatchValue(value=str(workspace_id)),
@@ -280,15 +317,7 @@ def build_warm_tier_filter(*, workspace_id: uuid.UUID) -> qm.Filter:
     pinning a specific ``snapshot_date``.  Workspace-scoped — the
     cross-tenant invariant from ADR-0006 §ACL carry-forward applies.
     """
-    must: list[
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ] = [
+    must: list[_MustClause] = [
         qm.FieldCondition(
             key=PAYLOAD_WORKSPACE_ID,
             match=qm.MatchValue(value=str(workspace_id)),
@@ -312,15 +341,7 @@ def build_warm_archive_filter(
     are evicted from Qdrant entirely; the filter selects warm-tier
     chunks for the specific snapshot date being archived.
     """
-    must: list[
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ] = [
+    must: list[_MustClause] = [
         qm.FieldCondition(
             key=PAYLOAD_WORKSPACE_ID,
             match=qm.MatchValue(value=str(workspace_id)),
@@ -361,15 +382,7 @@ def build_end_date_chunks_filter(
     ``valid_to`` — symmetric with the existing ``exclude_tombstoned``
     pattern in :class:`QdrantFilterBuilder`.
     """
-    must: list[
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ] = [
+    must: list[_MustClause] = [
         qm.FieldCondition(
             key=PAYLOAD_WORKSPACE_ID,
             match=qm.MatchValue(value=str(workspace_id)),
@@ -380,15 +393,7 @@ def build_end_date_chunks_filter(
         ),
         qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)),
     ]
-    must_not: list[
-        qm.FieldCondition
-        | qm.IsEmptyCondition
-        | qm.IsNullCondition
-        | qm.HasIdCondition
-        | qm.HasVectorCondition
-        | qm.NestedCondition
-        | qm.Filter
-    ] = []
+    must_not: list[_MustClause] = []
     if exclude_external_ids:
         must_not.append(
             qm.FieldCondition(
@@ -420,10 +425,36 @@ def build_tombstone_sweep_filter(*, cutoff_iso: str) -> qm.Filter:
     )
 
 
+def build_point_ids_filter(
+    *,
+    workspace_id: uuid.UUID,
+    point_ids: list[str],
+) -> qm.Filter:
+    """Build a workspace-scoped filter selecting a specific set of point IDs.
+
+    Stage 1 (end-dating, refactor/bitemporal-vector-hybrid):
+    Used by ``_end_date_points`` to set ``valid_to`` on a batch of
+    known point ids while keeping the workspace must-clause intact.
+    Workspace scoping is retained even though point ids are globally
+    unique, so the lint rule stays satisfied and a buggy caller cannot
+    accidentally end-date foreign-workspace points.
+    """
+    must: list[_MustClause] = [
+        qm.FieldCondition(
+            key=PAYLOAD_WORKSPACE_ID,
+            match=qm.MatchValue(value=str(workspace_id)),
+        ),
+        qm.HasIdCondition(has_id=point_ids),  # type: ignore[arg-type]
+    ]
+    return qm.Filter(must=must)
+
+
 __all__ = [
     "QdrantFilterBuilder",
     "build_as_of_filter",
     "build_end_date_chunks_filter",
+    "build_enumerate_filter",
+    "build_point_ids_filter",
     "build_retention_eligible_filter",
     "build_tombstone_sweep_filter",
     "build_warm_archive_filter",

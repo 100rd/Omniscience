@@ -10,6 +10,17 @@ GET    /api/v1/sources/{id}/stats— source statistics
 
 Read operations require ``sources:read`` scope.
 Write operations require ``sources:write`` scope.
+
+ACL invariant (cross-tenant isolation)
+---------------------------------------
+All read and write endpoints extract the caller's workspace_id from the
+bearer token (via ``get_workspace_id``) and enforce ``Source.tenant_id ==
+workspace_id``.  A legacy token with no workspace_id is rejected fail-closed
+with 403 — it is never permitted to see all tenants' data.
+
+For single-resource endpoints (GET/PATCH/DELETE /sources/{id} and
+/sources/{id}/stats) a mismatched tenant returns 404 (not 403) to avoid
+leaking resource existence to other tenants.
 """
 
 from __future__ import annotations
@@ -21,7 +32,14 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from omniscience_core.auth.middleware import require_scope
 from omniscience_core.auth.scopes import Scope
-from omniscience_core.db.models import IngestionRunStatus, Source, SourceStatus, SourceType
+from omniscience_core.auth.workspace import get_workspace_id
+from omniscience_core.db.models import (
+    ApiToken,
+    IngestionRunStatus,
+    Source,
+    SourceStatus,
+    SourceType,
+)
 from omniscience_core.db.schemas import SourceCreate, SourceRead, SourceUpdate
 from omniscience_core.queue.producer import QueueProducer
 from pydantic import BaseModel
@@ -76,9 +94,30 @@ def _get_db_factory(request: Request) -> Any:
     return factory
 
 
-async def _get_source_or_404(db: AsyncSession, source_id: uuid.UUID) -> Source:
+def _require_workspace(token: ApiToken) -> uuid.UUID:
+    """Return workspace_id from token.
+
+    If the token has no workspace (legacy token, workspace_id is None),
+    get_workspace_id raises PermissionError("forbidden:workspace_required").
+    The global PermissionError handler in rest/errors.py converts that to
+    HTTP 403 — no per-endpoint guard needed here.
+    """
+    return get_workspace_id(token)
+
+
+async def _get_source_or_404(
+    db: AsyncSession,
+    source_id: uuid.UUID,
+    *,
+    workspace_id: uuid.UUID,
+) -> Source:
+    """Fetch source by id; return 404 when absent OR when tenant mismatch.
+
+    Using 404 for tenant mismatch deliberately avoids leaking cross-tenant
+    resource existence (returning 403 would confirm the resource exists).
+    """
     source = await db.get(Source, source_id)
-    if source is None:
+    if source is None or source.tenant_id != workspace_id:
         raise HTTPException(
             status_code=404,
             detail={"code": "source_not_found", "message": f"Source {source_id} not found"},
@@ -147,17 +186,23 @@ async def list_sources(
     request: Request,
     source_type: SourceType | None = None,
     status: SourceStatus | None = None,
+    token: ApiToken = _read_scope_dep,
 ) -> list[SourceRead]:
-    """List all configured sources, optionally filtered by type and/or status.
+    """List sources scoped to the caller's workspace.
 
     Query params: ``source_type``, ``status``
     Requires scope: ``sources:read``
+
+    ACL: token workspace_id must be present; results filtered to
+    ``Source.tenant_id == workspace_id`` only.  Legacy tokens (no
+    workspace_id) are rejected fail-closed with 403.
     """
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
     async with factory() as db:
-        stmt = select(Source)
+        stmt = select(Source).where(Source.tenant_id == workspace_id)
         if source_type is not None:
             stmt = stmt.where(Source.type == source_type)
         if status is not None:
@@ -214,16 +259,20 @@ async def create_source(
 async def get_source(
     source_id: uuid.UUID,
     request: Request,
+    token: ApiToken = _read_scope_dep,
 ) -> SourceRead:
-    """Retrieve a single source by ID.
+    """Retrieve a single source by ID scoped to the caller's workspace.
 
+    Returns 404 when the source does not exist OR belongs to a different
+    workspace — avoids leaking resource existence.
     Requires scope: ``sources:read``
     """
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
     async with factory() as db:
-        source = await _get_source_or_404(db, source_id)
+        source = await _get_source_or_404(db, source_id, workspace_id=workspace_id)
         return SourceRead.model_validate(source)
 
 
@@ -237,16 +286,20 @@ async def update_source(
     source_id: uuid.UUID,
     payload: SourceUpdate,
     request: Request,
+    token: ApiToken = _write_scope_dep,
 ) -> SourceRead:
-    """Partially update a source's config, secrets_ref, status, or freshness SLA.
+    """Partially update a source scoped to the caller's workspace.
 
+    Returns 404 when the source does not exist OR belongs to a different
+    workspace.
     Requires scope: ``sources:write``
     """
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
     async with factory() as db:
-        source = await _get_source_or_404(db, source_id)
+        source = await _get_source_or_404(db, source_id, workspace_id=workspace_id)
 
         update_data = payload.model_dump(exclude_unset=True)
         for field, value in update_data.items():
@@ -269,17 +322,20 @@ async def update_source(
 async def delete_source(
     source_id: uuid.UUID,
     request: Request,
+    token: ApiToken = _write_scope_dep,
 ) -> None:
-    """Remove a source. Associated documents and chunks are tombstoned then
-    purged by the janitor background process.
+    """Remove a source scoped to the caller's workspace.
 
+    Returns 404 when the source does not exist OR belongs to a different
+    workspace.
     Requires scope: ``sources:write``
     """
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
     async with factory() as db:
-        source = await _get_source_or_404(db, source_id)
+        source = await _get_source_or_404(db, source_id, workspace_id=workspace_id)
         await db.delete(source)
         await db.commit()
 
@@ -296,6 +352,7 @@ async def delete_source(
 async def trigger_sync(
     source_id: uuid.UUID,
     request: Request,
+    token: ApiToken = _write_scope_dep,
 ) -> SyncResponse:
     """Trigger an immediate manual sync for the given source.
 
@@ -305,20 +362,19 @@ async def trigger_sync(
     202 — the caller can monitor run progress via
     ``GET /api/v1/ingestion-runs/{run_id}``.
 
-    The published :class:`~omniscience_server.ingestion.events.DocumentChangeEvent`
-    uses ``external_id="*"`` and ``action="updated"`` as a sentinel that
-    instructs the ingestion worker to perform a full re-sync of the source.
-
+    Returns 404 when the source does not exist OR belongs to a different
+    workspace.
     Requires scope: ``sources:write``
     """
     from omniscience_core.db.models import IngestionRun
 
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
     async with factory() as db:
-        # Verify source exists and capture its type for the NATS subject.
-        source = await _get_source_or_404(db, source_id)
+        # Verify source exists within the caller's workspace.
+        source = await _get_source_or_404(db, source_id, workspace_id=workspace_id)
         source_type = str(source.type)
 
         # Create an ingestion run record.
@@ -350,19 +406,23 @@ async def trigger_sync(
 async def source_stats(
     source_id: uuid.UUID,
     request: Request,
+    token: ApiToken = _read_scope_dep,
 ) -> SourceStatsResponse:
-    """Return statistics for a source: document counts, chunk count, last sync.
+    """Return statistics for a source scoped to the caller's workspace.
 
+    Returns 404 when the source does not exist OR belongs to a different
+    workspace.
     Requires scope: ``sources:read``
     """
     from omniscience_core.db.models import Chunk, Document, IngestionRun
     from sqlalchemy import func
 
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
     async with factory() as db:
-        source = await _get_source_or_404(db, source_id)
+        source = await _get_source_or_404(db, source_id, workspace_id=workspace_id)
 
         # Total documents for this source
         total_docs_result = await db.execute(

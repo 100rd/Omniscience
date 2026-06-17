@@ -1,7 +1,37 @@
-"""Atomic index writer: upsert documents + chunks, tombstone, and purge.
+"""Index writer: upsert documents + chunks, tombstone, and purge.
 
-All public methods run within a single database transaction so callers
-never observe a half-written state.
+**Consistency model (partial-failure semantics)**
+
+The write path covers three heterogeneous stores.  Only the Postgres
+transaction is atomic.  Qdrant and Neo4j writes run outside it:
+
+1. ``Postgres`` — document + chunk rows inside ``session.begin()``.
+   ACID-guaranteed: either fully committed or rolled back.
+
+2. ``Qdrant`` — ``upsert_chunks`` is called *inside* the ``session.begin()``
+   context so that a Qdrant failure causes the surrounding context-manager
+   to roll back the Postgres transaction **before commit**.  This prevents
+   the ``pg_missing_qdrant`` drift class in the common failure case.
+   However, a crash after Postgres commits and before Qdrant ACKs still
+   leaves permanent drift (e.g. process SIGKILL between the two).
+
+3. ``Neo4j`` — ``upsert_graph`` is called by ``IngestionWorker`` *after*
+   the ``upsert_document`` call returns.  It is entirely outside the
+   Postgres transaction.  A failure here produces the ``neo4j_orphan``
+   drift class.
+
+**Compensation**
+
+Drift is detected and repaired by the ``ReconcileWorker``
+(``omniscience_server.reconcile_worker``), which periodically
+cross-checks all three stores and:
+
+* marks ``ingestion_run`` rows as ``partial`` for ``pg_missing_qdrant``,
+* hard-deletes orphan Qdrant chunks (``qdrant_orphan``),
+* records a Prometheus metric for ``neo4j_orphan`` (deferred to the
+  retention worker for Neo4j cleanup).
+
+See also ``docs/decisions/0010-reconcile-worker.md`` (if present).
 """
 
 from __future__ import annotations
@@ -45,7 +75,11 @@ class UpsertResult:
 
 
 class IndexWriter:
-    """Write documents and their chunks atomically into the hybrid store."""
+    """Write documents and their chunks into the hybrid store.
+
+    See module docstring for the partial-failure semantics and the
+    ``ReconcileWorker`` compensation mechanism.
+    """
 
     def __init__(
         self,
@@ -73,7 +107,20 @@ class IndexWriter:
         workspace_id: uuid.UUID | None = None,
         ingestion_run_id: uuid.UUID | None = None,
     ) -> UpsertResult:
-        """Orchestrate document upsert across Postgres and Qdrant."""
+        """Persist a document and its chunks across Postgres and Qdrant.
+
+        **Failure semantics (not atomic):**
+        Postgres and Qdrant writes are *not* wrapped in a distributed
+        transaction.  Qdrant ``upsert_chunks`` is called inside the
+        ``session.begin()`` scope so that a Qdrant failure triggers a
+        Postgres rollback — preventing drift in the common crash case.
+        A process crash *after* the Postgres commit but *before* the
+        Qdrant ACK still produces ``pg_missing_qdrant`` drift.
+        The ``ReconcileWorker`` detects and compensates for this case.
+
+        ``upsert_graph`` (Neo4j) is called by the caller after this
+        method returns and is always outside the Postgres transaction.
+        """
         async with self._session_factory() as session, session.begin():
             existing = await self._find_document(session, source_id, external_id)
 
@@ -100,6 +147,9 @@ class IndexWriter:
             await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
 
             # 2. Qdrant Vector Write (if adapter provided)
+            #    Executed inside session.begin() so that a Qdrant failure
+            #    causes the surrounding context-manager to roll back the PG
+            #    transaction before it is committed.
             if self._vector_store and workspace_id:
                 vector_metadata = dict(metadata)
                 vector_metadata["workspace_id"] = str(workspace_id)
@@ -161,9 +211,25 @@ class IndexWriter:
     async def purge_tombstones(self, older_than: timedelta) -> int:
         """Hard-delete tombstoned documents older than *older_than*.
 
-        Returns the number of documents removed (their chunks cascade-delete
-        automatically via the FK ``ON DELETE CASCADE`` constraint).
+        Deletion order: Qdrant points first, then Postgres rows.
+
+        Rationale: if Qdrant fails, Postgres rows survive and the document
+        remains visible to the next purge run — no data is lost.  The reverse
+        order (PG first) would leave orphan Qdrant vectors with no Postgres
+        anchor, causing ghost points to accumulate silently.  A surviving
+        Qdrant-side orphan (our failure mode) is a temporary space waste;
+        a dangling Postgres reference with no vector is an integrity violation
+        that breaks the hybrid query path.
+
+        When ``_vector_store`` is None the Qdrant step is skipped and only
+        the Postgres DELETE is executed (backward-compatible behaviour).
+
+        Returns the number of Postgres document rows removed (chunks
+        cascade-delete automatically via FK ``ON DELETE CASCADE``).
         """
+        if self._vector_store is not None:
+            await self._vector_store.delete_tombstoned(older_than)
+
         cutoff = datetime.now(UTC) - older_than
         async with self._session_factory() as session, session.begin():
             stmt = (
@@ -183,7 +249,12 @@ class IndexWriter:
         workspace_id: uuid.UUID | None = None,
         snapshot_at: datetime | None = None,
     ) -> None:
-        """Persist symbol graph into Neo4j (orchestrated)."""
+        """Persist symbol graph into Neo4j (orchestrated).
+
+        **Always outside the Postgres transaction.**  A failure here
+        produces ``neo4j_orphan`` drift.  The ``ReconcileWorker``
+        records the metric; cleanup is deferred to the retention worker.
+        """
         if self._graph_store and workspace_id:
             # Tag entities with workspace_id for Neo4j ACL
             for ent in entities:

@@ -66,6 +66,23 @@ class SourceStatus(enum.StrEnum):
     error = "error"
 
 
+class SyncMode(enum.StrEnum):
+    """Controls whether the scheduler auto-triggers sync for a source.
+
+    ``pull`` — default; the in-stack scheduler re-syncs the source on TTL
+               expiry by publishing a trigger to NATS (pull/discovery model).
+
+    ``push`` — the source is driven by an external process (e.g. a launchd
+               script or seed tool).  The scheduler skips it entirely to avoid
+               attempted in-cluster discovery from an off-cluster host.
+               Freshness monitoring is still active — a silent push process is
+               a valuable operational signal.
+    """
+
+    pull = "pull"
+    push = "push"
+
+
 class IngestionRunStatus(enum.StrEnum):
     running = "running"
     ok = "ok"
@@ -140,6 +157,12 @@ class Source(Base):
         nullable=False,
         default=SourceStatus.active,
     )
+    sync_mode: Mapped[SyncMode] = mapped_column(
+        Enum(SyncMode, name="sync_mode"),
+        nullable=False,
+        default=SyncMode.pull,
+        server_default="pull",
+    )
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_error_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -168,6 +191,7 @@ class Source(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "name", name="uq_sources_tenant_name"),
         Index("ix_sources_status", "status"),
+        Index("ix_sources_sync_mode", "sync_mode"),
     )
 
 
@@ -526,5 +550,6 @@ __all__ = [
     "Source",
     "SourceStatus",
     "SourceType",
+    "SyncMode",
     "Workspace",
 ]

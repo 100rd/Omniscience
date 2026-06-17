@@ -109,3 +109,66 @@ Rejected for v0.2. Separate graph DB adds operational complexity. Postgres with 
   - Adaptive retrieval agent
 - `docs/api/mcp.md` documents the `retrieval_strategy` parameter now (contract), but only `hybrid` works in v0.1; other values land in v0.2
 - `docs/architecture.md` gets an "Adaptive retrieval" subsection reflecting the staged plan
+
+---
+
+## Amendment — Stage 3: Qdrant-native sparse + RRF hybrid (refactor/bitemporal-vector-hybrid, 2026-06-10)
+
+**Status**: Implemented (branch `refactor/bitemporal-vector-hybrid`)
+
+### What changed
+
+ADR-0004 specified `"hybrid" = vector + BM25` with the BM25 half staying in Postgres tsvector.
+After ADR-0006 moved dense vectors to Qdrant and ADR-0005 removed the structural-Postgres path,
+the tsvector BM25 half never materialised — `retrieval_strategy` accepted `"hybrid"`, `"keyword"`,
+`"structural"`, and `"auto"` at the API level but all four silently dispatched to dense-only HNSW.
+
+This amendment closes that gap: sparse BM25-compatible vectors are now stored and queried
+entirely inside Qdrant alongside the dense vectors, and the `retrieval_strategy` field now
+drives real dispatch.
+
+### Implementation (Stage 3)
+
+**Sparse vector**: A named-vector slot `sparse_bm25` is added to every Qdrant collection
+(``SparseVectorParams(index=SparseIndexParams(on_disk=False))``).  Sparse vectors are built
+client-side at ingest time from the chunk `text` payload:
+
+1. Lower-case, split on `[^a-z0-9]+`.
+2. Drop stop-words and single-character tokens.
+3. Hash each token to a bucket index (`hash(token) % 2^20`).
+4. Count term frequency; max-TF normalise to `[0, 1]`.
+
+Choice rationale: the Qdrant FASTEMBED sparse encoder was rejected because (a) it adds a large
+model download and GPU dependency, (b) plain TF on tokens is sufficient for our use case (exact
+service names, error strings, k8s kinds, account IDs), and (c) the tokeniser is deterministic
+and testable without a container.
+
+**Dispatch** (``QdrantVectorStore.search``):
+
+| `retrieval_strategy` | Qdrant query |
+|---|---|
+| `"keyword"` | sparse-only (`query_points(using="sparse_bm25")`) |
+| `"hybrid"` (default) | RRF merge of dense + sparse |
+| `"auto"` | same as `"hybrid"` |
+| `"structural"` | dense-only (graph layer narrows candidates first) |
+
+**RRF merge**: Reciprocal Rank Fusion with `k=60` (Cormack et al. 2009).
+`score(d) = Σ 1/(60 + rank_i(d))` summed over dense and sparse ranked lists.
+The merge is applied inside the vector store; `GraphRAGComposer._run_merge_stage`
+applies graph-affinity re-scoring on top as a third signal.
+
+`QueryStats.text_matches` is now populated with the actual sparse-hit count
+(was always 0 before this amendment).
+
+**Migration**: `scripts/reindex_qdrant_hybrid.py` backfills `sparse_bm25` vectors on existing
+points that have a `text` payload but no sparse vector slot.  It is idempotent (skips already-
+vectorised points) and supports `--dry-run`.  Do not run on production without a backup.
+
+### Consequences
+
+- `SearchRequest.retrieval_strategy` field now drives real behaviour (not just accepted and ignored).
+- Clients that relied on `"keyword"` always producing the same results as `"hybrid"` must be
+  updated — keyword now returns strictly sparse results, which score differently.
+- The Qdrant collection schema is not backward-compatible: points ingested before Stage 3 lack
+  `sparse_bm25` vectors.  Run `scripts/reindex_qdrant_hybrid.py` before enabling keyword/hybrid
+  queries on an existing collection.
