@@ -29,6 +29,7 @@ The handler reads ``request.app.state.graph_store`` — a
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
 from typing import Annotated, Any
 from urllib.parse import unquote
@@ -40,6 +41,7 @@ from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
 from omniscience_core.storage import EntityNodeView, GraphResultView, GraphStore
+from pydantic import BaseModel
 
 from omniscience_server.as_of import (
     DEGRADED_PRE_HISTORY,
@@ -351,6 +353,70 @@ def _result_to_dict(result: GraphResultView) -> dict[str, Any]:
             "depth_reached": depth_reached,
         },
     }
+
+
+class MergeNodesRequest(BaseModel):
+    source_id: uuid.UUID
+    target_id: uuid.UUID
+
+
+class UnmergeNodeRequest(BaseModel):
+    merged_node_id: uuid.UUID
+
+
+@router.post(
+    "/entities/merge",
+    summary="Merge source node into target node reversibly",
+    dependencies=[_search_scope_dep],
+)
+async def merge_entities(
+    req: MergeNodesRequest,
+    request: Request,
+    token: ApiToken = _current_token_dep,
+) -> dict[str, Any]:
+    graph_store: GraphStore | None = getattr(request.app.state, "graph_store", None)
+    if graph_store is None:
+        raise HTTPException(status_code=503, detail="Graph store not available")
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        raise HTTPException(status_code=403, detail="Workspace-scoped token required")
+
+    success = await graph_store.merge_nodes(
+        workspace_id=workspace_id,
+        source_id=req.source_id,
+        target_id=req.target_id,
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail="Merge failed. Ensure both nodes exist.")
+    return {"success": True, "message": "Nodes merged successfully"}
+
+
+@router.post(
+    "/entities/unmerge",
+    summary="Unmerge/split a previously merged node",
+    dependencies=[_search_scope_dep],
+)
+async def unmerge_entity(
+    req: UnmergeNodeRequest,
+    request: Request,
+    token: ApiToken = _current_token_dep,
+) -> dict[str, Any]:
+    graph_store: GraphStore | None = getattr(request.app.state, "graph_store", None)
+    if graph_store is None:
+        raise HTTPException(status_code=503, detail="Graph store not available")
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        raise HTTPException(status_code=403, detail="Workspace-scoped token required")
+
+    success = await graph_store.unmerge_node(
+        workspace_id=workspace_id,
+        merged_node_id=req.merged_node_id,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=400, detail="Unmerge failed. Ensure node was previously merged."
+        )
+    return {"success": True, "message": "Node unmerged successfully"}
 
 
 __all__ = ["router"]

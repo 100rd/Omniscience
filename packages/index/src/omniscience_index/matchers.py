@@ -20,6 +20,10 @@ score in the range ``[0.0, 1.0]``:
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from omniscience_core.storage.graph import EntityNodeView
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -155,6 +159,67 @@ def resource_name_match(tf_resource: str, k8s_resource: str) -> float:
     return 2 * len(intersection) / denominator
 
 
+def arn_match(ent_a: EntityNodeView, ent_b: EntityNodeView) -> float:
+    """Return 1.0 if both entities have matching ARNs in their metadata."""
+    meta_a = getattr(ent_a, "metadata", {}) or {}
+    meta_b = getattr(ent_b, "metadata", {}) or {}
+    arn_a = meta_a.get("arn") or meta_a.get("ARN")
+    arn_b = meta_b.get("arn") or meta_b.get("ARN")
+    if arn_a and arn_b and str(arn_a).strip().lower() == str(arn_b).strip().lower():
+        return 1.0
+    return 0.0
+
+
+def otel_match(ent_a: EntityNodeView, ent_b: EntityNodeView) -> float:
+    """Return 1.0 if OTel service name, pod name, or trace ID matches."""
+    meta_a = getattr(ent_a, "metadata", {}) or {}
+    meta_b = getattr(ent_b, "metadata", {}) or {}
+
+    # Service name match
+    svc_a = meta_a.get("service_name") or (ent_a.name if ent_a.kind == "otel_service" else None)
+    svc_b = meta_b.get("service_name") or (ent_b.name if ent_b.kind == "otel_service" else None)
+    if svc_a and svc_b and str(svc_a).strip().lower() == str(svc_b).strip().lower():
+        return 1.0
+
+    # Pod name match
+    pod_a = meta_a.get("pod_name") or (ent_a.name if ent_a.kind == "otel_pod" else None)
+    pod_b = meta_b.get("pod_name") or (ent_b.name if ent_b.kind == "otel_pod" else None)
+    if pod_a and pod_b and str(pod_a).strip().lower() == str(pod_b).strip().lower():
+        return 1.0
+
+    # Trace ID match
+    trace_a = meta_a.get("trace_id")
+    trace_b = meta_b.get("trace_id")
+    if trace_a and trace_b and str(trace_a).strip().lower() == str(trace_b).strip().lower():
+        return 1.0
+
+    return 0.0
+
+
+def tags_match(ent_a: EntityNodeView, ent_b: EntityNodeView) -> float:
+    """Return 1.0 if metadata tags/labels have matching key-value pairs."""
+    meta_a = getattr(ent_a, "metadata", {}) or {}
+    meta_b = getattr(ent_b, "metadata", {}) or {}
+    tags_a = meta_a.get("tags") or meta_a.get("labels")
+    tags_b = meta_b.get("tags") or meta_b.get("labels")
+
+    if isinstance(tags_a, dict) and isinstance(tags_b, dict) and tags_a and tags_b:
+        common_keys = set(tags_a.keys()) & set(tags_b.keys())
+        if common_keys and all(
+            str(tags_a[k]).strip().lower() == str(tags_b[k]).strip().lower() for k in common_keys
+        ):
+            return 1.0
+    elif (
+        isinstance(tags_a, (list, tuple))
+        and isinstance(tags_b, (list, tuple))
+        and tags_a
+        and tags_b
+    ):
+        if set(tags_a) == set(tags_b):
+            return 1.0
+    return 0.0
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
@@ -167,7 +232,10 @@ def _meaningful_tokens(normalised: str) -> set[str]:
 
 
 __all__ = [
+    "arn_match",
     "exact_name_match",
     "normalize_entity_name",
+    "otel_match",
     "resource_name_match",
+    "tags_match",
 ]
