@@ -6,7 +6,9 @@ Helm chart for deploying Omniscience on Kubernetes.
 
 - Kubernetes 1.25+
 - Helm 3.10+
-- A Postgres 14+ instance with pgvector (built-in or external)
+- A standard Postgres 14+ instance (built-in or external) — operational metadata only; the `pgvector` extension is no longer required as of v0.2 (#105)
+- A Neo4j instance (built-in or external) — entity + edge graph
+- A Qdrant instance (built-in or external) — chunk embeddings
 - A NATS 2.x instance (built-in or external)
 
 ## Install
@@ -55,7 +57,7 @@ helm upgrade --install omniscience ./helm/omniscience \
 | Key | Default | Description |
 |-----|---------|-------------|
 | `postgres.enabled` | `true` | Deploy bundled Postgres |
-| `postgres.image` | `pgvector/pgvector:pg16` | Postgres image |
+| `postgres.image` | `postgres:16-alpine` | Postgres image (standard Postgres; no pgvector extension required as of v0.2) |
 | `postgres.database` | `omniscience` | Database name |
 | `postgres.user` | `omniscience` | Database user |
 | `postgres.storageSize` | `20Gi` | PVC size |

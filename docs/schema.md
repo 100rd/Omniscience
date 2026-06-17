@@ -153,10 +153,14 @@ Symbol relationships (function A calls function B) can be stored as edges in a `
 
 All managed by Alembic. Initial migration:
 
-1. Enable `pgvector` extension (guarded — skip if already installed)
-2. Create all tables above
-3. Create all indexes (HNSW is expensive — ran after bulk loads ideally)
-4. Seed default tenant / admin token (dev mode only)
+1. Create all tables above
+2. Create all indexes
+3. Seed default tenant / admin token (dev mode only)
+
+> **v0.2 note (#105):** the v0.1 initial migration enabled the `pgvector`
+> extension and an HNSW index on `chunks.embedding`. Both were removed in
+> revision `0004` — embeddings now live in Qdrant (ADR-0006). A fresh v0.2
+> install uses standard Postgres with no `vector` extension.
 
 ## See also
 
