@@ -42,7 +42,7 @@ The `retrieval_strategy` parameter lets the caller choose how retrieval works. I
 
 | Value | Behavior | Status |
 |---|---|---|
-| `"hybrid"` (default) | Vector (pgvector HNSW) + BM25 (tsvector), merged via reciprocal rank fusion. Good for ~70–80% of typical queries | v0.1 |
+| `"hybrid"` (default) | Vector (Qdrant HNSW) + BM25 (tsvector), merged via reciprocal rank fusion. Good for ~70–80% of typical queries | v0.1 |
 | `"structural"` | Graph-first. Interpret query as "find entities and traverse" using the structural graph (code imports, infra DEPENDS_ON, doc cross-refs). Falls back to hybrid if graph finds nothing | v0.2 |
 | `"keyword"` | BM25-only. For exact-name lookup (function names, error strings, service names) | v0.1 (via `filters` today; explicit strategy in v0.2) |
 | `"auto"` | A lightweight classifier picks the strategy for you. Use this when you don't want to reason about query shape | v0.2 |

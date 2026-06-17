@@ -107,7 +107,9 @@ Both hit the same retrieval service.
 Single `docker-compose.yml` brings up:
 
 - `app` — Omniscience server (FastAPI + FastMCP + ingestion workers)
-- `postgres` with pgvector
+- `postgres` (`postgres:16-alpine`) — operational metadata only; no pgvector extension as of v0.2 (#105)
+- `neo4j` — entity + edge graph (bitemporal)
+- `qdrant` — chunk embeddings + payload index (vector search)
 - `nats` JetStream
 - `ollama` (optional — if using local embeddings)
 - `caddy` — TLS termination
@@ -117,12 +119,16 @@ stack, see the [Lite deployment profile](#lite-deployment-profile) below.
 
 ### Managed Postgres
 
-Nothing in Omniscience requires the built-in Postgres. Any Postgres 14+ with pgvector works:
+Nothing in Omniscience requires the built-in Postgres. Postgres holds operational
+metadata only (sources, documents, chunk text + lineage, ingestion runs, tokens,
+workspaces) — embeddings live in Qdrant and the graph lives in Neo4j as of v0.2
+(#105), so the `pgvector` extension is **no longer required**. Any standard
+Postgres 14+ works:
 
-- **AWS RDS for PostgreSQL** — pgvector available as a managed extension
-- **Google Cloud SQL** — pgvector extension supported
-- **Supabase / Neon / Crunchy Bridge** — pgvector first-class
-- **Aurora PostgreSQL** — pgvector supported
+- **AWS RDS for PostgreSQL**
+- **Google Cloud SQL**
+- **Supabase / Neon / Crunchy Bridge**
+- **Aurora PostgreSQL**
 
 Set `DATABASE_URL` to the external instance; drop the `postgres` service from Compose. Daily `pg_dump` backup sidecar can be similarly disabled in favor of the managed provider's backup mechanism.
 
