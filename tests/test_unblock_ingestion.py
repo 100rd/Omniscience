@@ -60,6 +60,12 @@ def _make_settings() -> Settings:
     )
 
 
+# Shared workspace UUID so the mocked token's workspace_id matches the
+# mocked source's tenant_id — the sync endpoint is workspace-scoped and
+# returns 404 on a tenant mismatch (see rest/sources._get_source_or_404).
+_WORKSPACE_ID: uuid.UUID = uuid.uuid4()
+
+
 def _make_source(
     source_type: SourceType = SourceType.git,
 ) -> Source:
@@ -72,6 +78,7 @@ def _make_source(
     src.status = SourceStatus.active
     src.last_sync_at = None
     src.last_error = None
+    src.tenant_id = _WORKSPACE_ID
     return src
 
 
@@ -136,6 +143,9 @@ def _make_app_with_source(source: Source | None = None) -> FastAPI:
     token.expires_at = None
     token.is_active = True
     token.last_used_at = None
+    # Workspace-scoped token: must match the source's tenant_id so the
+    # workspace-scoped sync endpoint resolves the source (not 404).
+    token.workspace_id = _WORKSPACE_ID
 
     app = create_app(settings=_make_settings())
 

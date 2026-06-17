@@ -246,9 +246,7 @@ def enrich_elb(
         _enrich_elb_load_balancers(docs, cli, account_id, account_name, region)
         _enrich_elb_target_groups(docs, cli, account_id, account_name, region)
     except Exception as exc:
-        log.warning(
-            "account %s: elbv2 enrichment error — %s", account_name, exc
-        )
+        log.warning("account %s: elbv2 enrichment error — %s", account_name, exc)
 
 
 def _enrich_elb_load_balancers(
@@ -296,9 +294,7 @@ def _enrich_elb_load_balancers(
                 extra_text=extra_text,
                 extra_meta=extra_meta,
             )
-            _enrich_elb_listeners(
-                docs, cli, lb_arn, account_id, account_name, region
-            )
+            _enrich_elb_listeners(docs, cli, lb_arn, account_id, account_name, region)
 
 
 def _enrich_elb_listeners(
@@ -353,9 +349,7 @@ def _enrich_elb_listeners(
         # Attach listener list to the parent LB document.
         if lb_arn in docs and listeners:
             docs[lb_arn]["metadata"]["lb_listeners"] = listeners
-            ports_str = ", ".join(
-                str(lst["port"]) for lst in listeners if lst.get("port")
-            )
+            ports_str = ", ".join(str(lst["port"]) for lst in listeners if lst.get("port"))
             if ports_str:
                 docs[lb_arn]["text"] += f" Listeners on ports: {ports_str}."
     except Exception as exc:
@@ -452,18 +446,12 @@ def enrich_sg(
                         "sg_name": name,
                         "sg_description": sg.get("Description"),
                         "sg_vpc_id": sg.get("VpcId"),
-                        "sg_inbound_rules": _parse_sg_rules(
-                            sg.get("IpPermissions", [])
-                        ),
-                        "sg_outbound_rules": _parse_sg_rules(
-                            sg.get("IpPermissionsEgress", [])
-                        ),
+                        "sg_inbound_rules": _parse_sg_rules(sg.get("IpPermissions", [])),
+                        "sg_outbound_rules": _parse_sg_rules(sg.get("IpPermissionsEgress", [])),
                     },
                 )
     except Exception as exc:
-        log.warning(
-            "account %s: security-group enrichment error — %s", account_name, exc
-        )
+        log.warning("account %s: security-group enrichment error — %s", account_name, exc)
 
 
 def _parse_sg_rules(
@@ -557,9 +545,7 @@ def enrich_rds(
                     },
                 )
     except Exception as exc:
-        log.warning(
-            "account %s: rds enrichment error — %s", account_name, exc
-        )
+        log.warning("account %s: rds enrichment error — %s", account_name, exc)
 
 
 def enrich_ec2(
@@ -577,13 +563,9 @@ def enrich_ec2(
             for reservation in page["Reservations"]:
                 for inst in reservation["Instances"]:
                     inst_id = inst["InstanceId"]
-                    arn = (
-                        f"arn:aws:ec2:{region}:{account_id}:instance/{inst_id}"
-                    )
+                    arn = f"arn:aws:ec2:{region}:{account_id}:instance/{inst_id}"
                     state = inst.get("State", {}).get("Name", "unknown")
-                    tags = {
-                        t["Key"]: t["Value"] for t in inst.get("Tags", [])
-                    }
+                    tags = {t["Key"]: t["Value"] for t in inst.get("Tags", [])}
                     display_name = tags.get("Name") or inst_id
                     extra_text = (
                         f"Instance type: {inst.get('InstanceType', '?')}. "
@@ -613,16 +595,12 @@ def enrich_ec2(
                             "ec2_subnet_id": inst.get("SubnetId"),
                             "ec2_image_id": inst.get("ImageId"),
                             "ec2_launch_time": (
-                                inst["LaunchTime"].isoformat()
-                                if inst.get("LaunchTime")
-                                else None
+                                inst["LaunchTime"].isoformat() if inst.get("LaunchTime") else None
                             ),
                         },
                     )
     except Exception as exc:
-        log.warning(
-            "account %s: ec2-instances enrichment error — %s", account_name, exc
-        )
+        log.warning("account %s: ec2-instances enrichment error — %s", account_name, exc)
 
 
 def enrich_ecs(
@@ -637,13 +615,9 @@ def enrich_ecs(
     try:
         cluster_arns = _list_ecs_clusters(cli)
         for cluster_arn in cluster_arns:
-            _enrich_ecs_services(
-                docs, cli, cluster_arn, account_id, account_name, region
-            )
+            _enrich_ecs_services(docs, cli, cluster_arn, account_id, account_name, region)
     except Exception as exc:
-        log.warning(
-            "account %s: ecs enrichment error — %s", account_name, exc
-        )
+        log.warning("account %s: ecs enrichment error — %s", account_name, exc)
 
 
 def _list_ecs_clusters(cli: Any) -> list[str]:
@@ -745,9 +719,7 @@ def _scrape_account(
         try:
             fn(docs, session, account_id, account_name, region)
         except Exception as exc:
-            log.warning(
-                "%s (%s): %s enrichment failed — %s", account_name, account_id, label, exc
-            )
+            log.warning("%s (%s): %s enrichment failed — %s", account_name, account_id, label, exc)
 
     log.info(
         "%s (%s): %d docs after enrichment (+%d new)",
@@ -804,9 +776,7 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=DEFAULT_OUTPUT,
         help=f"Output JSON path (default: {DEFAULT_OUTPUT})",
     )
-    parser.add_argument(
-        "--verbose", "-v", action="store_true", help="Enable debug logging."
-    )
+    parser.add_argument("--verbose", "-v", action="store_true", help="Enable debug logging.")
     return parser.parse_args(argv)
 
 
@@ -839,9 +809,9 @@ def main(argv: list[str] | None = None) -> None:
     lb_with_ports = 0
     for doc in docs:
         counter[doc["metadata"].get("resource_type", "unknown")] += 1
-        if "loadbalancer" in doc["metadata"].get("resource_type", "") and doc[
-            "metadata"
-        ].get("lb_listeners"):
+        if "loadbalancer" in doc["metadata"].get("resource_type", "") and doc["metadata"].get(
+            "lb_listeners"
+        ):
             lb_with_ports += 1
 
     print(f"\nTotal docs: {len(docs)}")
