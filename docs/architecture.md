@@ -137,7 +137,8 @@ Single `docker-compose.yml` brings up:
 - `ollama` (optional — if using local embeddings)
 - `caddy` — TLS termination
 
-Helm chart available for Kubernetes.
+Helm chart available for Kubernetes. For a trimmed first-run / evaluation
+stack, see the [Lite deployment profile](#lite-deployment-profile) below.
 
 ### Managed Postgres
 
@@ -149,6 +150,56 @@ Nothing in Omniscience requires the built-in Postgres. Any Postgres 14+ with pgv
 - **Aurora PostgreSQL** — pgvector supported
 
 Set `DATABASE_URL` to the external instance; drop the `postgres` service from Compose. Daily `pg_dump` backup sidecar can be similarly disabled in favor of the managed provider's backup mechanism.
+
+### Lite deployment profile
+
+The full stack runs five backing services (Postgres + Neo4j + Qdrant + NATS
+JetStream + Ollama), which is a meaningful ops-burden just to evaluate the
+system (issue #319). The **lite profile** trims that to the minimum required
+for a working install, without forking the application or changing the full
+profile's behaviour.
+
+Bring it up by layering the `docker-compose.lite.yml` override on the base
+file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.lite.yml up -d
+# or, for the published-image variant:
+docker compose -f docker-compose.prod.yml -f docker-compose.lite.yml up -d
+```
+
+What the override changes versus the default `docker compose up`:
+
+| Aspect | Full profile | Lite profile |
+|---|---|---|
+| Embeddings | `ollama` + `ollama-pull` containers | in-process `sentence-transformers` (`EMBEDDING_PROVIDER=local`) — no extra container, no model pull, no GPU, no API key |
+| Postgres backups | `pgbackup` sidecar (daily `pg_dump`) | disabled (eval data is disposable) |
+| Discovery worker | on | off (`DISCOVERY_ENABLED=false`) |
+| Reconcile worker | on | off (`RECONCILE_ENABLED=false`) |
+| Scheduler worker | on | off (`SCHEDULER_ENABLED=false`) |
+| Retention worker | on | off (`RETENTION_ENABLED=false`) |
+| Neo4j memory | 1G/2G/1G heap/pagecache | 512m/512m/256m (laptop-friendly) |
+| Running containers | 9 | 6 (`postgres`, `nats`, `neo4j`, `qdrant`, `app`, `admin`) |
+
+`postgres`, `nats`, `neo4j`, and `qdrant` are **kept** — the application opens
+connections to all four at startup (`apps/server/.../app.py::_lifespan`), so
+they are hard runtime dependencies rather than optional add-ons. Consolidating
+them into a single embedded store (SQLite/DuckDB) is a larger architectural
+change tracked separately; the lite profile is the low-risk first step.
+
+The background-worker switches (`discovery_enabled`, `reconcile_enabled`,
+`scheduler_enabled`, `retention_enabled` in `omniscience_core.config.Settings`)
+all default to **`True`**, so the only thing that disables them is this
+override — a stock `docker compose up` is byte-for-byte unchanged. Re-enable any
+of them in lite by setting the corresponding `*_ENABLED=true` env var.
+
+To re-attach the optional containers without leaving lite, activate their
+parked profiles, e.g. `--profile full-embeddings` (Ollama) or `--profile
+backups` (pgbackup).
+
+For an even lower-ops path, combine the lite profile with **managed Postgres**
+(above): point `DATABASE_URL` at RDS/Cloud SQL/Neon and drop the `postgres`
+service, leaving only NATS + Neo4j + Qdrant to self-host.
 
 ## Agent layer (for AgenticConnector only)
 

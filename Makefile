@@ -1,4 +1,4 @@
-.PHONY: dev test test-fast lint fmt up down clean migrate
+.PHONY: dev test test-fast lint fmt up up-lite down clean migrate
 
 dev:
 	uv run uvicorn omniscience_server.app:create_app --factory --reload --host 0.0.0.0 --port 8000
@@ -20,6 +20,11 @@ fmt:
 
 up:
 	docker compose up -d
+
+# Lite profile (issue #319): trims Ollama, pgbackup, and background workers;
+# in-process embeddings; laptop-friendly Neo4j memory. See docs/architecture.md.
+up-lite:
+	docker compose -f docker-compose.yml -f docker-compose.lite.yml up -d
 
 down:
 	docker compose down

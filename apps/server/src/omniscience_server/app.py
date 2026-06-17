@@ -280,13 +280,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     log.info("ingestion_worker_started")
 
     # --- Discovery worker (v0.4 Preview) ---
-    discovery_worker = DiscoveryWorker(
-        session_factory=session_factory,
-        settings=settings,
-    )
-    discovery_task = asyncio.create_task(discovery_worker.start())
-    app.state.discovery_worker = discovery_worker
-    log.info("discovery_worker_started")
+    # Gated by ``discovery_enabled`` (default True) so the lite profile
+    # (issue #319) can shed this background task; full-profile behaviour
+    # is unchanged.
+    discovery_task: asyncio.Task[None] | None = None
+    discovery_worker: DiscoveryWorker | None = None
+    if settings.discovery_enabled:
+        discovery_worker = DiscoveryWorker(
+            session_factory=session_factory,
+            settings=settings,
+        )
+        discovery_task = asyncio.create_task(discovery_worker.start())
+        app.state.discovery_worker = discovery_worker
+        log.info("discovery_worker_started")
+    else:
+        app.state.discovery_worker = None
+        log.info("discovery_worker_disabled")
 
     # --- Freshness worker ---
     freshness_worker = FreshnessWorker(
@@ -324,18 +333,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         log.info("retention_worker_disabled")
 
     # --- Reconcile worker ---
-    reconcile_worker = ReconcileWorker(
-        session_factory=session_factory,
-        vector_store=qdrant_store,
-        graph_store=neo4j_graph_store,
-        settings=settings,
-    )
-    reconcile_task = asyncio.create_task(reconcile_worker.start())
-    app.state.reconcile_worker = reconcile_worker
-    log.info(
-        "reconcile_worker_started",
-        tick_seconds=getattr(settings, "reconcile_tick_seconds", 3600),
-    )
+    # Gated by ``reconcile_enabled`` (default True) so the lite profile
+    # (issue #319) can shed cross-store drift detection; full-profile
+    # behaviour is unchanged.
+    reconcile_task: asyncio.Task[None] | None = None
+    reconcile_worker: ReconcileWorker | None = None
+    if settings.reconcile_enabled:
+        reconcile_worker = ReconcileWorker(
+            session_factory=session_factory,
+            vector_store=qdrant_store,
+            graph_store=neo4j_graph_store,
+            settings=settings,
+        )
+        reconcile_task = asyncio.create_task(reconcile_worker.start())
+        app.state.reconcile_worker = reconcile_worker
+        log.info(
+            "reconcile_worker_started",
+            tick_seconds=getattr(settings, "reconcile_tick_seconds", 3600),
+        )
+    else:
+        app.state.reconcile_worker = None
+        log.info("reconcile_worker_disabled")
 
     # --- Scheduler worker ---
     scheduler_task: asyncio.Task[None] | None = None
@@ -367,14 +385,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
 
-    discovery_worker.stop()
-    discovery_task.cancel()
+    if discovery_worker is not None and discovery_task is not None:
+        discovery_worker.stop()
+        discovery_task.cancel()
 
     freshness_worker.stop()
     freshness_task.cancel()
 
-    reconcile_worker.stop()
-    reconcile_task.cancel()
+    if reconcile_worker is not None and reconcile_task is not None:
+        reconcile_worker.stop()
+        reconcile_task.cancel()
 
     if scheduler is not None and scheduler_task is not None:
         await scheduler.stop()
