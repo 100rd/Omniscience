@@ -19,8 +19,11 @@ import structlog
 from omniscience_core.storage.graph import EdgeUpsert, EntityNodeView, GraphStore
 
 from omniscience_index.matchers import (
+    arn_match,
     exact_name_match,
+    otel_match,
     resource_name_match,
+    tags_match,
 )
 
 log = structlog.get_logger(__name__)
@@ -115,6 +118,18 @@ class EntityLinker:
         # 1. Exact name match
         if exact_name_match(ent_a.name, ent_b.name) == 1.0:
             return 1.0, "exact_name"
+
+        # 2. ARN match (deterministic)
+        if arn_match(ent_a, ent_b) == 1.0:
+            return 1.0, "arn_match"
+
+        # 3. OTel match (deterministic)
+        if otel_match(ent_a, ent_b) == 1.0:
+            return 1.0, "otel_match"
+
+        # 4. Tags match (deterministic)
+        if tags_match(ent_a, ent_b) == 1.0:
+            return 1.0, "tags_match"
 
         # 2. Jira Ticket ID match (Code/Commit -> Jira Issue)
         is_jira_a = ent_a.kind == _JIRA_KIND

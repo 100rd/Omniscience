@@ -116,6 +116,10 @@ class SearchHit(BaseModel):
         le=1.0,
         description="Probabilistic confidence score for this search hit.",
     )
+    score_type: Literal["calibrated", "heuristic", "raw"] | None = Field(
+        default=None,
+        description="Confidence score estimation type: calibrated, heuristic, or raw.",
+    )
     impact: float | None = Field(
         default=None,
         ge=0.0,
