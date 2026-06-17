@@ -254,6 +254,8 @@ class _AnchorStageResult:
     #: positionally).  Depth 0 is reserved for the seed's own source;
     #: depth >= 1 for related entities.
     candidate_depths: tuple[int, ...]
+    #: Centralities of each candidate source in the subgraph.
+    candidate_centralities: dict[str, float]
     #: Wall-clock duration of this stage in seconds.
     duration_s: float
 
@@ -450,6 +452,7 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
+                candidate_centralities={},
                 duration_s=duration,
             )
 
@@ -473,11 +476,12 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
+                candidate_centralities={},
                 duration_s=duration,
             )
 
         _ANCHOR_HIT_TOTAL.labels(outcome="hit").inc()
-        candidates, depths = _collect_candidates(graph_result)
+        candidates, depths, centralities = _collect_candidates(graph_result)
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="anchor").observe(duration)
         _CANDIDATE_SET_SIZE.observe(len(candidates))
@@ -487,6 +491,7 @@ class GraphRAGComposer:
             anchor_hit=True,
             candidate_source_ids=candidates,
             candidate_depths=depths,
+            candidate_centralities=centralities,
             duration_s=duration,
         )
 
@@ -564,9 +569,20 @@ class GraphRAGComposer:
         the same chunk twice must not inflate top-k).  Stable order is
         preserved for hits with equal merged scores.
         """
+        from omniscience_retrieval.probabilistic_scoring import (
+            calculate_probabilistic_confidence,
+            calculate_probabilistic_impact,
+        )
+
         stage_start = time.monotonic()
         affinity_by_source = _build_affinity_map(anchor)
-        scored: list[tuple[float, int, Any]] = []
+        depth_by_source = {
+            src_id: depth
+            for src_id, depth in zip(anchor.candidate_source_ids, anchor.candidate_depths)
+        }
+        centrality_by_source = anchor.candidate_centralities or {}
+
+        scored: list[tuple[float, float, float, int, Any]] = []
         seen_chunks: set[uuid.UUID] = set()
         for idx, hit in enumerate(vector_result.hits):
             if hit.chunk_id in seen_chunks:
@@ -574,13 +590,35 @@ class GraphRAGComposer:
             seen_chunks.add(hit.chunk_id)
             affinity = affinity_by_source.get(str(hit.source.id), MIN_AFFINITY)
             merged_score = _linear_blend(vector_score=hit.score, graph_affinity=affinity)
-            scored.append((merged_score, idx, hit))
+
+            src_id_str = str(hit.source.id)
+            depth = depth_by_source.get(src_id_str, 3)
+            centrality = centrality_by_source.get(src_id_str, 0.0)
+
+            confidence_val = calculate_probabilistic_confidence(
+                source=hit.source.type,
+                valid_from=hit.citation.indexed_at,
+                depth=depth,
+                as_of=request.as_of,
+            )
+            impact_val = calculate_probabilistic_impact(
+                source=hit.source.type,
+                valid_from=hit.citation.indexed_at,
+                depth=depth,
+                centrality=centrality,
+                as_of=request.as_of,
+            )
+
+            scored.append((merged_score, confidence_val, impact_val, idx, hit))
 
         # Sort: descending by score, tie-break by original index (stable).
-        scored.sort(key=lambda row: (-row[0], row[1]))
+        scored.sort(key=lambda row: (-row[0], row[3]))
 
         top_k = request.top_k
-        top_hits = [hit.model_copy(update={"score": score}) for score, _, hit in scored[:top_k]]
+        top_hits = [
+            hit.model_copy(update={"score": score, "confidence": conf, "impact": imp})
+            for score, conf, imp, _, hit in scored[:top_k]
+        ]
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="merge").observe(duration)
         return SearchResult(hits=top_hits, query_stats=vector_result.query_stats)
@@ -608,7 +646,7 @@ def _extract_anchor(request: SearchRequest) -> str:
 
 def _collect_candidates(
     graph_result: Any,
-) -> tuple[tuple[str, ...], tuple[int, ...]]:
+) -> tuple[tuple[str, ...], tuple[int, ...], dict[str, float]]:
     """Extract candidate source IDs (and their depths) from a traversal.
 
     The seed entity's source counts as a depth-0 candidate; related
@@ -616,20 +654,57 @@ def _collect_candidates(
     de-duplicated preserving the first occurrence and capped at
     :data:`MAX_ANCHOR_CANDIDATES` to keep the downstream filter small.
     """
+    # 1. Calculate degree centrality for all entities in the subgraph
+    degrees: dict[str, int] = {}
+    for edge in graph_result.edges:
+        degrees[edge.from_entity] = degrees.get(edge.from_entity, 0) + 1
+        degrees[edge.to_entity] = degrees.get(edge.to_entity, 0) + 1
+
+    # 2. Sort related entities by centrality score descending, tie-break by depth ascending
+    related_sorted = sorted(
+        graph_result.related,
+        key=lambda n: (-degrees.get(n.name, 0), n.depth)
+    )
+
     seed_source = str(graph_result.seed.source)
     ids: list[str] = [seed_source]
     depths: list[int] = [0]
     seen: set[str] = {seed_source}
-    for node in graph_result.related:
+
+    kept_entity_names: set[str] = {graph_result.seed.name}
+
+    for node in related_sorted:
         src = str(node.source)
         if src in seen:
+            kept_entity_names.add(node.name)
             continue
+        
         seen.add(src)
         ids.append(src)
         depths.append(int(node.depth))
+        kept_entity_names.add(node.name)
+
         if len(ids) >= MAX_ANCHOR_CANDIDATES:
             break
-    return tuple(ids), tuple(depths)
+
+    # 3. Update the GraphResultView with prioritized and truncated related entities
+    graph_result.related = [n for n in related_sorted if n.name in kept_entity_names]
+
+    # 4. Preserve edges only between kept/prioritized entities
+    graph_result.edges = [
+        e for e in graph_result.edges
+        if e.from_entity in kept_entity_names and e.to_entity in kept_entity_names
+    ]
+
+    # 5. Calculate source centralities (max degree of any node belonging to the source)
+    centralities: dict[str, float] = {}
+    for node in related_sorted:
+        src = str(node.source)
+        centralities[src] = max(centralities.get(src, 0.0), float(degrees.get(node.name, 0)))
+    seed_src = str(graph_result.seed.source)
+    centralities[seed_src] = max(centralities.get(seed_src, 0.0), float(degrees.get(graph_result.seed.name, 0)))
+
+    return tuple(ids), tuple(depths), centralities
 
 
 def _widen_request(

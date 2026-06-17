@@ -302,6 +302,137 @@ class TestCollectCandidates:
         ids, _ = _collect_candidates(result)
         assert len(ids) == MAX_ANCHOR_CANDIDATES
 
+    def test_prioritizes_by_degree_centrality(self) -> None:
+        seed_src = uuid.uuid4()
+        rel1_src = uuid.uuid4()
+        rel2_src = uuid.uuid4()
+        rel3_src = uuid.uuid4()
+
+        seed = EntityNodeView(
+            id=uuid.uuid4(),
+            name="seed-entity",
+            kind="service",
+            source=str(seed_src),
+            chunk_text="seed chunk",
+            depth=0,
+        )
+        rel1 = EntityNodeView(
+            id=uuid.uuid4(),
+            name="rel-1",
+            kind="service",
+            source=str(rel1_src),
+            chunk_text="rel 1",
+            depth=1,
+        )
+        rel2 = EntityNodeView(
+            id=uuid.uuid4(),
+            name="rel-2",
+            kind="service",
+            source=str(rel2_src),
+            chunk_text="rel 2",
+            depth=2,
+        )
+        rel3 = EntityNodeView(
+            id=uuid.uuid4(),
+            name="rel-3",
+            kind="service",
+            source=str(rel3_src),
+            chunk_text="rel 3",
+            depth=1,
+        )
+
+        edges = [
+            GraphEdgeView(from_entity="seed-entity", to_entity="rel-2", edge_type="calls"),
+            GraphEdgeView(from_entity="seed-entity", to_entity="rel-1", edge_type="calls"),
+            GraphEdgeView(from_entity="rel-1", to_entity="rel-2", edge_type="calls"),
+            GraphEdgeView(from_entity="rel-3", to_entity="rel-2", edge_type="calls"),
+        ]
+
+        result = GraphResultView(seed=seed, related=[rel3, rel1, rel2], edges=edges)
+        await_result = _collect_candidates(result)
+
+        assert result.related[0].name == "rel-2"
+        assert result.related[1].name == "rel-1"
+        assert result.related[2].name == "rel-3"
+
+    def test_tie_breaks_by_depth(self) -> None:
+        seed_src = uuid.uuid4()
+        rel1_src = uuid.uuid4()
+        rel2_src = uuid.uuid4()
+
+        seed = EntityNodeView(
+            id=uuid.uuid4(),
+            name="seed-entity",
+            kind="service",
+            source=str(seed_src),
+            chunk_text="seed chunk",
+            depth=0,
+        )
+        rel1 = EntityNodeView(
+            id=uuid.uuid4(),
+            name="rel-1",
+            kind="service",
+            source=str(rel1_src),
+            chunk_text="rel 1",
+            depth=1,
+        )
+        rel2 = EntityNodeView(
+            id=uuid.uuid4(),
+            name="rel-2",
+            kind="service",
+            source=str(rel2_src),
+            chunk_text="rel 2",
+            depth=2,
+        )
+        edges = [
+            GraphEdgeView(from_entity="seed-entity", to_entity="rel-1", edge_type="calls"),
+            GraphEdgeView(from_entity="seed-entity", to_entity="rel-2", edge_type="calls"),
+        ]
+
+        result = GraphResultView(seed=seed, related=[rel2, rel1], edges=edges)
+        _collect_candidates(result)
+
+        assert result.related[0].name == "rel-1"
+        assert result.related[1].name == "rel-2"
+
+    def test_filters_discarded_edges(self) -> None:
+        seed_src = uuid.uuid4()
+        seed = EntityNodeView(
+            id=uuid.uuid4(),
+            name="seed-entity",
+            kind="service",
+            source=str(seed_src),
+            chunk_text="seed chunk",
+            depth=0,
+        )
+        
+        related = [
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name=f"rel-{i}",
+                kind="service",
+                source=str(uuid.uuid4()),
+                chunk_text=f"rel chunk {i}",
+                depth=1,
+            )
+            for i in range(MAX_ANCHOR_CANDIDATES + 2)
+        ]
+        
+        edges = [
+            GraphEdgeView(from_entity="seed-entity", to_entity=f"rel-{i}", edge_type="calls")
+            for i in range(len(related))
+        ]
+        discarded_entity_name = f"rel-{MAX_ANCHOR_CANDIDATES + 1}"
+        edges.append(GraphEdgeView(from_entity="rel-0", to_entity=discarded_entity_name, edge_type="calls"))
+
+        result = GraphResultView(seed=seed, related=related, edges=edges)
+        _collect_candidates(result)
+
+        assert discarded_entity_name not in [n.name for n in result.related]
+
+        edge_targets = {e.to_entity for e in result.edges}
+        assert discarded_entity_name not in edge_targets
+
 
 class TestBuildAffinityMap:
     """Unit tests for :func:`_build_affinity_map`."""
