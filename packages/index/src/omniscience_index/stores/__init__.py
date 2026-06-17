@@ -19,5 +19,6 @@ from omniscience_index.stores.neo4j_store import (
     Neo4jGraphStore,
     Neo4jStoreConfig,
 )
+from omniscience_index.stores.postgres_only_store import PostgresOnlyStore
 
-__all__ = ["Neo4jGraphStore", "Neo4jStoreConfig"]
+__all__ = ["Neo4jGraphStore", "Neo4jStoreConfig", "PostgresOnlyStore"]

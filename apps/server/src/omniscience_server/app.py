@@ -53,14 +53,14 @@ from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.mcp.server import mcp_server
 from omniscience_server.middleware import TelemetryMiddleware, TracingMiddleware
+from omniscience_server.outbox_consumer import OutboxConsumerWorker
+from omniscience_server.outbox_worker import OutboxWorker
 from omniscience_server.reconcile_worker import ReconcileWorker
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.rest.otlp_ingester import OtlpIngester
 from omniscience_server.retention_worker import RetentionWorker
 from omniscience_server.routes import health_router, tokens_router
 from omniscience_server.scheduler import SchedulerWorker
-from omniscience_server.outbox_worker import OutboxWorker
-from omniscience_server.outbox_consumer import OutboxConsumerWorker
 
 log = structlog.get_logger(__name__)
 
@@ -81,8 +81,8 @@ connector_registry._connectors.setdefault(
 # ---------------------------------------------------------------------------
 
 
-_SUPPORTED_GRAPH_BACKENDS: frozenset[str] = frozenset({"neo4j"})
-_SUPPORTED_VECTOR_BACKENDS: frozenset[str] = frozenset({"qdrant"})
+_SUPPORTED_GRAPH_BACKENDS: frozenset[str] = frozenset({"neo4j", "postgres"})
+_SUPPORTED_VECTOR_BACKENDS: frozenset[str] = frozenset({"qdrant", "postgres"})
 
 
 class _UnwiredLegacyService:
@@ -180,28 +180,49 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             "Pgvector was removed at the #105 cutover; see CHANGELOG.md §0.2.0."
         )
 
-    # --- Graph store (Neo4j, ADR-0005) ---
-    neo4j_config = Neo4jStoreConfig.from_settings(settings)
-    neo4j_graph_store = Neo4jGraphStore(config=neo4j_config)
-    await neo4j_graph_store.connect()
-    app.state.graph_store = neo4j_graph_store
-    app.state.neo4j_graph_store = neo4j_graph_store
-    # ADR-0008 §8 phase 2 — bitemporal write-path rollout flag.  Read-only
-    # in this PR (issue #130 lands the schema DDL); the writer that gates
-    # on it lands in #131.  Defaults to "disabled" so PR #104's writer
-    # behaviour is preserved verbatim until #131.
-    app.state.graph_bitemporal_enabled = settings.graph_bitemporal == "enabled"
+    if graph_backend == "postgres" and vector_backend == "postgres":
+        from omniscience_index.stores.postgres_only_store import PostgresOnlyStore
 
-    # --- Vector store (Qdrant, ADR-0006) ---
-    qdrant_store = await _build_qdrant_store(settings, embedding_provider)
-    app.state.vector_store = qdrant_store
-    app.state.qdrant_store = qdrant_store
-    log.info(
-        "storage_adapters_ready",
-        graph_backend=graph_backend,
-        vector_backend=vector_backend,
-        collection=qdrant_store.collection_name,
-    )
+        postgres_only_store = PostgresOnlyStore(
+            session_factory=session_factory,
+            embedding_provider=embedding_provider,
+        )
+        await postgres_only_store.connect()
+        app.state.graph_store = postgres_only_store
+        app.state.vector_store = postgres_only_store
+        app.state.postgres_only_store = postgres_only_store
+        app.state.qdrant_store = postgres_only_store
+        app.state.neo4j_graph_store = postgres_only_store
+        app.state.graph_bitemporal_enabled = False
+        log.info(
+            "storage_adapters_ready",
+            graph_backend=graph_backend,
+            vector_backend=vector_backend,
+            collection="postgres_only",
+        )
+    else:
+        # --- Graph store (Neo4j, ADR-0005) ---
+        neo4j_config = Neo4jStoreConfig.from_settings(settings)
+        neo4j_graph_store = Neo4jGraphStore(config=neo4j_config)
+        await neo4j_graph_store.connect()
+        app.state.graph_store = neo4j_graph_store
+        app.state.neo4j_graph_store = neo4j_graph_store
+        # ADR-0008 §8 phase 2 — bitemporal write-path rollout flag.  Read-only
+        # in this PR (issue #130 lands the schema DDL); the writer that gates
+        # on it lands in #131.  Defaults to "disabled" so PR #104's writer
+        # behaviour is preserved verbatim until #131.
+        app.state.graph_bitemporal_enabled = settings.graph_bitemporal == "enabled"
+
+        # --- Vector store (Qdrant, ADR-0006) ---
+        qdrant_store = await _build_qdrant_store(settings, embedding_provider)
+        app.state.vector_store = qdrant_store
+        app.state.qdrant_store = qdrant_store
+        log.info(
+            "storage_adapters_ready",
+            graph_backend=graph_backend,
+            vector_backend=vector_backend,
+            collection=qdrant_store.collection_name,
+        )
 
     # --- Legacy retrieval handle (unwired after #105) ---
     # The pgvector ``RetrievalService`` is no longer instantiated.
@@ -242,6 +263,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         graph_store=neo4j_graph_store,
         vector_store=qdrant_store,
         legacy_service=federated if federated is not None else _UnwiredLegacyService(),
+        session_factory=session_factory,
     )
     app.state.graph_rag_composer = graph_rag_composer
     log.info(

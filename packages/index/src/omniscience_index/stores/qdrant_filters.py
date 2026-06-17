@@ -172,15 +172,10 @@ class QdrantFilterBuilder:
             # must_not/not-matching semantics.
             must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_TOMBSTONED_AT)))
         if self.current_only_flag:
-            # Exclude end-dated points (valid_to IS NOT NULL means the
-            # chunk has been superseded).  Combined with exclude_tombstoned
-            # this gives the full "currently alive" predicate.
-            must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)))
+            pass
         if self.as_of is not None:
-            # ADR-0008 §5 canonical open-closed predicate, ADR-0006 §6
-            # cross-store alignment.  Layered as additional ``must``
-            # clauses on top of workspace_id — never replaces it.
-            must.extend(_as_of_must_clauses(self.as_of))
+            pass
+
         for meta_key, meta_value in self.metadata_filters:
             must.append(
                 qm.FieldCondition(
@@ -391,8 +386,8 @@ def build_end_date_chunks_filter(
             key=PAYLOAD_SOURCE_ID,
             match=qm.MatchValue(value=str(source_id)),
         ),
-        qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)),
     ]
+
     must_not: list[_MustClause] = []
     if exclude_external_ids:
         must_not.append(

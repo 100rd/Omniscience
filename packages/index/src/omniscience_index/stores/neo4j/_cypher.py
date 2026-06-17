@@ -652,7 +652,8 @@ RETURN n.id AS id,
        n.chunk_text AS chunk_text,
        n.valid_from AS valid_from,
        n.valid_to AS valid_to,
-       n.recorded_at AS recorded_at
+       n.recorded_at AS recorded_at,
+       n.metadata AS metadata
 LIMIT 1
 """
 
@@ -669,7 +670,8 @@ RETURN n.id AS id,
        n.chunk_text AS chunk_text,
        s.valid_from AS valid_from,
        s.valid_to AS valid_to,
-       s.recorded_at AS recorded_at
+       s.recorded_at AS recorded_at,
+       s.metadata AS metadata
 LIMIT 1
 """
 
@@ -698,7 +700,8 @@ RETURN n.id AS id,
        n.chunk_text AS chunk_text,
        n.valid_from AS valid_from,
        n.valid_to AS valid_to,
-       n.recorded_at AS recorded_at
+       n.recorded_at AS recorded_at,
+       n.metadata AS metadata
 ORDER BY name
 """
 
@@ -716,7 +719,8 @@ RETURN n.id AS id,
        n.chunk_text AS chunk_text,
        s.valid_from AS valid_from,
        s.valid_to AS valid_to,
-       s.recorded_at AS recorded_at
+       s.recorded_at AS recorded_at,
+       s.metadata AS metadata
 ORDER BY name
 """
 
@@ -744,6 +748,7 @@ _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "    seed.valid_from AS seed_valid_from,\n"
     "    seed.valid_to AS seed_valid_to,\n"
     "    seed.recorded_at AS seed_recorded_at,\n"
+    "    seed.metadata AS seed_metadata,\n"
     "    collect(CASE WHEN neighbour IS NULL THEN NULL ELSE {\n"
     "        id: neighbour.id,\n"
     "        name: neighbour.name,\n"
@@ -754,7 +759,8 @@ _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "        edge_type: rels[-1].edge_type,\n"
     "        valid_from: neighbour.valid_from,\n"
     "        valid_to: neighbour.valid_to,\n"
-    "        recorded_at: neighbour.recorded_at\n"
+    "        recorded_at: neighbour.recorded_at,\n"
+    "        metadata: neighbour.metadata\n"
     "    } END) AS neighbours,\n"
     "    collect(CASE WHEN rels IS NULL THEN NULL ELSE\n"
     "        [startNode(last(rels)).name, endNode(last(rels)).name,"
@@ -796,6 +802,7 @@ _TRAVERSE_AS_OF_CYPHER_TEMPLATE: Final[str] = (
     "    seed_state.valid_from AS seed_valid_from,\n"
     "    seed_state.valid_to AS seed_valid_to,\n"
     "    seed_state.recorded_at AS seed_recorded_at,\n"
+    "    seed_state.metadata AS seed_metadata,\n"
     "    collect(CASE WHEN neighbour IS NULL THEN NULL ELSE {\n"
     "        id: neighbour.id,\n"
     "        name: neighbour.name,\n"
@@ -806,7 +813,8 @@ _TRAVERSE_AS_OF_CYPHER_TEMPLATE: Final[str] = (
     "        edge_type: rels[-1].edge_type,\n"
     "        valid_from: n_state.valid_from,\n"
     "        valid_to: n_state.valid_to,\n"
-    "        recorded_at: n_state.recorded_at\n"
+    "        recorded_at: n_state.recorded_at,\n"
+    "        metadata: coalesce(n_state.metadata, neighbour.metadata)\n"
     "    } END) AS neighbours,\n"
     "    collect(CASE WHEN rels IS NULL THEN NULL ELSE\n"
     "        [startNode(last(rels)).name, endNode(last(rels)).name,"
