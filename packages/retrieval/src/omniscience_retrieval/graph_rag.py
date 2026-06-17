@@ -56,10 +56,27 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import structlog
+from omniscience_core.db.models import (
+    Chunk as DbChunk,
+)
+from omniscience_core.db.models import (
+    Document as DbDocument,
+)
+from omniscience_core.db.models import (
+    Entity as DbEntity,
+)
+from omniscience_core.db.models import (
+    Source as DbSource,
+)
+from omniscience_core.db.models import (
+    SourceStatus,
+)
 from omniscience_core.storage import GraphStore
 from prometheus_client import Counter, Histogram
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from omniscience_retrieval.models import SearchRequest, SearchResult
+from omniscience_retrieval.models import SearchHit, SearchRequest, SearchResult
 
 log = structlog.get_logger(__name__)
 
@@ -226,10 +243,15 @@ def _should_use_graphrag(
     """
     try:
         from omniscience_index.stores.neo4j_store import Neo4jGraphStore
+        from omniscience_index.stores.postgres_only_store import PostgresOnlyStore
         from omniscience_index.stores.qdrant_store import QdrantVectorStore
     except ImportError:  # pragma: no cover - index package must be present
         return False
-    return isinstance(graph_store, Neo4jGraphStore) and isinstance(vector_store, QdrantVectorStore)
+    return (
+        isinstance(graph_store, Neo4jGraphStore) and isinstance(vector_store, QdrantVectorStore)
+    ) or (
+        isinstance(graph_store, PostgresOnlyStore) and isinstance(vector_store, PostgresOnlyStore)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -292,10 +314,12 @@ class GraphRAGComposer:
         graph_store: GraphStore,
         vector_store: _VectorSearchCallable,
         legacy_service: _LegacySearchCallable,
+        session_factory: async_sessionmaker[AsyncSession] | None = None,
     ) -> None:
         self._graph_store = graph_store
         self._vector_store = vector_store
         self._legacy_service = legacy_service
+        self._session_factory = session_factory
         self._graphrag_active = _should_use_graphrag(graph_store, vector_store)
 
     @property
@@ -378,6 +402,9 @@ class GraphRAGComposer:
             vector_result=vector_result,
             anchor=anchor,
         )
+
+        valid_hits = await self._validate_hits(merged.hits, workspace_id)
+        merged = merged.model_copy(update={"hits": valid_hits})
 
         duration_ms = (time.monotonic() - start) * 1000.0
         log.info(
@@ -463,6 +490,38 @@ class GraphRAGComposer:
                 as_of=as_of,
                 max_depth=MAX_ANCHOR_DEPTH,
             )
+            # Validate retrieved entities in Postgres
+            all_entity_names = [graph_result.seed.name] + [n.name for n in graph_result.related]
+            valid_entity_names = await self._validate_entities(all_entity_names, workspace_id)
+
+            # If the seed entity is not valid/active, it's an anchor miss!
+            if graph_result.seed.name not in valid_entity_names:
+                log.warning(
+                    "seed_entity_inactive_or_missing_in_postgres", name=graph_result.seed.name
+                )
+                _ANCHOR_HIT_TOTAL.labels(outcome="miss").inc()
+                duration = time.monotonic() - stage_start
+                _STAGE_DURATION.labels(stage="anchor").observe(duration)
+                _CANDIDATE_SET_SIZE.observe(0)
+                return _AnchorStageResult(
+                    anchor_requested=True,
+                    anchor_name=anchor_name,
+                    anchor_hit=False,
+                    candidate_source_ids=(),
+                    candidate_depths=(),
+                    candidate_centralities={},
+                    duration_s=duration,
+                )
+
+            # Otherwise, filter related entities and edges
+            graph_result.related = [
+                n for n in graph_result.related if n.name in valid_entity_names
+            ]
+            graph_result.edges = [
+                e
+                for e in graph_result.edges
+                if e.from_entity in valid_entity_names and e.to_entity in valid_entity_names
+            ]
         except ValueError:
             # entity_not_found -> anchor miss (indistinguishable from
             # cross-workspace by design in GraphStore contracts).
@@ -578,7 +637,9 @@ class GraphRAGComposer:
         affinity_by_source = _build_affinity_map(anchor)
         depth_by_source = {
             src_id: depth
-            for src_id, depth in zip(anchor.candidate_source_ids, anchor.candidate_depths)
+            for src_id, depth in zip(
+                anchor.candidate_source_ids, anchor.candidate_depths, strict=True
+            )
         }
         centrality_by_source = anchor.candidate_centralities or {}
 
@@ -600,6 +661,7 @@ class GraphRAGComposer:
                 valid_from=hit.citation.indexed_at,
                 depth=depth,
                 as_of=request.as_of,
+                score_type="calibrated",
             )
             impact_val = calculate_probabilistic_impact(
                 source=hit.source.type,
@@ -609,19 +671,73 @@ class GraphRAGComposer:
                 as_of=request.as_of,
             )
 
-            scored.append((merged_score, confidence_val, impact_val, idx, hit))
+            scored.append((merged_score, confidence_val, "calibrated", impact_val, idx, hit))
 
         # Sort: descending by score, tie-break by original index (stable).
-        scored.sort(key=lambda row: (-row[0], row[3]))
+        scored.sort(key=lambda row: (-row[0], row[4]))
 
         top_k = request.top_k
         top_hits = [
-            hit.model_copy(update={"score": score, "confidence": conf, "impact": imp})
-            for score, conf, imp, _, hit in scored[:top_k]
+            hit.model_copy(
+                update={"score": score, "confidence": conf, "score_type": stype, "impact": imp}
+            )
+            for score, conf, stype, imp, _, hit in scored[:top_k]
         ]
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="merge").observe(duration)
         return SearchResult(hits=top_hits, query_stats=vector_result.query_stats)
+
+    async def _validate_entities(
+        self,
+        entity_names: list[str],
+        workspace_id: uuid.UUID,
+    ) -> set[str]:
+        """Verify existence and active status of entities in Postgres."""
+        if not self._session_factory or not entity_names:
+            return set(entity_names)
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(DbEntity.name)
+                .join(DbSource, DbEntity.source_id == DbSource.id)
+                .outerjoin(DbChunk, DbEntity.chunk_id == DbChunk.id)
+                .outerjoin(DbDocument, DbChunk.document_id == DbDocument.id)
+                .where(
+                    DbEntity.name.in_(entity_names),
+                    DbSource.tenant_id == workspace_id,
+                    DbSource.status == SourceStatus.active,
+                    (DbDocument.id.is_(None)) | (DbDocument.tombstoned_at.is_(None)),
+                )
+            )
+            result = await session.execute(stmt)
+            return {row[0] for row in result.all()}
+
+    async def _validate_hits(
+        self,
+        hits: list[SearchHit],
+        workspace_id: uuid.UUID,
+    ) -> list[SearchHit]:
+        """Verify existence and active status of chunk citations in Postgres."""
+        if not self._session_factory or not hits:
+            return hits
+
+        chunk_ids = [hit.chunk_id for hit in hits]
+        async with self._session_factory() as session:
+            stmt = (
+                select(DbChunk.id)
+                .join(DbDocument, DbChunk.document_id == DbDocument.id)
+                .join(DbSource, DbDocument.source_id == DbSource.id)
+                .where(
+                    DbChunk.id.in_(chunk_ids),
+                    DbSource.tenant_id == workspace_id,
+                    DbSource.status == SourceStatus.active,
+                    DbDocument.tombstoned_at.is_(None),
+                )
+            )
+            result = await session.execute(stmt)
+            valid_chunk_ids = {row[0] for row in result.all()}
+
+        return [hit for hit in hits if hit.chunk_id in valid_chunk_ids]
 
 
 # ---------------------------------------------------------------------------
@@ -661,10 +777,7 @@ def _collect_candidates(
         degrees[edge.to_entity] = degrees.get(edge.to_entity, 0) + 1
 
     # 2. Sort related entities by centrality score descending, tie-break by depth ascending
-    related_sorted = sorted(
-        graph_result.related,
-        key=lambda n: (-degrees.get(n.name, 0), n.depth)
-    )
+    related_sorted = sorted(graph_result.related, key=lambda n: (-degrees.get(n.name, 0), n.depth))
 
     seed_source = str(graph_result.seed.source)
     ids: list[str] = [seed_source]
@@ -678,7 +791,7 @@ def _collect_candidates(
         if src in seen:
             kept_entity_names.add(node.name)
             continue
-        
+
         seen.add(src)
         ids.append(src)
         depths.append(int(node.depth))
@@ -692,7 +805,8 @@ def _collect_candidates(
 
     # 4. Preserve edges only between kept/prioritized entities
     graph_result.edges = [
-        e for e in graph_result.edges
+        e
+        for e in graph_result.edges
         if e.from_entity in kept_entity_names and e.to_entity in kept_entity_names
     ]
 
@@ -702,7 +816,9 @@ def _collect_candidates(
         src = str(node.source)
         centralities[src] = max(centralities.get(src, 0.0), float(degrees.get(node.name, 0)))
     seed_src = str(graph_result.seed.source)
-    centralities[seed_src] = max(centralities.get(seed_src, 0.0), float(degrees.get(graph_result.seed.name, 0)))
+    centralities[seed_src] = max(
+        centralities.get(seed_src, 0.0), float(degrees.get(graph_result.seed.name, 0))
+    )
 
     return tuple(ids), tuple(depths), centralities
 
