@@ -60,6 +60,11 @@ def _make_settings() -> Settings:
     )
 
 
+# Shared workspace UUID so the sync endpoint's tenant-isolation check
+# (Source.tenant_id == token.workspace_id) passes for the happy-path tests.
+_WS_ID = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
+
+
 def _make_source(
     source_type: SourceType = SourceType.git,
 ) -> Source:
@@ -72,6 +77,7 @@ def _make_source(
     src.status = SourceStatus.active
     src.last_sync_at = None
     src.last_error = None
+    src.tenant_id = _WS_ID
     return src
 
 
@@ -136,6 +142,7 @@ def _make_app_with_source(source: Source | None = None) -> FastAPI:
     token.expires_at = None
     token.is_active = True
     token.last_used_at = None
+    token.workspace_id = _WS_ID
 
     app = create_app(settings=_make_settings())
 

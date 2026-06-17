@@ -174,7 +174,12 @@ class _InMemoryIndexWriter:
 def neo4j_container() -> Any:
     from testcontainers.neo4j import Neo4jContainer
 
-    with Neo4jContainer(image="neo4j:5.20").with_env("NEO4J_AUTH", "neo4j/test_password") as c:
+    # testcontainers>=4.8 derives NEO4J_AUTH from the constructor ``password``
+    # in Neo4jContainer._configure(); a manual .with_env("NEO4J_AUTH", ...) is
+    # clobbered at start() and causes an AuthError when the client connects
+    # with a different password.  Pass the password through the constructor so
+    # the container auth and the neo4j_store fixture agree.
+    with Neo4jContainer(image="neo4j:5.20", password="test_password") as c:
         yield c
 
 
