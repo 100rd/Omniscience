@@ -73,9 +73,7 @@ async def incident_timeline_tool(
             "mcp_incident_timeline_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError(
-            "forbidden:Incident timeline requires a workspace-scoped token"
-        ) from exc
+        raise ValueError("forbidden:Incident timeline requires a workspace-scoped token") from exc
 
     parsed_as_of = parse_as_of(as_of)
     parsed_from = parse_as_of(from_ts)

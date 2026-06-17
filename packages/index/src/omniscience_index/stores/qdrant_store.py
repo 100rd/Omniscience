@@ -580,7 +580,7 @@ class QdrantVectorStore:
             vectors[NAMED_VECTOR_SPARSE_BM25] = sparse
         return qm.PointStruct(
             id=point_id,
-            vector=vectors,  # type: ignore[arg-type]
+            vector=vectors,
             payload=payload,
         )
 
