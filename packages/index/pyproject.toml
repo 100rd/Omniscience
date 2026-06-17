@@ -1,7 +1,7 @@
 [project]
 name = "omniscience-index"
 version = "0.2.0"
-description = "PostgreSQL + pgvector + Qdrant index layer for Omniscience"
+description = "PostgreSQL + Qdrant index layer for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
     "omniscience-core",

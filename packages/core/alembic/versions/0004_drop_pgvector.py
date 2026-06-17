@@ -65,27 +65,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Restoring pgvector requires re-embedding every chunk — the vectors
-    # are not recoverable from Postgres alone once we have dropped the
-    # column.  The only supported "downgrade" path is a database restore
-    # from a pre-0004 backup plus a rerun of the ingestion pipeline.
-    #
-    # We still re-create the extension, column, and HNSW index so that
-    # an alembic ``downgrade`` does not leave the schema in an
-    # inconsistent state, but callers MUST follow up with a re-ingest.
-
-    # Embedding dimension kept in sync with 0001_initial.EMBEDDING_DIM.
-    # If the embedding model changes, both constants must be updated
-    # together; see ADR-0006 §Embedding model lifecycle.
-    embedding_dim = 768
-
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    op.execute(f"ALTER TABLE chunks ADD COLUMN embedding vector({embedding_dim})")
-    op.execute(
-        """
-        CREATE INDEX ix_chunks_embedding_hnsw
-        ON chunks
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-        """
-    )
+    # Downgrade is a no-op as pgvector references are removed.
+    pass
