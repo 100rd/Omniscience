@@ -84,3 +84,27 @@ class DLQMessage(BaseModel):
         default_factory=lambda: datetime.datetime.now(datetime.UTC),
         description="UTC timestamp when the message was forwarded to the DLQ.",
     )
+
+
+class EntityUpsertEvent(BaseModel):
+    """Outbox event payload for entity creation or update."""
+
+    workspace_id: str | None = Field(None, description="Workspace UUID string.")
+    id: str = Field(..., description="Entity UUID string.")
+    source_id: str = Field(..., description="Source UUID string.")
+    entity_type: str = Field(..., description="Entity kind (e.g. otel_service).")
+    name: str = Field(..., description="Canonical FQN or URI name.")
+    display_name: str = Field(..., description="Short display name.")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata dictionary.")
+
+
+class EdgeUpsertEvent(BaseModel):
+    """Outbox event payload for edge creation or update."""
+
+    workspace_id: str | None = Field(None, description="Workspace UUID string.")
+    id: str = Field(..., description="Edge UUID string.")
+    source_entity_id: str = Field(..., description="Source entity UUID string.")
+    target_entity_id: str = Field(..., description="Target entity UUID string.")
+    edge_type: str = Field(..., description="Edge kind (e.g. cross_ref).")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata dictionary.")
+

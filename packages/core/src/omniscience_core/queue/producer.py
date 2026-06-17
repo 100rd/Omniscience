@@ -46,7 +46,21 @@ class QueueProducer:
         # catches issues with subclasses that bypass __init__.
         payload.model_validate(payload.model_dump())
 
-        data = payload.model_dump_json().encode()
+        name = payload.__class__.__name__
+        if name == "DocumentChangeEvent":
+            from omniscience_core.queue.pb_events import serialize_document_change_event
+            data = serialize_document_change_event(payload)
+        elif name == "EntityUpsertEvent":
+            from omniscience_core.queue.pb_events import serialize_entity_upsert_event
+            data = serialize_entity_upsert_event(payload)
+        elif name == "EdgeUpsertEvent":
+            from omniscience_core.queue.pb_events import serialize_edge_upsert_event
+            data = serialize_edge_upsert_event(payload)
+        elif name == "DLQMessage":
+            from omniscience_core.queue.pb_events import serialize_dlq_message
+            data = serialize_dlq_message(payload)
+        else:
+            data = payload.model_dump_json().encode()
 
         await self._js.publish(subject=subject, payload=data)
 

@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package omniscience;
+
+message DocumentChangeEvent {
+  string source_id = 1;
+  string source_type = 2;
+  string external_id = 3;
+  string uri = 4;
+  string action = 5;
+}
+
+message EntityUpsertEvent {
+  string workspace_id = 1;
+  string id = 2;
+  string source_id = 3;
+  string entity_type = 4;
+  string name = 5;
+  string display_name = 6;
+  string metadata_json = 7;
+}
+
+message EdgeUpsertEvent {
+  string workspace_id = 1;
+  string id = 2;
+  string source_entity_id = 3;
+  string target_entity_id = 4;
+  string edge_type = 5;
+  string metadata_json = 6;
+}
+
+message DLQMessage {
+  string original_subject = 1;
+  string original_payload = 2;
+  string error = 3;
+  int64 attempt_count = 4;
+  string failed_at = 5;
+}

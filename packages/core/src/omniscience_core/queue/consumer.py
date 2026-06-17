@@ -150,7 +150,25 @@ class QueueConsumer[T: BaseModel]:
             return None
 
         try:
-            payload = self._payload_type.model_validate_json(raw.data)
+            name = self._payload_type.__name__
+            if name == "DocumentChangeEvent":
+                from omniscience_core.queue.pb_events import deserialize_document_change_event
+                dct = deserialize_document_change_event(raw.data)
+                payload = self._payload_type.model_validate(dct)
+            elif name == "EntityUpsertEvent":
+                from omniscience_core.queue.pb_events import deserialize_entity_upsert_event
+                dct = deserialize_entity_upsert_event(raw.data)
+                payload = self._payload_type.model_validate(dct)
+            elif name == "EdgeUpsertEvent":
+                from omniscience_core.queue.pb_events import deserialize_edge_upsert_event
+                dct = deserialize_edge_upsert_event(raw.data)
+                payload = self._payload_type.model_validate(dct)
+            elif name == "DLQMessage":
+                from omniscience_core.queue.pb_events import deserialize_dlq_message
+                dct = deserialize_dlq_message(raw.data)
+                payload = self._payload_type.model_validate(dct)
+            else:
+                payload = self._payload_type.model_validate_json(raw.data)
         except Exception as exc:
             log.warning(
                 "consumer_decode_error",
