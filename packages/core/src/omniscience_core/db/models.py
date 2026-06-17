@@ -537,6 +537,26 @@ class EntityEmitter(Base):
     __table_args__ = (Index("ix_entity_emitter_authority", "authority_emitter"),)
 
 
+class OutboxEvent(Base):
+    """Outbox table for reliable event publishing (Outbox pattern)."""
+
+    __tablename__ = "outbox_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_type: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("ix_outbox_events_processed", "processed"),
+        Index("ix_outbox_events_created_at", "created_at"),
+    )
+
+
 __all__ = [
     "ApiToken",
     "Base",
@@ -547,9 +567,11 @@ __all__ = [
     "EntityEmitter",
     "IngestionRun",
     "IngestionRunStatus",
+    "OutboxEvent",
     "Source",
     "SourceStatus",
     "SourceType",
     "SyncMode",
     "Workspace",
 ]
+

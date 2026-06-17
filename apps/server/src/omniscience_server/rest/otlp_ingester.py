@@ -35,7 +35,7 @@ from omniscience_connectors.otel import (
     canonical_service_name,
     canonical_trace_name,
 )
-from omniscience_core.db.models import Edge, Entity, Source, SourceStatus, SourceType
+from omniscience_core.db.models import Edge, Entity, Source, SourceStatus, SourceType, OutboxEvent
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -92,7 +92,7 @@ class OtlpIngester:
         async with self._session_factory() as session, session.begin():
             source = await self._get_or_create_source(session, workspace_id)
             for trace in parsed.traces.values():
-                await self._upsert_trace(session, source.id, trace)
+                await self._upsert_trace(session, workspace_id, source.id, trace)
         return parsed.total_spans
 
     # ------------------------------------------------------------------
@@ -148,10 +148,11 @@ class OtlpIngester:
     # ------------------------------------------------------------------
 
     async def _upsert_trace(
-        self, session: AsyncSession, source_id: uuid.UUID, trace: ParsedTrace
+        self, session: AsyncSession, workspace_id: uuid.UUID | None, source_id: uuid.UUID, trace: ParsedTrace
     ) -> None:
         trace_entity = await self._upsert_entity(
             session,
+            workspace_id=workspace_id,
             source_id=source_id,
             entity_type=OTEL_TRACE_ENTITY_TYPE,
             name=canonical_trace_name(trace.trace_id_hex),
@@ -168,6 +169,7 @@ class OtlpIngester:
         for service_name in trace.service_names:
             service_entity = await self._upsert_entity(
                 session,
+                workspace_id=workspace_id,
                 source_id=source_id,
                 entity_type=OTEL_SERVICE_ENTITY_TYPE,
                 name=canonical_service_name(service_name),
@@ -176,6 +178,7 @@ class OtlpIngester:
             )
             await self._upsert_edge(
                 session,
+                workspace_id=workspace_id,
                 source_id=trace_entity.id,
                 target_id=service_entity.id,
                 strategy="otel_trace",
@@ -184,6 +187,7 @@ class OtlpIngester:
         for pod_name in trace.pod_names:
             pod_entity = await self._upsert_entity(
                 session,
+                workspace_id=workspace_id,
                 source_id=source_id,
                 entity_type=OTEL_POD_ENTITY_TYPE,
                 name=canonical_pod_name(pod_name),
@@ -192,6 +196,7 @@ class OtlpIngester:
             )
             await self._upsert_edge(
                 session,
+                workspace_id=workspace_id,
                 source_id=trace_entity.id,
                 target_id=pod_entity.id,
                 strategy="otel_trace",
@@ -202,6 +207,7 @@ class OtlpIngester:
         self,
         session: AsyncSession,
         *,
+        workspace_id: uuid.UUID | None,
         source_id: uuid.UUID,
         entity_type: str,
         name: str,
@@ -216,6 +222,16 @@ class OtlpIngester:
         existing = (await session.execute(stmt)).scalars().first()
         if existing is not None:
             existing.entity_metadata = {**existing.entity_metadata, **metadata}
+            event_payload = {
+                "workspace_id": str(workspace_id) if workspace_id else None,
+                "id": str(existing.id),
+                "source_id": str(source_id),
+                "entity_type": entity_type,
+                "name": name,
+                "display_name": display_name,
+                "metadata": existing.entity_metadata,
+            }
+            session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
             return existing
 
         entity = Entity(
@@ -227,12 +243,24 @@ class OtlpIngester:
         )
         session.add(entity)
         await session.flush()
+
+        event_payload = {
+            "workspace_id": str(workspace_id) if workspace_id else None,
+            "id": str(entity.id),
+            "source_id": str(source_id),
+            "entity_type": entity_type,
+            "name": name,
+            "display_name": display_name,
+            "metadata": metadata,
+        }
+        session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
         return entity
 
     async def _upsert_edge(
         self,
         session: AsyncSession,
         *,
+        workspace_id: uuid.UUID | None,
         source_id: uuid.UUID,
         target_id: uuid.UUID,
         strategy: str,
@@ -255,6 +283,16 @@ class OtlpIngester:
         )
         session.add(edge)
         await session.flush()
+
+        event_payload = {
+            "workspace_id": str(workspace_id) if workspace_id else None,
+            "id": str(edge.id),
+            "source_entity_id": str(source_id),
+            "target_entity_id": str(target_id),
+            "edge_type": CROSS_REF_EDGE_TYPE,
+            "metadata": edge.edge_metadata,
+        }
+        session.add(OutboxEvent(event_type="edge.upsert", payload=event_payload))
 
 
 __all__ = [
