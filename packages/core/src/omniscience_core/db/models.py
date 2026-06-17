@@ -280,9 +280,32 @@ class IngestionRun(Base):
     __table_args__ = (Index("ix_ingestion_runs_source_id", "source_id"),)
 
 
-# ---------------------------------------------------------------------------
-# Chunks
-# ---------------------------------------------------------------------------
+from sqlalchemy.types import UserDefinedType
+
+
+class SqlVector(UserDefinedType):
+    """Custom SQLAlchemy type for pgvector's vector type."""
+
+    def get_col_spec(self, **kw):
+        return "vector"
+
+    def bind_processor(self, dialect):
+        def process(value):
+            if value is None:
+                return None
+            return f"[{','.join(map(str, value))}]"
+
+        return process
+
+    def result_processor(self, dialect, coltype):
+        def process(value):
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return [float(x) for x in value.strip("[]").split(",") if x]
+            return list(value)
+
+        return process
 
 
 class Chunk(Base):
@@ -317,6 +340,7 @@ class Chunk(Base):
     chunk_metadata: Mapped[dict[str, Any]] = mapped_column(
         "metadata", JSONB, nullable=False, default=dict
     )
+    embedding: Mapped[list[float] | None] = mapped_column(SqlVector, nullable=True)
 
     document: Mapped[Document] = relationship("Document", back_populates="chunks")
     ingestion_run: Mapped[IngestionRun | None] = relationship(
@@ -548,7 +572,9 @@ class OutboxEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    processed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    processed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     processed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
@@ -574,4 +600,3 @@ __all__ = [
     "SyncMode",
     "Workspace",
 ]
-

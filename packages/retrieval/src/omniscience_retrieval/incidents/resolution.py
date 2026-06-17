@@ -302,6 +302,7 @@ def compute_confidence(
     from omniscience_retrieval.probabilistic_scoring import (
         calculate_probabilistic_incident_confidence,
     )
+
     return calculate_probabilistic_incident_confidence(
         alert=alert,
         classified=classified,

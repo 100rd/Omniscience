@@ -107,4 +107,3 @@ class EdgeUpsertEvent(BaseModel):
     target_entity_id: str = Field(..., description="Target entity UUID string.")
     edge_type: str = Field(..., description="Edge kind (e.g. cross_ref).")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata dictionary.")
-

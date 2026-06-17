@@ -6,12 +6,13 @@ import json
 from typing import Any
 from uuid import UUID
 
+
 def encode_varint(value: int) -> bytes:
     ret = bytearray()
     while value >= 0x80:
-        ret.append((value & 0x7f) | 0x80)
+        ret.append((value & 0x7F) | 0x80)
         value >>= 7
-    ret.append(value & 0x7f)
+    ret.append(value & 0x7F)
     return bytes(ret)
 
 
@@ -21,7 +22,7 @@ def decode_varint(data: bytes, pos: int) -> tuple[int, int]:
     while True:
         b = data[pos]
         pos += 1
-        val |= (b & 0x7f) << shift
+        val |= (b & 0x7F) << shift
         if not (b & 0x80):
             break
         shift += 7
@@ -51,7 +52,7 @@ def decode_message(data: bytes) -> dict[int, list[Any]]:
         wire_type = tag & 0x07
         if wire_type == 2:
             val_len, pos = decode_varint(data, pos)
-            val = data[pos:pos+val_len]
+            val = data[pos : pos + val_len]
             pos += val_len
             fields.setdefault(field_num, []).append(val)
         elif wire_type == 0:
@@ -163,12 +164,18 @@ def serialize_dlq_message(event: Any) -> bytes:
     buf += encode_string(2, event.original_payload)
     buf += encode_string(3, event.error)
     buf += encode_int(4, event.attempt_count)
-    buf += encode_string(5, event.failed_at.isoformat() if hasattr(event.failed_at, "isoformat") else str(event.failed_at))
+    buf += encode_string(
+        5,
+        event.failed_at.isoformat()
+        if hasattr(event.failed_at, "isoformat")
+        else str(event.failed_at),
+    )
     return buf
 
 
 def deserialize_dlq_message(data: bytes) -> dict[str, Any]:
     import datetime
+
     fields = decode_message(data)
     failed_at_str = get_str_field(fields, 5)
     try:

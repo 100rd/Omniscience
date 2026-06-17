@@ -353,6 +353,7 @@ class IndexWriter:
                 parser_version=chunk_data.parser_version,
                 chunker_strategy=chunk_data.chunker_strategy,
                 chunk_metadata=chunk_data.metadata,
+                embedding=chunk_data.embedding,
             )
             session.add(chunk)
         await session.flush()

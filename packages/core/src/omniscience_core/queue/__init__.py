@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from omniscience_core.queue.connection import NatsConnection
 from omniscience_core.queue.consumer import QueueConsumer
-from omniscience_core.queue.messages import DLQMessage, Message, EntityUpsertEvent, EdgeUpsertEvent
+from omniscience_core.queue.messages import DLQMessage, EdgeUpsertEvent, EntityUpsertEvent, Message
 from omniscience_core.queue.producer import QueueProducer
 from omniscience_core.queue.streams import ensure_streams
 

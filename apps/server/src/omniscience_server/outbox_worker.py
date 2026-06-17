@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+
 import structlog
 from omniscience_core.db.models import OutboxEvent
 from omniscience_core.queue import NatsConnection, QueueProducer
-from omniscience_core.queue.messages import EntityUpsertEvent, EdgeUpsertEvent
+from omniscience_core.queue.messages import EdgeUpsertEvent, EntityUpsertEvent
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -65,49 +65,48 @@ class OutboxWorker:
         if self._producer is None:
             self._producer = QueueProducer(self._nats_conn.jetstream)
 
-        async with self._session_factory() as session:
-            async with session.begin():
-                # Select oldest unprocessed events
-                stmt = (
-                    select(OutboxEvent)
-                    .where(OutboxEvent.processed == False)
-                    .order_by(OutboxEvent.created_at.asc())
-                    .limit(self._batch_size)
-                    .with_for_update(skip_locked=True)
-                )
-                result = await session.execute(stmt)
-                events = result.scalars().all()
+        async with self._session_factory() as session, session.begin():
+            # Select oldest unprocessed events
+            stmt = (
+                select(OutboxEvent)
+                .where(not OutboxEvent.processed)
+                .order_by(OutboxEvent.created_at.asc())
+                .limit(self._batch_size)
+                .with_for_update(skip_locked=True)
+            )
+            result = await session.execute(stmt)
+            events = result.scalars().all()
 
-                if not events:
-                    return
+            if not events:
+                return
 
-                log.debug("outbox_polling_found_events", count=len(events))
+            log.debug("outbox_polling_found_events", count=len(events))
 
-                for event in events:
-                    try:
-                        if event.event_type == "entity.upsert":
-                            payload = EntityUpsertEvent.model_validate(event.payload)
-                            subject = "outbox.entity.upsert"
-                        elif event.event_type == "edge.upsert":
-                            payload = EdgeUpsertEvent.model_validate(event.payload)
-                            subject = "outbox.edge.upsert"
-                        else:
-                            log.warning("outbox_unknown_event_type", event_type=event.event_type)
-                            event.processed = True
-                            event.processed_at = datetime.now(UTC)
-                            continue
-
-                        # Publish to JetStream
-                        await self._producer.publish(subject, payload)
-
-                        # Mark as processed
+            for event in events:
+                try:
+                    if event.event_type == "entity.upsert":
+                        payload = EntityUpsertEvent.model_validate(event.payload)
+                        subject = "outbox.entity.upsert"
+                    elif event.event_type == "edge.upsert":
+                        payload = EdgeUpsertEvent.model_validate(event.payload)
+                        subject = "outbox.edge.upsert"
+                    else:
+                        log.warning("outbox_unknown_event_type", event_type=event.event_type)
                         event.processed = True
                         event.processed_at = datetime.now(UTC)
-                    except Exception as exc:
-                        log.error(
-                            "outbox_event_publish_failed",
-                            event_id=str(event.id),
-                            event_type=event.event_type,
-                            error=str(exc),
-                        )
-                        # We don't mark as processed so it will be retried on next tick
+                        continue
+
+                    # Publish to JetStream
+                    await self._producer.publish(subject, payload)
+
+                    # Mark as processed
+                    event.processed = True
+                    event.processed_at = datetime.now(UTC)
+                except Exception as exc:
+                    log.error(
+                        "outbox_event_publish_failed",
+                        event_id=str(event.id),
+                        event_type=event.event_type,
+                        error=str(exc),
+                    )
+                    # We don't mark as processed so it will be retried on next tick

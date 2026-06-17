@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import datetime
 import uuid
-from typing import Any
 
-from omniscience_core.queue.messages import DLQMessage, EntityUpsertEvent, EdgeUpsertEvent
-from omniscience_server.ingestion.events import DocumentChangeEvent
+from omniscience_core.queue.messages import DLQMessage, EdgeUpsertEvent, EntityUpsertEvent
 from omniscience_core.queue.pb_events import (
-    serialize_document_change_event,
-    deserialize_document_change_event,
-    serialize_entity_upsert_event,
-    deserialize_entity_upsert_event,
-    serialize_edge_upsert_event,
-    deserialize_edge_upsert_event,
-    serialize_dlq_message,
     deserialize_dlq_message,
+    deserialize_document_change_event,
+    deserialize_edge_upsert_event,
+    deserialize_entity_upsert_event,
+    serialize_dlq_message,
+    serialize_document_change_event,
+    serialize_edge_upsert_event,
+    serialize_entity_upsert_event,
 )
+from omniscience_server.ingestion.events import DocumentChangeEvent
 
 
 def test_protobuf_document_change_event() -> None:
