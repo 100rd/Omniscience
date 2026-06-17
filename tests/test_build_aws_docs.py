@@ -321,17 +321,12 @@ class TestEnrichElb:
         cli, stubber = _stub_client("elbv2")
 
         lb_arn = (
-            f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}"
-            ":loadbalancer/app/my-alb/abc123"
+            f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}:loadbalancer/app/my-alb/abc123"
         )
         listener_arn = (
-            f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}"
-            ":listener/app/my-alb/abc123/def456"
+            f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}:listener/app/my-alb/abc123/def456"
         )
-        tg_arn = (
-            f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}"
-            ":targetgroup/my-tg/xyz789"
-        )
+        tg_arn = f"arn:aws:elasticloadbalancing:{REGION}:{ACCOUNT_ID}:targetgroup/my-tg/xyz789"
 
         # describe_load_balancers page
         stubber.add_response(
@@ -349,7 +344,7 @@ class TestEnrichElb:
                         "AvailabilityZones": [{"ZoneName": "eu-west-1a"}],
                     }
                 ],
-                },
+            },
         )
         # describe_listeners for that LB
         stubber.add_response(
@@ -363,7 +358,7 @@ class TestEnrichElb:
                         "SslPolicy": "ELBSecurityPolicy-2016-08",
                     }
                 ],
-                },
+            },
             expected_params={"LoadBalancerArn": lb_arn},
         )
         # describe_target_groups
@@ -382,7 +377,7 @@ class TestEnrichElb:
                         "LoadBalancerArns": [lb_arn],
                     }
                 ],
-                },
+            },
         )
         stubber.activate()
         return cli, stubber, lb_arn, listener_arn
@@ -563,7 +558,7 @@ class TestEnrichRds:
                         "TagList": [{"Key": "Env", "Value": "prod"}],
                     }
                 ],
-                },
+            },
         )
         stubber.activate()
         return cli, stubber, db_arn
@@ -632,7 +627,7 @@ class TestEnrichEc2:
                         ]
                     }
                 ],
-                },
+            },
         )
         stubber.activate()
         return cli, stubber, inst_arn
@@ -659,9 +654,7 @@ class TestEnrichEc2:
 
     def test_ec2_access_denied_skipped(self) -> None:
         cli, stubber = _stub_client("ec2")
-        stubber.add_client_error(
-            "describe_instances", service_error_code="AccessDenied"
-        )
+        stubber.add_client_error("describe_instances", service_error_code="AccessDenied")
         stubber.activate()
         docs: dict[str, Any] = {}
         with stubber, patch("build_aws_docs._client", return_value=cli):
