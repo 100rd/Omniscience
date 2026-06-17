@@ -302,6 +302,163 @@ class TestCollectCandidates:
         ids, _ = _collect_candidates(result)
         assert len(ids) == MAX_ANCHOR_CANDIDATES
 
+    def test_prioritize_by_edge_weight(self) -> None:
+        seed_src = uuid.uuid4()
+        src_a = uuid.uuid4()
+        src_b = uuid.uuid4()
+        src_c = uuid.uuid4()
+
+        seed = EntityNodeView(
+            id=uuid.uuid4(),
+            name="seed",
+            kind="service",
+            source=str(seed_src),
+            chunk_text="seed chunk",
+            depth=0,
+            edge_type=None,
+        )
+        related = [
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="b",
+                kind="service",
+                source=str(src_b),
+                chunk_text="b chunk",
+                depth=1,
+                edge_type="OWNED_BY",  # weight 0.4
+            ),
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="a",
+                kind="service",
+                source=str(src_a),
+                chunk_text="a chunk",
+                depth=1,
+                edge_type="DEPENDS_ON",  # weight 1.0
+            ),
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="c",
+                kind="service",
+                source=str(src_c),
+                chunk_text="c chunk",
+                depth=1,
+                edge_type="ROUTES_TO",  # weight 0.9
+            ),
+        ]
+        result = GraphResultView(seed=seed, related=related, edges=[])
+        ids, depths = _collect_candidates(result)
+
+        # Expected sorted order: seed_src (always index 0), src_a (1.0), src_c (0.9), src_b (0.4)
+        assert ids == (str(seed_src), str(src_a), str(src_c), str(src_b))
+        assert depths == (0, 1, 1, 1)
+
+    def test_prioritize_by_depth_decay(self) -> None:
+        seed_src = uuid.uuid4()
+        src_a = uuid.uuid4()
+        src_b = uuid.uuid4()
+
+        seed = EntityNodeView(
+            id=uuid.uuid4(),
+            name="seed",
+            kind="service",
+            source=str(seed_src),
+            chunk_text="seed chunk",
+            depth=0,
+            edge_type=None,
+        )
+        related = [
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="a",
+                kind="service",
+                source=str(src_a),
+                chunk_text="a chunk",
+                depth=3,
+                edge_type="DEPENDS_ON",  # weight 1.0, decay 0.25 -> score 0.25, min depth 3
+            ),
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="b",
+                kind="service",
+                source=str(src_b),
+                chunk_text="b chunk",
+                depth=1,
+                edge_type="OWNED_BY",  # weight 0.4, decay 1.0 -> score 0.4, min depth 1
+            ),
+        ]
+        result = GraphResultView(seed=seed, related=related, edges=[])
+        ids, depths = _collect_candidates(result)
+
+        assert ids == (str(seed_src), str(src_b), str(src_a))
+        assert depths == (0, 1, 3)
+
+    def test_tie_breaking_bfs_order(self) -> None:
+        seed_src = uuid.uuid4()
+        src_a = uuid.uuid4()
+        src_b = uuid.uuid4()
+
+        seed = EntityNodeView(
+            id=uuid.uuid4(),
+            name="seed",
+            kind="service",
+            source=str(seed_src),
+            chunk_text="seed chunk",
+            depth=0,
+            edge_type=None,
+        )
+
+        # Swapping order to verify BFS order governs tie-breaking (same score = 1.0)
+        # Scenario 1: A then B
+        related_1 = [
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="a",
+                kind="service",
+                source=str(src_a),
+                chunk_text="a",
+                depth=1,
+                edge_type="CALLS",
+            ),
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="b",
+                kind="service",
+                source=str(src_b),
+                chunk_text="b",
+                depth=1,
+                edge_type="DEPENDS_ON",
+            ),
+        ]
+        result_1 = GraphResultView(seed=seed, related=related_1, edges=[])
+        ids_1, _ = _collect_candidates(result_1)
+        assert ids_1 == (str(seed_src), str(src_a), str(src_b))
+
+        # Scenario 2: B then A
+        related_2 = [
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="b",
+                kind="service",
+                source=str(src_b),
+                chunk_text="b",
+                depth=1,
+                edge_type="DEPENDS_ON",
+            ),
+            EntityNodeView(
+                id=uuid.uuid4(),
+                name="a",
+                kind="service",
+                source=str(src_a),
+                chunk_text="a",
+                depth=1,
+                edge_type="CALLS",
+            ),
+        ]
+        result_2 = GraphResultView(seed=seed, related=related_2, edges=[])
+        ids_2, _ = _collect_candidates(result_2)
+        assert ids_2 == (str(seed_src), str(src_b), str(src_a))
+
 
 class TestBuildAffinityMap:
     """Unit tests for :func:`_build_affinity_map`."""

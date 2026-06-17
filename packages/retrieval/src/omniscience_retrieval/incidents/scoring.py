@@ -31,6 +31,7 @@ This module introduces:
 
 from __future__ import annotations
 
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -98,6 +99,7 @@ class IncidentScoringConfig(BaseModel):
 
     weights: IncidentScoringWeights | None = None
     confidence_threshold: float = Field(default=DEFAULT_CONFIDENCE_THRESHOLD, ge=0.0, le=1.0)
+    temporal_decay_half_life_seconds: float = Field(default=43200.0, gt=0.0)
 
     @field_validator("confidence_threshold")
     @classmethod
@@ -110,6 +112,7 @@ class IncidentScoringResponse(BaseModel):
 
     weights: IncidentScoringWeights
     confidence_threshold: float = Field(ge=0.0, le=1.0)
+    temporal_decay_half_life_seconds: float = Field(gt=0.0)
     weights_source: str = Field(
         description=(
             "'workspace' if the workspace has a stored override, 'default' "
@@ -123,6 +126,7 @@ class IncidentScoringUpdateRequest(BaseModel):
 
     weights: IncidentScoringWeights
     confidence_threshold: float = Field(default=DEFAULT_CONFIDENCE_THRESHOLD, ge=0.0, le=1.0)
+    temporal_decay_half_life_seconds: float = Field(default=43200.0, gt=0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -135,12 +139,13 @@ class _ScoringInputs:
     """Bundled inputs for component derivation."""
 
     has_pr: bool
-    pr_temporal_match: bool
     pr_has_merge_ts: bool
+    pr_delta_seconds: float | None
     has_resource: bool
     resource_depth: int
     thread_count: int
     max_depth: int
+    temporal_decay_half_life_seconds: float
 
 
 def _derive_inputs(
@@ -152,50 +157,36 @@ def _derive_inputs(
     resource_depth: int,
     thread_count: int,
     max_depth: int,
-    pr_recency_window_seconds: int,
+    temporal_decay_half_life_seconds: float,
 ) -> _ScoringInputs:
     """Reduce the classified BFS view to the inputs the components need."""
     pr_has_merge_ts = pr_valid_from is not None
-    pr_temporal_match = _is_temporal_match(
-        alert_valid_from=alert_valid_from,
-        pr_valid_from=pr_valid_from,
-        window_seconds=pr_recency_window_seconds,
-    )
+    pr_delta_seconds = None
+    if alert_valid_from is not None and pr_valid_from is not None:
+        pr_delta_seconds = (alert_valid_from - pr_valid_from).total_seconds()
+
     return _ScoringInputs(
         has_pr=has_pr,
-        pr_temporal_match=pr_temporal_match,
         pr_has_merge_ts=pr_has_merge_ts,
+        pr_delta_seconds=pr_delta_seconds,
         has_resource=has_resource,
         resource_depth=resource_depth,
         thread_count=thread_count,
         max_depth=max(1, max_depth),
+        temporal_decay_half_life_seconds=temporal_decay_half_life_seconds,
     )
 
 
-def _is_temporal_match(
-    *,
-    alert_valid_from: datetime | None,
-    pr_valid_from: datetime | None,
-    window_seconds: int,
-) -> bool:
-    """Mirror of resolution._is_temporally_correlated for derivation."""
-    if alert_valid_from is None or pr_valid_from is None:
-        return False
-    if pr_valid_from > alert_valid_from:
-        return False
-    delta = (alert_valid_from - pr_valid_from).total_seconds()
-    return 0 <= delta <= window_seconds
-
-
 def _component_recency(inputs: _ScoringInputs) -> float:
-    """1.0 when the PR merged inside the recency window before alert."""
-    if inputs.pr_temporal_match:
-        return 1.0
-    if inputs.has_pr and inputs.pr_has_merge_ts:
+    """Continuous exponential decay based on time difference between PR merge and alert firing."""
+    if not inputs.has_pr:
         return 0.0
-    if inputs.has_pr:
+    if not inputs.pr_has_merge_ts or inputs.pr_delta_seconds is None:
         return 0.5
-    return 0.0
+    if inputs.pr_delta_seconds < 0:
+        return 0.0
+    decay_constant = math.log(2.0) / inputs.temporal_decay_half_life_seconds
+    return math.exp(-decay_constant * inputs.pr_delta_seconds)
 
 
 def _component_graph_proximity(inputs: _ScoringInputs) -> float:
@@ -215,11 +206,10 @@ def _component_evidence_count(inputs: _ScoringInputs) -> float:
 
 
 def _component_cross_ref_strength(inputs: _ScoringInputs) -> float:
-    """Mirror of the v0.1 ladder, scaled to ``[0, 1]``."""
-    if inputs.pr_temporal_match:
-        return 0.9
+    """Mirror of the v0.1 ladder, now continuous, scaled to ``[0, 1]``."""
     if inputs.has_pr:
-        return 0.6
+        recency = _component_recency(inputs)
+        return 0.6 + 0.3 * recency
     if inputs.has_resource:
         return 0.4
     return 0.1
@@ -234,7 +224,7 @@ def compute_components(
     resource_depth: int,
     thread_count: int,
     max_depth: int,
-    pr_recency_window_seconds: int,
+    temporal_decay_half_life_seconds: float = 43200.0,
 ) -> dict[str, float]:
     """Public entry point for component derivation.
 
@@ -249,7 +239,7 @@ def compute_components(
         resource_depth=resource_depth,
         thread_count=thread_count,
         max_depth=max_depth,
-        pr_recency_window_seconds=pr_recency_window_seconds,
+        temporal_decay_half_life_seconds=temporal_decay_half_life_seconds,
     )
     return {
         "recency": _component_recency(inputs),
@@ -292,7 +282,13 @@ def _parse_config(raw: Any) -> IncidentScoringConfig | None:
             weights = None
         threshold_raw = raw.get("confidence_threshold", DEFAULT_CONFIDENCE_THRESHOLD)
         threshold = float(threshold_raw)
-        return IncidentScoringConfig(weights=weights, confidence_threshold=threshold)
+        decay_raw = raw.get("temporal_decay_half_life_seconds", 43200.0)
+        decay = float(decay_raw)
+        return IncidentScoringConfig(
+            weights=weights,
+            confidence_threshold=threshold,
+            temporal_decay_half_life_seconds=decay,
+        )
     except (ValueError, TypeError):
         return None
 
@@ -326,6 +322,7 @@ async def save_workspace_config(
         raise ValueError(f"workspace_not_found:{workspace_id}")
     payload: dict[str, Any] = {
         "confidence_threshold": float(config.confidence_threshold),
+        "temporal_decay_half_life_seconds": float(config.temporal_decay_half_life_seconds),
     }
     if config.weights is not None:
         payload["weights"] = config.weights.as_dict()

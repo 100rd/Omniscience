@@ -49,7 +49,6 @@ from omniscience_server.incidents import (
     ALERT_NOT_FOUND_CODE,
     CONFIDENCE_ALERT_ONLY,
     CONFIDENCE_PR_NO_TEMPORAL_MATCH,
-    CONFIDENCE_PR_TEMPORAL_MATCH,
     CONFIDENCE_RESOURCE_ONLY,
     DEFAULT_MAX_DEPTH,
     INVALID_ALERT_ID_CODE,
@@ -317,7 +316,7 @@ class TestResolveIncidentHappyPath:
         )
         assert len(result["slack_threads"]) == 1
         assert result["slack_threads"][0]["name"] == _SLACK_THREAD
-        assert result["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert result["confidence_score"] == pytest.approx(0.6 + 0.3 * (2 ** (-1.0 / 6.0)))
         assert "effective_as_of" in result
 
     async def test_default_max_depth_forwarded(self) -> None:
@@ -482,7 +481,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert result["confidence_score"] == pytest.approx(0.6 + 0.3 * (2 ** (-1.0 / 6.0)))
 
     async def test_pr_outside_window_returns_0_6(self) -> None:
         store = _IncidentGraphStore()
@@ -491,17 +490,17 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["confidence_score"] == pytest.approx(0.6 + 0.3 * (2 ** -14.0))
 
     async def test_pr_with_no_merge_timestamp_returns_0_6(self) -> None:
-        """Missing merge timestamp -> no temporal correlation rung."""
+        """Missing merge timestamp -> neutral 0.5 probability (score 0.75)."""
         store = _IncidentGraphStore()
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=None)
         app = FastAPI()
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["confidence_score"] == pytest.approx(0.75)
 
     async def test_resource_only_no_pr_returns_0_4(self) -> None:
         """Resource resolved but no PR -> 0.4."""
@@ -632,7 +631,7 @@ class TestRestResolveIncident:
         body = resp.json()
         assert body["alert"]["name"] == _ALERT_ID
         assert body["responsible_pr"]["name"] == _PR_URL
-        assert body["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert body["confidence_score"] == pytest.approx(0.6 + 0.3 * (2 ** (-1.0 / 6.0)))
 
     async def test_alert_not_found_returns_404(self) -> None:
         app = _make_rest_app()
@@ -776,10 +775,7 @@ class TestRestResolveIncident:
 @pytest.mark.asyncio
 class TestRecencyBoundary:
     async def test_exactly_at_window_edge_is_temporal_match(self) -> None:
-        """At exactly ``PR_RECENCY_WINDOW_SECONDS`` before alert -> match.
-
-        The boundary is inclusive — issue #153 §C reads "within 24h".
-        """
+        """At exactly ``PR_RECENCY_WINDOW_SECONDS`` (two half-lives) before alert."""
         store = _IncidentGraphStore()
         edge = _ALERT_FIRED_AT - timedelta(seconds=PR_RECENCY_WINDOW_SECONDS)
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=edge)
@@ -787,7 +783,7 @@ class TestRecencyBoundary:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert result["confidence_score"] == pytest.approx(0.6 + 0.3 * (2 ** -2.0))
 
     async def test_one_second_outside_window_is_no_match(self) -> None:
         store = _IncidentGraphStore()
@@ -797,4 +793,4 @@ class TestRecencyBoundary:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["confidence_score"] == pytest.approx(0.6 + 0.3 * (2 ** (-86401.0 / 43200.0)))

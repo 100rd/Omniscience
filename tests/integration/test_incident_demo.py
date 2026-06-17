@@ -63,7 +63,6 @@ from omniscience_core.storage.graph import (
 )
 from omniscience_server.incidents import (
     CONFIDENCE_PR_NO_TEMPORAL_MATCH,
-    CONFIDENCE_PR_TEMPORAL_MATCH,
     PR_RECENCY_WINDOW_SECONDS,
     mcp_resolve_incident,
 )
@@ -396,12 +395,9 @@ class TestIncidentDemoEndToEnd:
         assert score >= _DEMO_CONFIDENCE_FLOOR, (
             f"demo path must return confidence >= {_DEMO_CONFIDENCE_FLOOR}; got {score}"
         )
-        # Document the v0.1 actual: a 4h-old PR yields the temporal-match rung.
-        assert score == CONFIDENCE_PR_TEMPORAL_MATCH, (
-            f"v0.1 heuristic returns CONFIDENCE_PR_TEMPORAL_MATCH (0.9) for a "
-            f"PR within the 24h window; got {score}.  If #155's calibrated "
-            f"model lands and lowers this, drop the equality check but keep "
-            f"the >= {_DEMO_CONFIDENCE_FLOOR} floor."
+        # Document the actual score: a 4h-old PR yields a decayed score.
+        assert score == pytest.approx(0.8381101577952299), (
+            f"calibrated model returns approx 0.8381101577952299; got {score}."
         )
         # And it isn't the no-temporal-match rung — sanity check the
         # 7d-old PR did not win the tie-break.

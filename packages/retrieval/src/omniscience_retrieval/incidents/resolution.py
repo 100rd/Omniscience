@@ -18,6 +18,7 @@ Composition shape (caller responsibility)
 
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -293,20 +294,36 @@ def compute_confidence(
     *,
     alert: EntityNodeView,
     classified: ClassifiedNeighbours,
+    half_life_seconds: float = 43200.0,
 ) -> float:
-    """v0.1 deterministic placeholder per issue #153 §C.
+    """Compute continuous probabilistic confidence using exponential temporal decay.
 
-    The 4-rung ladder:
-    - 0.9 if ``responsible_pr`` is present AND merged within
-      :data:`PR_RECENCY_WINDOW_SECONDS` BEFORE the alert fired.
-    - 0.6 if ``responsible_pr`` is present but no temporal correlation.
-    - 0.4 if ``target_resource`` resolved but no PR.
-    - 0.1 if only the alert entity itself was resolvable.
+    Incorporates a configurable half-life to decay the PR correlation probability.
     """
     if classified.responsible_pr is not None:
-        if _is_temporally_correlated(alert=alert, pr=classified.responsible_pr):
-            return CONFIDENCE_PR_TEMPORAL_MATCH
-        return CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        pr = classified.responsible_pr
+        pr_merged_at = pr.valid_from
+        alert_fired_at = alert.valid_from
+
+        if pr_merged_at is None or alert_fired_at is None:
+            # PR exists but no temporal data: assign neutral 0.5 recency probability
+            return CONFIDENCE_PR_NO_TEMPORAL_MATCH + (
+                CONFIDENCE_PR_TEMPORAL_MATCH - CONFIDENCE_PR_NO_TEMPORAL_MATCH
+            ) * 0.5
+
+        delta = (alert_fired_at - pr_merged_at).total_seconds()
+        if delta < 0:
+            # PR merged after alert fired: causality violation, return base PR score
+            return CONFIDENCE_PR_NO_TEMPORAL_MATCH
+
+        # Exponential decay: P = exp(-lambda * delta) where lambda = ln(2) / half_life
+        decay_constant = math.log(2.0) / half_life_seconds
+        p_recency = math.exp(-decay_constant * delta)
+
+        return CONFIDENCE_PR_NO_TEMPORAL_MATCH + (
+            CONFIDENCE_PR_TEMPORAL_MATCH - CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        ) * p_recency
+
     if classified.target_resource is not None:
         return CONFIDENCE_RESOURCE_ONLY
     return CONFIDENCE_ALERT_ONLY
@@ -348,8 +365,9 @@ def score_incident(
     # Import here to avoid module-level circular import within the incidents package.
     from omniscience_retrieval.incidents.scoring import apply_weights, compute_components
 
+    half_life = config.temporal_decay_half_life_seconds if config is not None else 43200.0
     if config is None or config.weights is None:
-        return compute_confidence(alert=alert, classified=classified)
+        return compute_confidence(alert=alert, classified=classified, half_life_seconds=half_life)
     components = compute_components(
         alert_valid_from=alert.valid_from,
         pr_valid_from=(
@@ -362,7 +380,7 @@ def score_incident(
         ),
         thread_count=len(classified.slack_threads),
         max_depth=max_depth,
-        pr_recency_window_seconds=PR_RECENCY_WINDOW_SECONDS,
+        temporal_decay_half_life_seconds=half_life,
     )
     return apply_weights(components, config.weights)
 

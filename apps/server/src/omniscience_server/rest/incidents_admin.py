@@ -92,6 +92,7 @@ def _default_response() -> IncidentScoringResponse:
     return IncidentScoringResponse(
         weights=IncidentScoringWeights(**DEFAULT_WEIGHTS),
         confidence_threshold=DEFAULT_CONFIDENCE_THRESHOLD,
+        temporal_decay_half_life_seconds=43200.0,
         weights_source="default",
     )
 
@@ -134,6 +135,7 @@ async def get_scoring(
     return IncidentScoringResponse(
         weights=weights,
         confidence_threshold=config.confidence_threshold,
+        temporal_decay_half_life_seconds=config.temporal_decay_half_life_seconds,
         weights_source="workspace",
     )
 
@@ -164,6 +166,7 @@ async def put_scoring(
     config = IncidentScoringConfig(
         weights=payload.weights,
         confidence_threshold=payload.confidence_threshold,
+        temporal_decay_half_life_seconds=payload.temporal_decay_half_life_seconds,
     )
 
     db: AsyncSession
@@ -190,6 +193,7 @@ async def put_scoring(
     return IncidentScoringResponse(
         weights=payload.weights,
         confidence_threshold=payload.confidence_threshold,
+        temporal_decay_half_life_seconds=payload.temporal_decay_half_life_seconds,
         weights_source="workspace",
     )
 

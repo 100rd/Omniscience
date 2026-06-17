@@ -26,6 +26,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from fastapi import FastAPI
 from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.tokens import generate_token, hash_token
@@ -282,7 +283,7 @@ class TestMcpAppsCardRender:
         assert response["alert"]["name"] == _ALERT_ID
         assert response["responsible_pr"]["name"] == _PR_URI
         assert response["target_resource"]["name"] == _RESOURCE
-        assert response["confidence_score"] == 0.9
+        assert response["confidence_score"] == pytest.approx(0.8914595823460818)
 
     async def test_non_apps_client_receives_legacy_only(self) -> None:
         """Backwards-compat: no capability -> no card."""
@@ -309,7 +310,7 @@ class TestMcpAppsCardRender:
         assert "_meta" not in response
         # Top-level legacy fields untouched.
         assert response["alert"]["name"] == _ALERT_ID
-        assert response["confidence_score"] == 0.9
+        assert response["confidence_score"] == pytest.approx(0.8914595823460818)
 
     async def test_card_schema_round_trips_through_json(self) -> None:
         """The card payload must survive a JSON round-trip unchanged."""
