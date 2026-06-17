@@ -110,6 +110,18 @@ class SearchHit(BaseModel):
             "None for the local instance; set to the peer name for federated results."
         ),
     )
+    confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Probabilistic confidence score for this search hit.",
+    )
+    impact: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="Probabilistic impact score for this search hit.",
+    )
 
 
 class QueryStats(BaseModel):
