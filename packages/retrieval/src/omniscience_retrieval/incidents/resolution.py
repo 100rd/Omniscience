@@ -294,22 +294,19 @@ def compute_confidence(
     alert: EntityNodeView,
     classified: ClassifiedNeighbours,
 ) -> float:
-    """v0.1 deterministic placeholder per issue #153 §C.
+    """Probabilistic confidence calculation (issue #315).
 
-    The 4-rung ladder:
-    - 0.9 if ``responsible_pr`` is present AND merged within
-      :data:`PR_RECENCY_WINDOW_SECONDS` BEFORE the alert fired.
-    - 0.6 if ``responsible_pr`` is present but no temporal correlation.
-    - 0.4 if ``target_resource`` resolved but no PR.
-    - 0.1 if only the alert entity itself was resolvable.
+    Considers source reliability of alert, PR, and resource; age (time decay) of data;
+    and graph topology (depth of the resource).
     """
-    if classified.responsible_pr is not None:
-        if _is_temporally_correlated(alert=alert, pr=classified.responsible_pr):
-            return CONFIDENCE_PR_TEMPORAL_MATCH
-        return CONFIDENCE_PR_NO_TEMPORAL_MATCH
-    if classified.target_resource is not None:
-        return CONFIDENCE_RESOURCE_ONLY
-    return CONFIDENCE_ALERT_ONLY
+    from omniscience_retrieval.probabilistic_scoring import (
+        calculate_probabilistic_incident_confidence,
+    )
+    return calculate_probabilistic_incident_confidence(
+        alert=alert,
+        classified=classified,
+        max_depth=3,  # default max depth fallback
+    )
 
 
 def _is_temporally_correlated(
