@@ -1100,9 +1100,16 @@ def _ci_to_ref(ci: dict[str, Any]) -> DocumentRef | None:
     )
 
 
+# The Config aggregator API is region-agnostic for org-wide queries, but the
+# boto3 client still needs a home region for its endpoint. Default to us-east-1
+# (mirrors ``_ORG_REGION``) so client construction never raises NoRegionError
+# when no ambient region (env/profile) is configured.
+_CONFIG_CLIENT_REGION = "us-east-1"
+
+
 def _build_config_client(secrets: dict[str, str], region: str | None = None) -> Any:
     """Return a boto3 config client for Config aggregator queries."""
-    return _build_client("config", secrets, region)
+    return _build_client("config", secrets, region or _CONFIG_CLIENT_REGION)
 
 
 def _list_aggregate_cis_for_type(

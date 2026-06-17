@@ -8,6 +8,7 @@ from omniscience_server.rest.admin_session import router as admin_session_router
 from omniscience_server.rest.blast_radius import router as blast_radius_router
 from omniscience_server.rest.components import router as components_router
 from omniscience_server.rest.documents import router as documents_router
+from omniscience_server.rest.drift import router as drift_router
 from omniscience_server.rest.entities import router as entities_router
 from omniscience_server.rest.freshness import router as freshness_router
 from omniscience_server.rest.incident_timeline import router as incident_timeline_router
@@ -34,6 +35,7 @@ api_v1_router.include_router(search_router)
 api_v1_router.include_router(sources_router)
 api_v1_router.include_router(workspace_router)
 api_v1_router.include_router(documents_router)
+api_v1_router.include_router(drift_router)
 api_v1_router.include_router(entities_router)
 api_v1_router.include_router(ingestion_runs_router)
 api_v1_router.include_router(webhooks_router)

@@ -76,8 +76,10 @@ from omniscience_index.stores.neo4j._tx import (
 )
 from omniscience_index.stores.neo4j.mappers import (
     _as_of_to_param,
+    _build_list_entities_cypher,
     _build_traverse_cypher,
     _clamp_depth,
+    _cluster_from_metadata,
     _coerce_metadata,
     _coerce_to_date,
     _coerce_to_datetime,
@@ -372,6 +374,7 @@ class Neo4jGraphStore:
     ) -> None:
         """Upsert a single entity within ``workspace_id`` (idempotent)."""
         now = datetime.now(UTC).isoformat()
+        metadata = _coerce_metadata(entity.metadata)
         params: dict[str, Any] = {
             _WRITE_WORKSPACE_PARAM: str(workspace_id),
             "id": str(entity.id),
@@ -380,7 +383,10 @@ class Neo4jGraphStore:
             "name": entity.name,
             "display_name": entity.display_name,
             "chunk_id": (str(entity.chunk_id) if entity.chunk_id else None),
-            "metadata": _coerce_metadata(entity.metadata),
+            # First-class indexed cluster property (Gap A) promoted from
+            # metadata so list_entities matches by cluster via index seek.
+            "cluster": _cluster_from_metadata(metadata),
+            "metadata": metadata,
             "now": now,
         }
         cypher = self._select_entity_upsert_cypher(params)
@@ -806,6 +812,49 @@ class Neo4jGraphStore:
         if not rows:
             return None
         return _entity_record_to_view(rows[0])
+
+    async def list_entities(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        kind: str,
+        cluster: str | None = None,
+        name: str | None = None,
+        as_of: datetime | None = None,
+    ) -> list[EntityNodeView]:
+        """List entities of ``kind`` within ``workspace_id`` (Gap B, #310).
+
+        Filters by the first-class, indexed ``cluster`` property (Gap A)
+        and/or exact ``name`` when supplied — both optional.  Answers
+        "which StorageClasses exist in cluster X" and "does a StorageClass
+        named 'gold' exist in cluster X" with an index seek on
+        ``(workspace_id, kind, cluster)``, never a ``metadata CONTAINS``
+        substring scan.
+
+        ``as_of`` (ADR-0008 §5) returns the ``:EntityState`` version valid
+        at T; ``None`` reads the still-current ``:Entity`` mirror.  The
+        workspace predicate always leads (ADR-0008 §Consequences-security
+        #1) and the bitemporal predicate composes on top — never replaces
+        it.
+        """
+        cypher = _build_list_entities_cypher(
+            has_cluster=cluster is not None,
+            has_name=name is not None,
+            as_of=as_of is not None,
+        )
+        params: dict[str, Any] = {
+            _WORKSPACE_PARAM: str(workspace_id),
+            "kind": kind,
+        }
+        if cluster is not None:
+            params["cluster"] = cluster
+        if name is not None:
+            params["name"] = name
+        if as_of is not None:
+            params["as_of"] = _as_of_to_param(as_of)
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        return [_entity_record_to_view(r) for r in rows]
 
     async def find_related(
         self,

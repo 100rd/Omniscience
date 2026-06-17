@@ -274,6 +274,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         embedding_provider=embedding_provider,
         index_writer=index_writer,
         session_factory=session_factory,
+        # Gap A bridge: route operator-sourced events into Neo4j in addition
+        # to the vector path.  The worker no-ops the routing for non-operator
+        # events and when no payload is present.
+        graph_store=neo4j_graph_store,
     )
     worker_task = asyncio.create_task(worker.start())
     app.state.ingestion_worker = worker
