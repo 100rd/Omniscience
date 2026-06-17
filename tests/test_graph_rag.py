@@ -278,7 +278,7 @@ class TestCollectCandidates:
     def test_seed_counts_as_depth_zero(self) -> None:
         seed_src = uuid.uuid4()
         result = _make_graph_result(seed_source=seed_src, related=[])
-        ids, depths = _collect_candidates(result)
+        ids, depths, _ = _collect_candidates(result)
         assert ids == (str(seed_src),)
         assert depths == (0,)
 
@@ -289,7 +289,7 @@ class TestCollectCandidates:
             seed_source=seed_src,
             related=[(other, 1), (other, 2), (seed_src, 1)],
         )
-        ids, _ = _collect_candidates(result)
+        ids, _, _ = _collect_candidates(result)
         # seed + 1 unique related (second is duplicate of first, third duplicates seed)
         assert len(ids) == 2
         assert ids[0] == str(seed_src)
@@ -299,7 +299,7 @@ class TestCollectCandidates:
         seed_src = uuid.uuid4()
         related = [(uuid.uuid4(), 1) for _ in range(MAX_ANCHOR_CANDIDATES + 10)]
         result = _make_graph_result(seed_source=seed_src, related=related)
-        ids, _ = _collect_candidates(result)
+        ids, _, _ = _collect_candidates(result)
         assert len(ids) == MAX_ANCHOR_CANDIDATES
 
     def test_prioritizes_by_degree_centrality(self) -> None:
@@ -349,7 +349,7 @@ class TestCollectCandidates:
         ]
 
         result = GraphResultView(seed=seed, related=[rel3, rel1, rel2], edges=edges)
-        await_result = _collect_candidates(result)
+        _collect_candidates(result)
 
         assert result.related[0].name == "rel-2"
         assert result.related[1].name == "rel-1"
@@ -405,7 +405,7 @@ class TestCollectCandidates:
             chunk_text="seed chunk",
             depth=0,
         )
-        
+
         related = [
             EntityNodeView(
                 id=uuid.uuid4(),
@@ -413,17 +413,20 @@ class TestCollectCandidates:
                 kind="service",
                 source=str(uuid.uuid4()),
                 chunk_text=f"rel chunk {i}",
-                depth=1,
+                depth=99 if i == MAX_ANCHOR_CANDIDATES + 1 else 1,
             )
             for i in range(MAX_ANCHOR_CANDIDATES + 2)
         ]
-        
+
         edges = [
             GraphEdgeView(from_entity="seed-entity", to_entity=f"rel-{i}", edge_type="calls")
             for i in range(len(related))
+            if i != MAX_ANCHOR_CANDIDATES + 1
         ]
         discarded_entity_name = f"rel-{MAX_ANCHOR_CANDIDATES + 1}"
-        edges.append(GraphEdgeView(from_entity="rel-0", to_entity=discarded_entity_name, edge_type="calls"))
+        edges.append(
+            GraphEdgeView(from_entity="rel-0", to_entity=discarded_entity_name, edge_type="calls")
+        )
 
         result = GraphResultView(seed=seed, related=related, edges=edges)
         _collect_candidates(result)
@@ -446,6 +449,7 @@ class TestBuildAffinityMap:
             anchor_hit=True,
             candidate_source_ids=("A", "B", "C"),
             candidate_depths=(0, 1, 2),
+            candidate_centralities={},
             duration_s=0.0,
         )
         m = _build_affinity_map(anchor)
@@ -743,6 +747,7 @@ class TestWidenRequest:
             anchor_hit=False,
             candidate_source_ids=(),
             candidate_depths=(),
+            candidate_centralities={},
             duration_s=0.0,
         )
         req = SearchRequest(query="x", sources=["keep-me"])
@@ -758,6 +763,7 @@ class TestWidenRequest:
             anchor_hit=True,
             candidate_source_ids=("A", "B"),
             candidate_depths=(0, 1),
+            candidate_centralities={},
             duration_s=0.0,
         )
         req = SearchRequest(query="x", sources=["original"])
@@ -773,6 +779,7 @@ class TestWidenRequest:
             anchor_hit=False,
             candidate_source_ids=(),
             candidate_depths=(),
+            candidate_centralities={},
             duration_s=0.0,
         )
         req = SearchRequest(
@@ -1126,3 +1133,119 @@ class TestHybridTextMatchesFlow:
         assert result.query_stats.text_matches == 1
         # workspace_id forwarded.
         assert v.search_calls[0]["workspace_id"] == ws
+
+
+@pytest.mark.asyncio
+class TestReadTimePostgresValidation:
+    """Tests for the read-time Postgres validation in GraphRAGComposer."""
+
+    async def test_validate_entities_active_and_matching(self, force_graphrag: None) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        # We mock the DB results: seed-entity is active, rel-0 is inactive (not returned by execute)
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        execute_mock = MagicMock()
+        # Mock result.all() returning only the active entity name
+        execute_mock.all.return_value = [("seed-entity",)]
+        session.execute.return_value = execute_mock
+
+        session_factory = MagicMock(return_value=session)
+
+        seed_src = uuid.uuid4()
+        other_src = uuid.uuid4()
+
+        g = _FakeGraphStore(
+            result=_make_graph_result(seed_source=seed_src, related=[(other_src, 1)])
+        )
+
+        v = _FakeVectorStore(_make_result([]))
+        legacy = _FakeLegacyService(_make_result([]))
+
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g),
+            vector_store=v,
+            legacy_service=legacy,
+            session_factory=session_factory,
+        )
+
+        req = SearchRequest(
+            query="with-anchor",
+            filters={ANCHOR_FILTER_KEY: "AuthService"},
+        )
+        ws = uuid.uuid4()
+
+        anchor = await composer._run_anchor_stage(request=req, workspace_id=ws)
+        # seed-entity is valid, so anchor hit is True
+        assert anchor.anchor_hit is True
+        # "rel-0" is filtered out, so candidate_source_ids has only seed_src
+        assert anchor.candidate_source_ids == (str(seed_src),)
+
+    async def test_validate_entities_seed_inactive_causes_anchor_miss(
+        self, force_graphrag: None
+    ) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        execute_mock = MagicMock()
+        # Seed entity not returned -> empty list
+        execute_mock.all.return_value = []
+        session.execute.return_value = execute_mock
+        session_factory = MagicMock(return_value=session)
+
+        g = _FakeGraphStore(result=_make_graph_result(seed_source=uuid.uuid4(), related=[]))
+        v = _FakeVectorStore(_make_result([]))
+        legacy = _FakeLegacyService(_make_result([]))
+
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g),
+            vector_store=v,
+            legacy_service=legacy,
+            session_factory=session_factory,
+        )
+
+        req = SearchRequest(
+            query="with-anchor",
+            filters={ANCHOR_FILTER_KEY: "AuthService"},
+        )
+        anchor = await composer._run_anchor_stage(request=req, workspace_id=uuid.uuid4())
+        # Seed was invalid, so anchor_hit should be False (treated as anchor miss)
+        assert anchor.anchor_hit is False
+
+    async def test_validate_hits_filters_inactive_documents(self, force_graphrag: None) -> None:
+        from unittest.mock import AsyncMock, MagicMock
+
+        session = AsyncMock()
+        session.__aenter__.return_value = session
+        execute_mock = MagicMock()
+
+        chunk1_id = uuid.uuid4()
+        chunk2_id = uuid.uuid4()
+
+        # Only chunk1 is active in Postgres
+        execute_mock.all.return_value = [(chunk1_id,)]
+        session.execute.return_value = execute_mock
+        session_factory = MagicMock(return_value=session)
+
+        g = _FakeGraphStore()
+
+        hit1 = _make_hit(chunk_id=chunk1_id, score=0.9)
+        hit2 = _make_hit(chunk_id=chunk2_id, score=0.8)
+
+        v = _FakeVectorStore(_make_result([hit1, hit2]))
+        legacy = _FakeLegacyService(_make_result([]))
+
+        composer = GraphRAGComposer(
+            graph_store=cast("Any", g),
+            vector_store=v,
+            legacy_service=legacy,
+            session_factory=session_factory,
+        )
+
+        req = SearchRequest(query="test")
+        result = await composer.search(req, workspace_id=uuid.uuid4())
+
+        # Only hit1 should be returned, hit2 is filtered out because it's not valid/active
+        assert len(result.hits) == 1
+        assert result.hits[0].chunk_id == chunk1_id
