@@ -75,7 +75,24 @@ from omniscience_server.replay import (
     replay_context,
 )
 
-pytestmark = pytest.mark.asyncio
+
+def _docker_available() -> bool:
+    try:
+        import docker
+
+        docker.from_env().ping()
+        return True
+    except Exception:
+        return False
+
+
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.skipif(
+        not _docker_available(),
+        reason="Docker is not reachable; Neo4j contract tests need testcontainers.",
+    ),
+]
 
 
 _NEO4J_PASSWORD = "issue_243_password"

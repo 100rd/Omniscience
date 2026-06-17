@@ -187,10 +187,12 @@ class TestScoringResponseAndRequest:
         resp = IncidentScoringResponse(
             weights=w,
             confidence_threshold=0.6,
+            temporal_decay_half_life_seconds=43200.0,
             weights_source="workspace",
         )
         assert resp.weights_source == "workspace"
         assert resp.confidence_threshold == 0.6
+        assert resp.temporal_decay_half_life_seconds == 43200.0
 
     def test_update_request_default_threshold(self) -> None:
         req = IncidentScoringUpdateRequest(weights=_equal_weights())
@@ -214,13 +216,9 @@ class TestIsTemporalMatch:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        # pr_temporal_match=False → recency=0.5 (has_pr but no merge-ts match)
-        # Actually: pr_valid_from is not None → pr_has_merge_ts=True
-        # alert_valid_from=None → temporal match=False
-        # → _component_recency: has_pr=True, pr_has_merge_ts=True, match=False → 0.0
-        assert comps["recency"] == 0.0
+        assert comps["recency"] == pytest.approx(0.5)
 
     def test_none_pr_valid_from_returns_no_match(self) -> None:
         comps = compute_components(
@@ -231,10 +229,8 @@ class TestIsTemporalMatch:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        # pr_valid_from=None → pr_has_merge_ts=False → temporal match=False
-        # _component_recency: has_pr=True, pr_has_merge_ts=False → 0.5
         assert comps["recency"] == pytest.approx(0.5)
 
     def test_pr_after_alert_returns_no_match(self) -> None:
@@ -246,65 +242,66 @@ class TestIsTemporalMatch:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        # pr_valid_from > alert_valid_from → temporal match=False, merge ts exists → 0.0
         assert comps["recency"] == pytest.approx(0.0)
 
     def test_pr_within_window_returns_match(self) -> None:
+        # PR merged exactly at half-life (12 hours) -> recency = 0.5
+        pr_at_half_life = _ALERT_T - timedelta(seconds=43200)
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_RECENT,
+            pr_valid_from=pr_at_half_life,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        # temporal match → recency = 1.0
-        assert comps["recency"] == pytest.approx(1.0)
+        assert comps["recency"] == pytest.approx(0.5)
 
     def test_pr_outside_window_returns_no_match(self) -> None:
+        # PR merged at 2 half-lives (24 hours) -> recency = 0.25
+        pr_at_two_half_lives = _ALERT_T - timedelta(seconds=86400)
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_OLD,
+            pr_valid_from=pr_at_two_half_lives,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        # delta > window → no match, but has_pr=True and pr_has_merge_ts=True → 0.0
-        assert comps["recency"] == pytest.approx(0.0)
+        assert comps["recency"] == pytest.approx(0.25)
 
     def test_exactly_at_window_edge_is_match(self) -> None:
-        # exactly at the edge: delta = window_seconds → 0 <= delta <= window → True
-        pr_at_edge = _ALERT_T - timedelta(seconds=_WINDOW)
+        # PR merged exactly at 0 delta -> recency = 1.0
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=pr_at_edge,
+            pr_valid_from=_ALERT_T,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(1.0)
 
     def test_one_second_beyond_window_is_no_match(self) -> None:
-        pr_beyond = _ALERT_T - timedelta(seconds=_WINDOW + 1)
+        # PR merged 1 second after alert -> causality violation -> recency = 0.0
+        pr_after = _ALERT_T + timedelta(seconds=1)
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=pr_beyond,
+            pr_valid_from=pr_after,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(0.0)
 
@@ -318,28 +315,30 @@ class TestComponentRecency:
     def test_temporal_match_returns_1(self) -> None:
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_RECENT,
+            pr_valid_from=_ALERT_T,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(1.0)
 
     def test_has_pr_with_ts_no_match_returns_0(self) -> None:
+        # Delta of 10 half lives (120 hours) -> 2 ** -10 = 0.0009765625
+        pr_old = _ALERT_T - timedelta(hours=120)
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_OLD,
+            pr_valid_from=pr_old,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        assert comps["recency"] == pytest.approx(0.0)
+        assert comps["recency"] == pytest.approx(2 ** -10.0)
 
     def test_has_pr_no_ts_returns_0_5(self) -> None:
         comps = compute_components(
@@ -350,7 +349,7 @@ class TestComponentRecency:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(0.5)
 
@@ -363,7 +362,7 @@ class TestComponentRecency:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(0.0)
 
@@ -383,7 +382,7 @@ class TestComponentGraphProximity:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["graph_proximity"] == pytest.approx(0.0)
 
@@ -396,7 +395,7 @@ class TestComponentGraphProximity:
             resource_depth=1,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["graph_proximity"] == pytest.approx(1.0)
 
@@ -409,7 +408,7 @@ class TestComponentGraphProximity:
             resource_depth=2,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["graph_proximity"] == pytest.approx(0.5)
 
@@ -423,7 +422,7 @@ class TestComponentGraphProximity:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["graph_proximity"] == pytest.approx(1.0)
 
@@ -436,7 +435,7 @@ class TestComponentGraphProximity:
             resource_depth=4,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["graph_proximity"] == pytest.approx(0.25)
 
@@ -456,7 +455,7 @@ class TestComponentEvidenceCount:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["evidence_count"] == pytest.approx(0.0)
 
@@ -469,7 +468,7 @@ class TestComponentEvidenceCount:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["evidence_count"] == pytest.approx(1.0 / 3.0)
 
@@ -482,7 +481,7 @@ class TestComponentEvidenceCount:
             resource_depth=1,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["evidence_count"] == pytest.approx(2.0 / 3.0)
 
@@ -496,7 +495,7 @@ class TestComponentEvidenceCount:
             resource_depth=1,
             thread_count=3,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["evidence_count"] == pytest.approx(1.0)
 
@@ -510,7 +509,7 @@ class TestComponentEvidenceCount:
             resource_depth=0,
             thread_count=10,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         comps_3 = compute_components(
             alert_valid_from=None,
@@ -520,7 +519,7 @@ class TestComponentEvidenceCount:
             resource_depth=0,
             thread_count=3,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps_high["evidence_count"] == comps_3["evidence_count"]
 
@@ -534,7 +533,7 @@ class TestComponentEvidenceCount:
             resource_depth=0,
             thread_count=1,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["evidence_count"] == pytest.approx(1.0 / 9.0)
 
@@ -548,28 +547,29 @@ class TestComponentCrossRefStrength:
     def test_temporal_match_returns_0_9(self) -> None:
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_RECENT,
+            pr_valid_from=_ALERT_T,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["cross_ref_strength"] == pytest.approx(0.9)
 
     def test_pr_no_match_returns_0_6(self) -> None:
+        pr_old = _ALERT_T - timedelta(hours=120)
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_OLD,
+            pr_valid_from=pr_old,
             has_pr=True,
             has_resource=False,
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
-        assert comps["cross_ref_strength"] == pytest.approx(0.6)
+        assert comps["cross_ref_strength"] == pytest.approx(0.6 + 0.3 * (2 ** -10.0))
 
     def test_resource_only_returns_0_4(self) -> None:
         comps = compute_components(
@@ -580,7 +580,7 @@ class TestComponentCrossRefStrength:
             resource_depth=1,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["cross_ref_strength"] == pytest.approx(0.4)
 
@@ -593,7 +593,7 @@ class TestComponentCrossRefStrength:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["cross_ref_strength"] == pytest.approx(0.1)
 
@@ -644,13 +644,13 @@ class TestApplyWeights:
         # cross_ref=0.9. With equal weights: avg of components.
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_RECENT,
+            pr_valid_from=_ALERT_T,
             has_pr=True,
             has_resource=True,
             resource_depth=1,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         w = _equal_weights()
         score = apply_weights(comps, w)
@@ -917,7 +917,7 @@ class TestComputeComponents:
             resource_depth=0,
             thread_count=0,
             max_depth=1,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(0.0)
         assert comps["graph_proximity"] == pytest.approx(0.0)
@@ -935,20 +935,21 @@ class TestComputeComponents:
             resource_depth=3,
             thread_count=0,
             max_depth=0,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["graph_proximity"] == pytest.approx(1.0 / 3.0)
 
     def test_full_scenario_with_all_signals(self) -> None:
+        # pr_valid_from = alert_valid_from (0 delta) -> recency = 1.0, cross_ref = 0.9
         comps = compute_components(
             alert_valid_from=_ALERT_T,
-            pr_valid_from=_PR_RECENT,
+            pr_valid_from=_ALERT_T,
             has_pr=True,
             has_resource=True,
             resource_depth=1,
             thread_count=3,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert comps["recency"] == pytest.approx(1.0)
         assert comps["graph_proximity"] == pytest.approx(1.0)
@@ -967,7 +968,7 @@ class TestComputeComponents:
             resource_depth=0,
             thread_count=0,
             max_depth=5,
-            pr_recency_window_seconds=_WINDOW,
+            temporal_decay_half_life_seconds=43200.0,
         )
         assert set(comps.keys()) == {
             "recency",

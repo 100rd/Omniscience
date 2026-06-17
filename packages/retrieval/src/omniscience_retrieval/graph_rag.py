@@ -612,24 +612,56 @@ def _collect_candidates(
     """Extract candidate source IDs (and their depths) from a traversal.
 
     The seed entity's source counts as a depth-0 candidate; related
-    entities contribute their own ``depth`` (>= 1).  The output is
-    de-duplicated preserving the first occurrence and capped at
-    :data:`MAX_ANCHOR_CANDIDATES` to keep the downstream filter small.
+    entities contribute their own ``depth`` (>= 1).  Candidates are
+    prioritized by edge weights and depth decay, accumulated, and sorted
+    with the seed source ID at index 0, capped at :data:`MAX_ANCHOR_CANDIDATES`.
     """
     seed_source = str(graph_result.seed.source)
+
+    edge_weights = {
+        "DEPENDS_ON": 1.0,
+        "CALLS": 1.0,
+        "ROUTES_TO": 0.9,
+        "LOAD_BALANCED_BY": 0.7,
+        "SCHEDULED_ON": 0.7,
+        "RUNS_ON": 0.7,
+        "DEPLOYED_BY": 0.5,
+        "OWNED_BY": 0.4,
+    }
+
+    scores: dict[str, float] = {}
+    min_depths: dict[str, int] = {}
+    bfs_order: dict[str, int] = {}
+
+    for i, node in enumerate(graph_result.related):
+        src = str(node.source)
+        if src == seed_source:
+            continue
+
+        edge_type = node.edge_type.upper() if node.edge_type is not None else ""
+        weight = edge_weights.get(edge_type, 0.6)
+
+        depth = int(node.depth)
+        decay = 1.0 / (2 ** (max(1, depth) - 1))
+        contribution = weight * decay
+
+        scores[src] = scores.get(src, 0.0) + contribution
+        min_depths[src] = min(min_depths.get(src, 999999), depth)
+        if src not in bfs_order:
+            bfs_order[src] = i
+
+    candidates_to_sort = list(scores.keys())
+    # Sort candidate source IDs descending by accumulated score, tie-breaking by BFS order.
+    candidates_to_sort.sort(key=lambda s: (-scores[s], bfs_order[s]))
+
     ids: list[str] = [seed_source]
     depths: list[int] = [0]
-    seen: set[str] = {seed_source}
-    for node in graph_result.related:
-        src = str(node.source)
-        if src in seen:
-            continue
-        seen.add(src)
+
+    for src in candidates_to_sort:
         ids.append(src)
-        depths.append(int(node.depth))
-        if len(ids) >= MAX_ANCHOR_CANDIDATES:
-            break
-    return tuple(ids), tuple(depths)
+        depths.append(min_depths[src])
+
+    return tuple(ids[:MAX_ANCHOR_CANDIDATES]), tuple(depths[:MAX_ANCHOR_CANDIDATES])
 
 
 def _widen_request(
