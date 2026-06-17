@@ -184,10 +184,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await neo4j_graph_store.connect()
     app.state.graph_store = neo4j_graph_store
     app.state.neo4j_graph_store = neo4j_graph_store
-    # ADR-0008 §8 phase 2 — bitemporal write-path rollout flag.  Read-only
-    # in this PR (issue #130 lands the schema DDL); the writer that gates
-    # on it lands in #131.  Defaults to "disabled" so PR #104's writer
-    # behaviour is preserved verbatim until #131.
+    # ADR-0008 §8 — bitemporal write-path rollout flag.  Fully implemented
+    # across #130-#139 and on by default since #317: the bitemporal writer
+    # (end-dating + :EntityState versioning) is the canonical path.  Set
+    # GRAPH_BITEMPORAL=disabled to restore PR #104's legacy hard-delete writer.
     app.state.graph_bitemporal_enabled = settings.graph_bitemporal == "enabled"
 
     # --- Vector store (Qdrant, ADR-0006) ---

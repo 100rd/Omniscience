@@ -118,9 +118,13 @@ class Neo4jStoreConfig:
     connection_acquisition_timeout_seconds: float
     max_transaction_retry_time_seconds: float
     default_max_depth: int
-    # ADR-0008 §8 phase 2 — bitemporal write-path rollout flag.  Read once
-    # at adapter `__init__` and pinned onto the instance per ADR-0008's
-    # "consistency over flexibility" rollout rule (issue #131).
+    # ADR-0008 §8 — bitemporal write-path rollout flag.  Read once at adapter
+    # `__init__` and pinned onto the instance per ADR-0008's "consistency over
+    # flexibility" rollout rule (issue #131).  Production derives this from
+    # ``Settings.graph_bitemporal`` via :meth:`from_settings`, which defaults
+    # to ``enabled`` since #317.  The dataclass default stays ``False`` so
+    # direct construction (low-level adapter unit tests) keeps PR #104's
+    # legacy writer unless a caller explicitly opts in.
     bitemporal_enabled: bool = False
 
     @classmethod
