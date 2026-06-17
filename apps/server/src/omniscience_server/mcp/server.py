@@ -370,13 +370,14 @@ async def get_related_entities(
     # _require_scope raised if token is None, so it is non-None here.
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_graph_request_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token") from exc
 
     parsed_as_of = _parse_as_of(as_of)
     try:
@@ -426,13 +427,14 @@ async def get_entity(
     _record_tool_invocation(tool_name="get_entity", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_get_entity_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token") from exc
 
     parsed_as_of = _parse_as_of(as_of)
     return await mcp_get_entity(
@@ -530,13 +532,14 @@ async def resolve_incident(
     _record_tool_invocation(tool_name="resolve_incident", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_resolve_incident_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token") from exc
 
     parsed_as_of = _parse_as_of(as_of)
     clamped_depth = max(MIN_MAX_DEPTH, min(max_depth, MAX_MAX_DEPTH))
@@ -649,13 +652,14 @@ async def blast_radius(
     _record_tool_invocation(tool_name="blast_radius", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_blast_radius_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token")
+        raise ValueError("forbidden:Graph retrieval requires a workspace-scoped token") from exc
 
     if action_type not in ACTION_TYPES:
         raise ValueError(
@@ -716,13 +720,14 @@ async def replay_context_tool(
     _record_tool_invocation(tool_name="replay_context", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_replay_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Replay requires a workspace-scoped token")
+        raise ValueError("forbidden:Replay requires a workspace-scoped token") from exc
 
     has_audit = audit_log_id is not None and audit_log_id != ""
     has_inline = at_time is not None or tool_name is not None
@@ -805,13 +810,14 @@ async def suggest_runbook(
     _record_tool_invocation(tool_name="suggest_runbook", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_suggest_runbook_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Runbook suggestion requires a workspace-scoped token")
+        raise ValueError("forbidden:Runbook suggestion requires a workspace-scoped token") from exc
 
     parsed_as_of = _parse_as_of(as_of)
     clamped_top_k = max(1, min(top_k, RUNBOOK_MAX_TOP_K))
@@ -862,13 +868,16 @@ async def find_similar_incidents(
     _record_tool_invocation(tool_name="find_similar_incidents", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_find_similar_incidents_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Similar-incident search requires a workspace-scoped token")
+        raise ValueError(
+            "forbidden:Similar-incident search requires a workspace-scoped token"
+        ) from exc
 
     parsed_as_of = _parse_as_of(as_of)
     clamped_limit = max(1, min(limit, SIMILAR_MAX_LIMIT))
@@ -932,13 +941,16 @@ async def generate_postmortem_tool(
     _record_tool_invocation(tool_name="generate_postmortem", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_generate_postmortem_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Post-mortem generation requires a workspace-scoped token")
+        raise ValueError(
+            "forbidden:Post-mortem generation requires a workspace-scoped token"
+        ) from exc
 
     parsed_start = _parse_as_of(incident_start)
     parsed_end = _parse_as_of(incident_end)

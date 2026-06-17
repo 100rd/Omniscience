@@ -66,13 +66,16 @@ async def incident_timeline_tool(
     record_invocation(tool_name="incident_timeline", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
-    workspace_id = get_workspace_id(token)
-    if workspace_id is None:
+    try:
+        workspace_id = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "mcp_incident_timeline_rejected_no_workspace",
             token_prefix=token.token_prefix,
         )
-        raise ValueError("forbidden:Incident timeline requires a workspace-scoped token")
+        raise ValueError(
+            "forbidden:Incident timeline requires a workspace-scoped token"
+        ) from exc
 
     parsed_as_of = parse_as_of(as_of)
     parsed_from = parse_as_of(from_ts)
