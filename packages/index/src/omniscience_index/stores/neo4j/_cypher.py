@@ -51,6 +51,15 @@ _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     f"CREATE INDEX entity_workspace_name IF NOT EXISTS "
     f"FOR (n:{_ENTITY_LABEL}) ON (n.workspace_id, n.name)",
     f"CREATE INDEX entity_source_id IF NOT EXISTS FOR (n:{_ENTITY_LABEL}) ON (n.source_id)",
+    # Gap B (issue #310) — index the first-class `cluster` property promoted
+    # from operator metadata so `list_entities` answers
+    # "which <kind> exist in cluster X" with an index seek, never a
+    # `metadata CONTAINS` substring scan.  workspace_id leads the composite
+    # (ADR-0008 §Consequences-security #1 carry-forward).
+    f"CREATE INDEX entity_workspace_kind_cluster IF NOT EXISTS "
+    f"FOR (n:{_ENTITY_LABEL}) ON (n.workspace_id, n.kind, n.cluster)",
+    f"CREATE INDEX entity_state_workspace_kind_cluster IF NOT EXISTS "
+    f"FOR (s:{_ENTITY_STATE_LABEL}) ON (s.workspace_id, s.kind, s.cluster)",
     f"CREATE CONSTRAINT entity_state_workspace_id_valid_from_unique IF NOT EXISTS "
     f"FOR (s:{_ENTITY_STATE_LABEL}) "
     f"REQUIRE (s.workspace_id, s.id, s.valid_from) IS UNIQUE",
@@ -100,6 +109,7 @@ ON CREATE SET
     n.name = $name,
     n.display_name = $display_name,
     n.chunk_id = $chunk_id,
+    n.cluster = $cluster,
     n.metadata = $metadata,
     n.is_stub = false,
     n.created_at = $now,
@@ -110,6 +120,7 @@ ON MATCH SET
     n.name = $name,
     n.display_name = $display_name,
     n.chunk_id = $chunk_id,
+    n.cluster = $cluster,
     n.metadata = $metadata,
     n.is_stub = false,
     n.updated_at = $now
@@ -161,6 +172,7 @@ ON CREATE SET
     n.name = $name,
     n.display_name = $display_name,
     n.chunk_id = $chunk_id,
+    n.cluster = $cluster,
     n.metadata = $metadata,
     n.{_ENTITY_STATE_FINGERPRINT_PROP} = $state_fingerprint,
     n.created_at = $now,
@@ -184,6 +196,7 @@ FOREACH (_ IN CASE WHEN state_changed THEN [1] ELSE [] END |
         n.name = $name,
         n.display_name = $display_name,
         n.chunk_id = $chunk_id,
+        n.cluster = $cluster,
         n.metadata = $metadata,
         n.{_ENTITY_STATE_FINGERPRINT_PROP} = $state_fingerprint,
         n.updated_at = $now,
@@ -223,6 +236,7 @@ CALL {{
             name: $name,
             display_name: $display_name,
             chunk_id: $chunk_id,
+            cluster: $cluster,
             metadata: $metadata
         }})
         CREATE (n)-[:HAD_STATE {{
@@ -395,6 +409,7 @@ ON CREATE SET
     s.display_name = n.display_name,
     s.source_id = n.source_id,
     s.chunk_id = n.chunk_id,
+    s.cluster = n.cluster,
     s.metadata = n.metadata
 MERGE (n)-[:HAD_STATE]->(s)
 RETURN count(s) AS modified
@@ -658,6 +673,61 @@ RETURN n.id AS id,
 LIMIT 1
 """
 
+# ---------------------------------------------------------------------------
+# list_entities — kind + optional cluster/name filter (Gap B, issue #310)
+# ---------------------------------------------------------------------------
+#
+# Two templates mirror the get_entity split (ADR-0008 §5): the current-state
+# read hits the `:Entity` mirror via the (workspace_id, kind, cluster) index;
+# the as_of read traverses `[:HAD_STATE]` to the `:EntityState` version valid
+# at T.  Optional `cluster` / `name` predicates are appended by
+# `_build_list_entities_cypher` ONLY when supplied so the planner keeps the
+# index seek (an unconditional `$cluster IS NULL OR …` would force a scan).
+#
+# `__CLUSTER_FILTER__` / `__NAME_FILTER__` are static, validated placeholders
+# (no user value is interpolated — the value rides as a $parameter); the
+# builder substitutes either "" or the fixed predicate fragment.
+
+_LIST_ENTITIES_CYPHER_TEMPLATE: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, kind: $kind}})
+WHERE true__CLUSTER_FILTER____NAME_FILTER__
+RETURN n.id AS id,
+       n.name AS name,
+       n.kind AS kind,
+       n.source_id AS source_id,
+       n.chunk_text AS chunk_text,
+       n.valid_from AS valid_from,
+       n.valid_to AS valid_to,
+       n.recorded_at AS recorded_at
+ORDER BY name
+"""
+
+_LIST_ENTITIES_AS_OF_CYPHER_TEMPLATE: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id}})
+MATCH (n)-[:HAD_STATE]->(s:{_ENTITY_STATE_LABEL})
+WHERE s.workspace_id = $workspace_id
+  AND s.kind = $kind
+  AND s.valid_from <= datetime($as_of)
+  AND (datetime($as_of) < s.valid_to OR s.valid_to IS NULL)__CLUSTER_FILTER____NAME_FILTER__
+RETURN n.id AS id,
+       n.name AS name,
+       s.kind AS kind,
+       s.source_id AS source_id,
+       n.chunk_text AS chunk_text,
+       s.valid_from AS valid_from,
+       s.valid_to AS valid_to,
+       s.recorded_at AS recorded_at
+ORDER BY name
+"""
+
+# Fixed predicate fragments — current-state matches on the `:Entity` mirror,
+# the as_of path matches on the `:EntityState` row (`s`).
+_LIST_CLUSTER_FILTER: Final[str] = "\n  AND n.cluster = $cluster"
+_LIST_NAME_FILTER: Final[str] = "\n  AND n.name = $name"
+_LIST_AS_OF_CLUSTER_FILTER: Final[str] = "\n  AND s.cluster = $cluster"
+_LIST_AS_OF_NAME_FILTER: Final[str] = "\n  AND n.name = $name"
+
+
 _TRAVERSE_CYPHER_TEMPLATE: Final[str] = (
     "MATCH (seed:" + _ENTITY_LABEL + " {workspace_id: $workspace_id, name: $entity_name})\n"
     "OPTIONAL MATCH path = (seed)-[rels*1..__MAX_DEPTH__]-(neighbour:" + _ENTITY_LABEL + ")\n"
@@ -827,6 +897,10 @@ _ensure_workspace_predicate(_GET_ENTITY_BY_NAME_CYPHER, "_GET_ENTITY_BY_NAME_CYP
 _ensure_workspace_predicate(_TRAVERSE_CYPHER_TEMPLATE, "_TRAVERSE_CYPHER_TEMPLATE")
 _ensure_workspace_predicate(_GET_ENTITY_BY_NAME_AS_OF_CYPHER, "_GET_ENTITY_BY_NAME_AS_OF_CYPHER")
 _ensure_workspace_predicate(_TRAVERSE_AS_OF_CYPHER_TEMPLATE, "_TRAVERSE_AS_OF_CYPHER_TEMPLATE")
+_ensure_workspace_predicate(_LIST_ENTITIES_CYPHER_TEMPLATE, "_LIST_ENTITIES_CYPHER_TEMPLATE")
+_ensure_workspace_predicate(
+    _LIST_ENTITIES_AS_OF_CYPHER_TEMPLATE, "_LIST_ENTITIES_AS_OF_CYPHER_TEMPLATE"
+)
 _ensure_workspace_predicate(_COUNT_ENTITIES_CYPHER, "_COUNT_ENTITIES_CYPHER")
 _ensure_workspace_predicate(_COUNT_ENTITIES_BY_KIND_CYPHER, "_COUNT_ENTITIES_BY_KIND_CYPHER")
 _ensure_workspace_predicate(_COUNT_ENTITIES_BY_SOURCE_CYPHER, "_COUNT_ENTITIES_BY_SOURCE_CYPHER")

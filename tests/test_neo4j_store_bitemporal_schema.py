@@ -204,7 +204,7 @@ def test_backfill_statements_kept_separate_from_bootstrap() -> None:
 
 
 def test_bootstrap_count_within_documented_envelope() -> None:
-    """Sanity floor — static bootstrap is 8 statements (5 ADR-0005 + 3 ADR-0008).
+    """Sanity floor — static bootstrap is 10 statements (5 ADR-0005 + 3 ADR-0008 + 2 #310).
 
     A 1M-node graph hits each `CREATE ... IF NOT EXISTS` once at startup;
     the marginal cost over the pre-existing node-label DDL is the
@@ -217,12 +217,17 @@ def test_bootstrap_count_within_documented_envelope() -> None:
 
     Issue #224 / ADR-0012 moved the four relationship-property indexes
     out of the static tuple and into the per-type dynamic path; the
-    static tuple shrank from 12 to 8 entries.  Dynamic per-type DDL
-    bounds are exercised by the integration test.
+    static tuple shrank from 12 to 8 entries.  Issue #310 (Gap B) then
+    added two composite indexes on the first-class `cluster` property —
+    one on `:Entity (workspace_id, kind, cluster)` and one on the
+    `:EntityState` mirror — so `list_entities` answers cluster-scoped
+    queries with an index seek; the static tuple is back to 10.  Dynamic
+    per-type DDL bounds are exercised by the integration test.
     """
-    assert len(_BOOTSTRAP_STATEMENTS) == 8, (
+    assert len(_BOOTSTRAP_STATEMENTS) == 10, (
         "Static bootstrap statement count drifted from documented envelope. "
-        "ADR-0005 carries 5 node-label statements; ADR-0008 §4 adds 3. "
+        "ADR-0005 carries 5 node-label statements; ADR-0008 §4 adds 3; "
+        "issue #310 (Gap B) adds 2 cluster indexes. "
         "Update this test deliberately if the contract changes."
     )
 

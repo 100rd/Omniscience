@@ -25,6 +25,12 @@ from omniscience_core.storage.graph import (
 
 from omniscience_index.stores.neo4j._cypher import (
     _EDGE_TYPE_REGEX,
+    _LIST_AS_OF_CLUSTER_FILTER,
+    _LIST_AS_OF_NAME_FILTER,
+    _LIST_CLUSTER_FILTER,
+    _LIST_ENTITIES_AS_OF_CYPHER_TEMPLATE,
+    _LIST_ENTITIES_CYPHER_TEMPLATE,
+    _LIST_NAME_FILTER,
     _TRAVERSE_AS_OF_CYPHER_TEMPLATE,
     _TRAVERSE_CYPHER_TEMPLATE,
     _WRITE_WORKSPACE_PARAM,
@@ -81,6 +87,36 @@ def _build_traverse_cypher(
     template = _TRAVERSE_AS_OF_CYPHER_TEMPLATE if as_of else _TRAVERSE_CYPHER_TEMPLATE
     rendered = template.replace("__MAX_DEPTH__", str(max_depth))
     return rendered.replace("__EDGE_TYPE_FILTER__", filter_clause)
+
+
+def _build_list_entities_cypher(
+    *,
+    has_cluster: bool,
+    has_name: bool,
+    as_of: bool = False,
+) -> str:
+    """Render the ``list_entities`` Cypher with only the supplied filters.
+
+    The optional ``cluster`` / ``name`` predicates are appended ONLY when
+    the caller provides a value so the planner keeps the
+    ``(workspace_id, kind, cluster)`` index seek (Gap B / issue #310).
+    The values themselves ride as ``$cluster`` / ``$name`` parameters —
+    nothing user-supplied is interpolated into the Cypher text, so there
+    is no injection surface (the fragments are fixed module constants).
+
+    ``as_of=True`` selects the bitemporal template that reads the
+    ``:EntityState`` version valid at T (ADR-0008 §5).
+    """
+    if as_of:
+        template = _LIST_ENTITIES_AS_OF_CYPHER_TEMPLATE
+        cluster_fragment = _LIST_AS_OF_CLUSTER_FILTER
+        name_fragment = _LIST_AS_OF_NAME_FILTER
+    else:
+        template = _LIST_ENTITIES_CYPHER_TEMPLATE
+        cluster_fragment = _LIST_CLUSTER_FILTER
+        name_fragment = _LIST_NAME_FILTER
+    rendered = template.replace("__CLUSTER_FILTER__", cluster_fragment if has_cluster else "")
+    return rendered.replace("__NAME_FILTER__", name_fragment if has_name else "")
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +180,30 @@ def _coerce_metadata(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return {str(k): v for k, v in value.items()}
     raise TypeError(f"metadata must be dict, got {type(value).__name__}")
+
+
+def _cluster_from_metadata(value: Any) -> str | None:
+    """Extract a first-class ``cluster`` property from a metadata mapping.
+
+    The operator stamps ``metadata["cluster"]`` (the human-readable
+    cluster name) on every Kubernetes entity (see
+    ``operator/internal/entity/common.go::baseMetadata``).  Promoting it
+    to a first-class, indexed ``:Entity.cluster`` property is what lets
+    the ``list_entities`` query (Gap B / issue #310) do an index-backed
+    ``WHERE n.cluster = $cluster`` match instead of the fragile
+    ``metadata CONTAINS '"cluster":"…"'`` substring scan.
+
+    Returns ``None`` (not ``""``) when the key is absent or blank so the
+    Cypher ``SET n.cluster = $cluster`` writes a real NULL — entities
+    that carry no cluster (code symbols, infra resources) stay
+    ``cluster IS NULL`` and never collide with a literal empty string.
+    """
+    meta = _coerce_metadata(value)
+    raw = meta.get("cluster")
+    if raw is None:
+        return None
+    text = str(raw)
+    return text or None
 
 
 def _serialise_metadata(value: Any) -> str:
@@ -317,6 +377,7 @@ def _entity_to_params(
     if entity_id is None:
         raise ValueError("entity_missing_id")
     chunk_id = getattr(ext_ent, "chunk_id", None)
+    metadata = _coerce_metadata(getattr(ext_ent, "metadata", None))
     return {
         _WRITE_WORKSPACE_PARAM: str(workspace_id),
         "id": str(entity_id),
@@ -325,7 +386,10 @@ def _entity_to_params(
         "name": str(getattr(ext_ent, "name", "")),
         "display_name": str(getattr(ext_ent, "display_name", "")),
         "chunk_id": str(chunk_id) if chunk_id else None,
-        "metadata": _coerce_metadata(getattr(ext_ent, "metadata", None)),
+        # First-class, indexed cluster property promoted from metadata so
+        # ``list_entities`` can match by cluster without a substring scan.
+        "cluster": _cluster_from_metadata(metadata),
+        "metadata": metadata,
         "now": now,
     }
 

@@ -523,6 +523,58 @@ async def mcp_get_entity(
         }
 
 
+async def mcp_list_entities(
+    app: FastAPI,
+    workspace_id: uuid.UUID,
+    kind: str,
+    cluster: str | None = None,
+    name: str | None = None,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    """List entities of ``kind`` within the caller's workspace.
+
+    Pass-through to ``GraphStore.list_entities`` (committed in f8240b7),
+    optionally filtered by the first-class indexed ``cluster`` property
+    and/or an exact ``name``.  Answers deterministic platform-state
+    questions for the change-validation gate ("which StorageClasses exist
+    in cluster X", "does StorageClass 'gold' exist in cluster X") via an
+    index seek on ``(workspace_id, kind, cluster)`` — never a metadata
+    substring scan.
+
+    Mirrors :func:`mcp_get_entity` for the response envelope: each entity
+    uses the same per-entity shape as ``get_entity`` (``_entity_view_to_dict``),
+    and the envelope carries ``effective_as_of`` (ADR-0008 §5 echo-back)
+    plus ``meta``.  ``as_of`` returns the version valid at T; ``None``
+    returns the still-current state.
+    """
+    normalised_as_of = enforce_utc(as_of)
+    graph_store: GraphStore | None = getattr(app.state, "graph_store", None)
+    if graph_store is None:
+        raise RuntimeError("graph_store not available on app.state")
+
+    with record_request_duration(
+        surface="mcp", tool="list_entities", as_of=normalised_as_of
+    ) as patcher:
+        nodes: list[EntityNodeView] = await graph_store.list_entities(
+            workspace_id=workspace_id,
+            kind=kind,
+            cluster=cluster,
+            name=name,
+            as_of=normalised_as_of,
+        )
+        if not nodes and normalised_as_of is not None:
+            patcher.mark_pre_history()
+        return {
+            "entities": [_entity_view_to_dict(node) for node in nodes],
+            "effective_as_of": resolve_effective_as_of(normalised_as_of).isoformat(),
+            "meta": (
+                {"degraded_response": DEGRADED_PRE_HISTORY}
+                if not nodes and normalised_as_of is not None
+                else None
+            ),
+        }
+
+
 def _entity_view_to_dict(node: EntityNodeView) -> dict[str, Any]:
     """Serialise an :class:`EntityNodeView` to the MCP/REST wire format."""
     return {
