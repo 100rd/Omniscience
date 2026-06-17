@@ -29,6 +29,7 @@ _STREAM_ALREADY_EXISTS_CODE = 10058
 
 INGEST_CHANGES_STREAM = "INGEST_CHANGES"
 INGEST_DLQ_STREAM = "INGEST_DLQ"
+OUTBOX_STREAM = "OUTBOX"
 
 _STREAM_CONFIGS: list[nats.js.api.StreamConfig] = [
     nats.js.api.StreamConfig(
@@ -42,6 +43,14 @@ _STREAM_CONFIGS: list[nats.js.api.StreamConfig] = [
     nats.js.api.StreamConfig(
         name=INGEST_DLQ_STREAM,
         subjects=["ingest.dlq.*"],
+        retention=nats.js.api.RetentionPolicy.LIMITS,
+        max_age=_SEVEN_DAYS_SECONDS,
+        storage=nats.js.api.StorageType.FILE,
+        num_replicas=1,
+    ),
+    nats.js.api.StreamConfig(
+        name=OUTBOX_STREAM,
+        subjects=["outbox.*"],
         retention=nats.js.api.RetentionPolicy.LIMITS,
         max_age=_SEVEN_DAYS_SECONDS,
         storage=nats.js.api.StorageType.FILE,
