@@ -83,6 +83,29 @@ def test_otlp_endpoint_none_by_default(clean_env: None) -> None:
     assert s.otlp_endpoint is None
 
 
+def test_background_workers_enabled_by_default(clean_env: None) -> None:
+    """Discovery and reconcile workers default ON so the full profile is unchanged.
+
+    The 'lite' deployment profile (issue #319) flips these to False to shed
+    background load; the defaults must remain True so a stock ``docker compose
+    up`` keeps the v0.2 worker posture verbatim.
+    """
+    s = Settings(_env_file=None)
+    assert s.discovery_enabled is True
+    assert s.reconcile_enabled is True
+
+
+def test_background_workers_can_be_disabled_via_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The lite profile disables background workers through env vars."""
+    monkeypatch.setenv("DISCOVERY_ENABLED", "false")
+    monkeypatch.setenv("RECONCILE_ENABLED", "false")
+    s = Settings(_env_file=None)
+    assert s.discovery_enabled is False
+    assert s.reconcile_enabled is False
+
+
 # ---------------------------------------------------------------------------
 # GRAPH_BITEMPORAL rollout flag (ADR-0008 §8, issue #317)
 # ---------------------------------------------------------------------------

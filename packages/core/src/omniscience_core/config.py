@@ -417,6 +417,33 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Background workers (lite-profile toggles, issue #319) ---
+    #
+    # The discovery and reconcile workers run unconditionally in the v0.2
+    # baseline.  The 'lite' deployment profile (docker-compose.lite.yml)
+    # sheds background load by turning them off, mirroring the existing
+    # ``scheduler_enabled`` / ``retention_enabled`` switches.  Both default
+    # to True so a stock ``docker compose up`` is byte-for-byte unchanged in
+    # behaviour; only the lite profile flips them to False.
+    discovery_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the discovery worker runs in the background and "
+            "periodically provisions new sources via discovery connectors "
+            "(GitHub, GitLab). Set False in the lite profile to reduce the "
+            "number of moving parts for first-run / evaluation deployments."
+        ),
+    )
+    reconcile_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the reconcile worker runs in the background and "
+            "periodically detects + repairs cross-store drift between "
+            "Postgres, Qdrant, and Neo4j. Set False in the lite profile; "
+            "drift repair can be run on demand or re-enabled later."
+        ),
+    )
+
     # --- Scheduler ---
     scheduler_enabled: bool = Field(
         default=True,
