@@ -500,13 +500,10 @@ class QdrantVectorStore:
         action: Literal["created", "updated"] = "updated" if existing else "created"
         now = datetime.now(UTC)
         if existing is not None:
-            # Stage 1: end-date the old points instead of deleting them.
-            # This makes ``as_of=T`` (T < update time) return the OLD
-            # chunk version — preserving cross-store consistency with Neo4j.
-            await self._end_date_points(
-                point_ids=list(existing.chunk_point_ids),
-                workspace_id=workspace_id,
-                valid_to=now,
+            await self._qc.delete(
+                collection_name=self._collection_name,
+                points_selector=qm.PointIdsList(points=list(existing.chunk_point_ids)),
+                wait=True,
             )
         points = [
             self._chunk_to_point(
@@ -778,11 +775,9 @@ class QdrantVectorStore:
         )
         if before == 0:
             return 0
-        valid_to_iso = (snapshot_at or datetime.now(UTC)).isoformat()
-        await self._qc.set_payload(
+        await self._qc.delete(
             collection_name=self._collection_name,
-            payload={PAYLOAD_VALID_TO: valid_to_iso},
-            points=qm.FilterSelector(filter=flt),
+            points_selector=qm.FilterSelector(filter=flt),
             wait=True,
         )
         return before

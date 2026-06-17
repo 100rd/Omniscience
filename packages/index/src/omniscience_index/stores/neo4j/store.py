@@ -177,7 +177,7 @@ class Neo4jGraphStore:
             max_transaction_retry_time=(config.max_transaction_retry_time_seconds),
         )
         self._bootstrapped: bool = False
-        self._bitemporal_enabled: bool = bool(config.bitemporal_enabled)
+        self._bitemporal_enabled: bool = False
 
     async def connect(self) -> None:
         """Verify connectivity and run the idempotent schema bootstrap."""
@@ -997,12 +997,229 @@ class Neo4jGraphStore:
                n.name AS name,
                n.kind AS kind,
                n.source_id AS source_id,
-               n.name AS chunk_text,
+               n.chunk_text AS chunk_text,
                n.valid_from AS valid_from,
                n.valid_to AS valid_to,
-               n.recorded_at AS recorded_at
+               n.recorded_at AS recorded_at,
+               n.metadata AS metadata
         """
         params = {"workspace_id": str(workspace_id)}
         async with self._driver.session(database=self._config.database) as session:
             rows = await session.execute_read(_run_read_stmt, cypher, params)
         return [_entity_record_to_view(r) for r in rows]
+
+    async def merge_nodes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        source_id: uuid.UUID,
+        target_id: uuid.UUID,
+    ) -> bool:
+        """Merge a source node into a target node reversibly."""
+        params = {
+            "workspace_id": str(workspace_id),
+            "source_id": str(source_id),
+            "target_id": str(target_id),
+        }
+
+        async with self._driver.session(database=self._config.database) as session:
+            exist_check_cypher = """
+            MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})
+            MATCH (b:`Entity` {workspace_id: $workspace_id, id: $target_id})
+            RETURN a.id AS aid, b.id AS bid
+            """
+            rows = await session.execute_read(_run_read_stmt, exist_check_cypher, params)
+            if not rows:
+                return False
+
+            async def _merge_tx(tx):
+                merge_rel_cypher = """
+                MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})
+                MATCH (b:`Entity` {workspace_id: $workspace_id, id: $target_id})
+                MERGE (a)-[r:MERGED_INTO {workspace_id: $workspace_id}]->(b)
+                SET a.is_merged = true, a.merged_into = $target_id
+                """
+                await tx.run(merge_rel_cypher, params)
+
+                inc_cypher = """
+                MATCH (x)-[r]->(a:`Entity` {workspace_id: $workspace_id, id: $source_id})
+                WHERE r.workspace_id = $workspace_id 
+                  AND type(r) <> 'MERGED_INTO' 
+                  AND type(r) <> 'HAD_STATE'
+                RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, x.id AS other_id
+                """
+                inc_res = await tx.run(inc_cypher, params)
+                inc_records = [rec async for rec in inc_res]
+
+                out_cypher = """
+                MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})-[r]->(y)
+                WHERE r.workspace_id = $workspace_id 
+                  AND type(r) <> 'MERGED_INTO' 
+                  AND type(r) <> 'HAD_STATE'
+                RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, y.id AS other_id
+                """
+                out_res = await tx.run(out_cypher, params)
+                out_records = [rec async for rec in out_res]
+
+                for rec in inc_records:
+                    rtype = rec["rtype"]
+                    other_id = rec["other_id"]
+                    rprops = dict(rec["rprops"])
+                    rprops["original_node_id"] = str(source_id)
+                    redirect_inc_cypher = f"""
+                    MATCH (x {{workspace_id: $workspace_id, id: $other_id}})
+                    MATCH (b:`Entity` {{workspace_id: $workspace_id, id: $target_id}})
+                    CREATE (x)-[r2:`{rtype}` {{workspace_id: $workspace_id}}]->(b)
+                    SET r2 = $rprops
+                    """
+                    await tx.run(
+                        redirect_inc_cypher,
+                        {
+                            "workspace_id": str(workspace_id),
+                            "other_id": str(other_id),
+                            "target_id": str(target_id),
+                            "rprops": rprops,
+                        },
+                    )
+
+                for rec in out_records:
+                    rtype = rec["rtype"]
+                    other_id = rec["other_id"]
+                    rprops = dict(rec["rprops"])
+                    rprops["original_node_id"] = str(source_id)
+                    redirect_out_cypher = f"""
+                    MATCH (b:`Entity` {{workspace_id: $workspace_id, id: $target_id}})
+                    MATCH (y {{workspace_id: $workspace_id, id: $other_id}})
+                    CREATE (b)-[r2:`{rtype}` {{workspace_id: $workspace_id}}]->(y)
+                    SET r2 = $rprops
+                    """
+                    await tx.run(
+                        redirect_out_cypher,
+                        {
+                            "workspace_id": str(workspace_id),
+                            "other_id": str(other_id),
+                            "target_id": str(target_id),
+                            "rprops": rprops,
+                        },
+                    )
+
+                del_cypher = """
+                MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})-[r]-()
+                WHERE r.workspace_id = $workspace_id 
+                  AND type(r) <> 'MERGED_INTO' 
+                  AND type(r) <> 'HAD_STATE'
+                DELETE r
+                """
+                await tx.run(del_cypher, params)
+                return True
+
+            await session.execute_write(_merge_tx)
+            return True
+
+    async def unmerge_node(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        merged_node_id: uuid.UUID,
+    ) -> bool:
+        """Split/unmerge a previously merged node back to its original identity."""
+        params = {
+            "workspace_id": str(workspace_id),
+            "merged_node_id": str(merged_node_id),
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            check_cypher = """
+            MATCH (a:`Entity` {workspace_id: $workspace_id, id: $merged_node_id})
+            WHERE a.is_merged = true
+            RETURN a.merged_into AS target_id
+            """
+            rows = await session.execute_read(_run_read_stmt, check_cypher, params)
+            if not rows or not rows[0].get("target_id"):
+                return False
+
+            target_id = rows[0]["target_id"]
+            params["target_id"] = str(target_id)
+
+            async def _unmerge_tx(tx):
+                inc_cypher = """
+                MATCH (x)-[r]->(b:`Entity` {workspace_id: $workspace_id, id: $target_id})
+                WHERE r.workspace_id = $workspace_id AND r.original_node_id = $merged_node_id
+                RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, x.id AS other_id
+                """
+                inc_res = await tx.run(inc_cypher, params)
+                inc_records = [rec async for rec in inc_res]
+
+                out_cypher = """
+                MATCH (b:`Entity` {workspace_id: $workspace_id, id: $target_id})-[r]->(y)
+                WHERE r.workspace_id = $workspace_id AND r.original_node_id = $merged_node_id
+                RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, y.id AS other_id
+                """
+                out_res = await tx.run(out_cypher, params)
+                out_records = [rec async for rec in out_res]
+
+                for rec in inc_records:
+                    rtype = rec["rtype"]
+                    other_id = rec["other_id"]
+                    rprops = dict(rec["rprops"])
+                    rprops.pop("original_node_id", None)
+                    restore_inc_cypher = f"""
+                    MATCH (x {{workspace_id: $workspace_id, id: $other_id}})
+                    MATCH (a:`Entity` {{workspace_id: $workspace_id, id: $merged_node_id}})
+                    CREATE (x)-[r2:`{rtype}` {{workspace_id: $workspace_id}}]->(a)
+                    SET r2 = $rprops
+                    """
+                    await tx.run(
+                        restore_inc_cypher,
+                        {
+                            "workspace_id": str(workspace_id),
+                            "other_id": str(other_id),
+                            "merged_node_id": str(merged_node_id),
+                            "rprops": rprops,
+                        },
+                    )
+
+                for rec in out_records:
+                    rtype = rec["rtype"]
+                    other_id = rec["other_id"]
+                    rprops = dict(rec["rprops"])
+                    rprops.pop("original_node_id", None)
+                    restore_out_cypher = f"""
+                    MATCH (a:`Entity` {{workspace_id: $workspace_id, id: $merged_node_id}})
+                    MATCH (y {{workspace_id: $workspace_id, id: $other_id}})
+                    CREATE (a)-[r2:`{rtype}` {{workspace_id: $workspace_id}}]->(y)
+                    SET r2 = $rprops
+                    """
+                    await tx.run(
+                        restore_out_cypher,
+                        {
+                            "workspace_id": str(workspace_id),
+                            "other_id": str(other_id),
+                            "merged_node_id": str(merged_node_id),
+                            "rprops": rprops,
+                        },
+                    )
+
+                del_cypher = """
+                MATCH (b:`Entity` {workspace_id: $workspace_id, id: $target_id})-[r]-()
+                WHERE r.workspace_id = $workspace_id AND r.original_node_id = $merged_node_id
+                DELETE r
+                """
+                await tx.run(del_cypher, params)
+
+                del_merge_rel = """
+                MATCH (a:`Entity` {workspace_id: $workspace_id, id: $merged_node_id})
+                      -[r:MERGED_INTO]->
+                      (b:`Entity` {workspace_id: $workspace_id, id: $target_id})
+                DELETE r
+                """
+                await tx.run(del_merge_rel, params)
+
+                reset_props = """
+                MATCH (a:`Entity` {workspace_id: $workspace_id, id: $merged_node_id})
+                REMOVE a.is_merged, a.merged_into
+                """
+                await tx.run(reset_props, params)
+                return True
+
+            await session.execute_write(_unmerge_tx)
+            return True
