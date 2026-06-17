@@ -103,6 +103,44 @@ def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
 
 
 # ---------------------------------------------------------------------------
+# 0. Settings -> Neo4jStoreConfig derivation (ADR-0008 §8 rollout, issue #317)
+# ---------------------------------------------------------------------------
+
+
+def test_from_settings_enables_bitemporal_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default settings derive ``bitemporal_enabled=True`` after #317.
+
+    The Settings default flipped to ``GRAPH_BITEMPORAL=enabled``; the
+    adapter config must carry that through so production runs the
+    bitemporal write path (end-dating + versioning) without any env var.
+    """
+    from omniscience_core.config import Settings
+
+    monkeypatch.delenv("GRAPH_BITEMPORAL", raising=False)
+    settings = Settings(_env_file=None)
+
+    config = Neo4jStoreConfig.from_settings(settings)
+
+    assert config.bitemporal_enabled is True
+
+
+def test_from_settings_honours_disabled_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Back-compat: ``GRAPH_BITEMPORAL=disabled`` still yields legacy mode."""
+    from omniscience_core.config import Settings
+
+    monkeypatch.delenv("GRAPH_BITEMPORAL", raising=False)
+    settings = Settings(_env_file=None, graph_bitemporal="disabled")
+
+    config = Neo4jStoreConfig.from_settings(settings)
+
+    assert config.bitemporal_enabled is False
+
+
+# ---------------------------------------------------------------------------
 # 1. ACL regression guards — Cypher template level
 # ---------------------------------------------------------------------------
 

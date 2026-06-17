@@ -19,6 +19,7 @@ _DEFAULT_TEST_ENV_VARS = (
     "APP_VERSION",
     "ENVIRONMENT",
     "EMBEDDING_PROVIDER",
+    "GRAPH_BITEMPORAL",
 )
 
 
@@ -103,3 +104,33 @@ def test_background_workers_can_be_disabled_via_env(
     s = Settings(_env_file=None)
     assert s.discovery_enabled is False
     assert s.reconcile_enabled is False
+
+
+# ---------------------------------------------------------------------------
+# GRAPH_BITEMPORAL rollout flag (ADR-0008 §8, issue #317)
+# ---------------------------------------------------------------------------
+
+
+def test_graph_bitemporal_enabled_by_default(clean_env: None) -> None:
+    """ADR-0008 §8 is fully implemented; the write path is on by default (#317).
+
+    The bitemporal triple (``valid_from`` / ``valid_to`` / ``recorded_at``)
+    is the canonical write path: removals end-date instead of hard-deleting
+    and ``as_of`` reads traverse the version chain.  Existing flag-off
+    deployments can still opt out via ``GRAPH_BITEMPORAL=disabled``.
+    """
+    s = Settings(_env_file=None)
+    assert s.graph_bitemporal == "enabled"
+
+
+def test_graph_bitemporal_off_override_still_honoured(clean_env: None) -> None:
+    """Back-compat: an explicit ``disabled`` keeps PR #104's legacy writer."""
+    s = Settings(_env_file=None, graph_bitemporal="disabled")
+    assert s.graph_bitemporal == "disabled"
+
+
+def test_graph_bitemporal_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The flag is overridable from the environment (operator opt-out path)."""
+    monkeypatch.setenv("GRAPH_BITEMPORAL", "disabled")
+    s = Settings(_env_file=None)
+    assert s.graph_bitemporal == "disabled"
