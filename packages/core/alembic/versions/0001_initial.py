@@ -32,10 +32,7 @@ EMBEDDING_DIM: int = 768
 
 
 def upgrade() -> None:
-    # ------------------------------------------------------------------
-    # Step 1: Enable pgvector extension
-    # ------------------------------------------------------------------
-    op.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    # Extension pgvector is no longer needed/used
 
     # ------------------------------------------------------------------
     # Step 2: Enumerations
@@ -210,11 +207,6 @@ def upgrade() -> None:
             sa.Computed("to_tsvector('english', text)", persisted=True),
             nullable=False,
         ),
-        sa.Column(
-            "embedding",
-            sa.Text(),  # placeholder; replaced below with vector type
-            nullable=True,
-        ),
         sa.Column("symbol", sa.Text(), nullable=True),
         sa.Column(
             "ingestion_run_id",
@@ -234,9 +226,7 @@ def upgrade() -> None:
         ),
     )
 
-    # Fix embedding column to use proper vector type
-    op.execute("ALTER TABLE chunks DROP COLUMN embedding")
-    op.execute(f"ALTER TABLE chunks ADD COLUMN embedding vector({EMBEDDING_DIM})")
+    # pgvector embedding column setup removed
 
     op.create_index("ix_chunks_document_ord", "chunks", ["document_id", "ord"])
     op.create_index(
@@ -245,15 +235,7 @@ def upgrade() -> None:
         ["text_tsv"],
         postgresql_using="gin",
     )
-    # HNSW index for approximate nearest-neighbour vector search
-    op.execute(
-        """
-        CREATE INDEX ix_chunks_embedding_hnsw
-        ON chunks
-        USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-        """
-    )
+    # HNSW index setup removed
     op.create_index(
         "ix_chunks_embedding_model_provider",
         "chunks",
@@ -308,5 +290,3 @@ def downgrade() -> None:
     sa.Enum(name="ingestion_run_status").drop(op.get_bind(), checkfirst=True)
     sa.Enum(name="source_status").drop(op.get_bind(), checkfirst=True)
     sa.Enum(name="source_type").drop(op.get_bind(), checkfirst=True)
-
-    op.execute("DROP EXTENSION IF EXISTS vector")

@@ -21,10 +21,10 @@ See [docs/vision.md](docs/vision.md) for the full project description.
 - **Package manager**: `uv` (Astral)
 - **Web framework**: FastAPI
 - **MCP server**: `mcp` SDK (FastMCP)
-- **ORM**: SQLAlchemy 2 + Alembic (transitional — tracking pgvector phase)
+- **ORM**: SQLAlchemy 2 + Alembic (operational metadata)
 - **Graph store (target)**: **Neo4j** — topology, causal edges, temporal state
 - **Vector store (target)**: **Qdrant** — semantic embeddings
-- **Database (current)**: PostgreSQL 16 + pgvector (to be migrated — see Neo4j+Qdrant epic)
+- **Database (current)**: PostgreSQL 16 (operational metadata only)
 - **Queue**: NATS JetStream
 - **Parsing**: tree-sitter, markdown-it-py
 - **Embeddings**: Ollama (default), OpenAI/Voyage (pluggable)
