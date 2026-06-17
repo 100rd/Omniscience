@@ -95,16 +95,22 @@ class _StubEmbedding:
 
 
 class _InMemoryIndexWriter:
-    """Minimal in-memory writer satisfying ``IndexWriterProtocol``.
+    """In-memory orchestrator satisfying ``IndexWriterProtocol``.
 
-    Records every call so the test can assert all three stores received
-    the document without requiring a Postgres container.  Production
-    semantics (content-hash dedup, document-id stability) are
-    preserved.
+    Stands in for the production :class:`omniscience_index.writer.IndexWriter`
+    *Postgres* side only (content-hash dedup + document-id stability kept
+    in memory so the test needs no Postgres container).  The Neo4j and
+    Qdrant fan-out is **not** stubbed: this writer drives the real
+    ``graph_store``/``vector_store`` exactly as the production writer does,
+    so the pipeline's worker-write path (``index_writer.upsert_document``
+    -> Qdrant, ``index_writer.upsert_graph`` -> Neo4j) is exercised
+    end-to-end against live containers.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, graph_store: Any, vector_store: Any) -> None:
         self._documents: dict[tuple[uuid.UUID, str], dict[str, Any]] = {}
+        self._graph_store = graph_store
+        self._vector_store = vector_store
 
     async def upsert_document(
         self,
@@ -115,7 +121,8 @@ class _InMemoryIndexWriter:
         content_hash: str,
         metadata: dict[str, Any],
         chunks: list[Any],
-        ingestion_run_id: uuid.UUID | None,
+        workspace_id: uuid.UUID | None = None,
+        ingestion_run_id: uuid.UUID | None = None,
     ) -> Any:
         from dataclasses import dataclass
 
@@ -128,36 +135,90 @@ class _InMemoryIndexWriter:
 
         key = (source_id, external_id)
         existing = self._documents.get(key)
-        if existing is None:
-            doc_id = uuid.uuid4()
-            self._documents[key] = {
-                "id": doc_id,
-                "content_hash": content_hash,
-                "version": 1,
-            }
-            return _Result(
-                action="created",
-                document_id=doc_id,
-                chunks_written=len(chunks),
-                doc_version=1,
-            )
-        if existing["content_hash"] == content_hash:
+        if existing is not None and existing["content_hash"] == content_hash:
             return _Result(
                 action="unchanged",
                 document_id=existing["id"],
                 chunks_written=0,
                 doc_version=existing["version"],
             )
-        existing["content_hash"] = content_hash
-        existing["version"] += 1
+
+        if existing is None:
+            doc_id = uuid.uuid4()
+            self._documents[key] = {"id": doc_id, "content_hash": content_hash, "version": 1}
+            action = "created"
+        else:
+            existing["content_hash"] = content_hash
+            existing["version"] += 1
+            doc_id = existing["id"]
+            action = "updated"
+
+        # Qdrant fan-out — mirrors IndexWriter.upsert_document.
+        if self._vector_store is not None and workspace_id is not None:
+            vector_metadata = dict(metadata)
+            vector_metadata["workspace_id"] = str(workspace_id)
+            payloads = [
+                {
+                    "ord": c.ord,
+                    "text": c.text,
+                    "embedding": c.embedding,
+                    "symbol": c.symbol,
+                    "metadata": c.metadata,
+                    "embedding_model": c.embedding_model,
+                    "embedding_provider": c.embedding_provider,
+                    "parser_version": c.parser_version,
+                    "chunker_strategy": c.chunker_strategy,
+                }
+                for c in chunks
+            ]
+            await self._vector_store.upsert_chunks(
+                source_id=source_id,
+                external_id=external_id,
+                uri=uri,
+                title=title,
+                content_hash=content_hash,
+                metadata=vector_metadata,
+                chunks=payloads,
+                ingestion_run_id=ingestion_run_id,
+            )
+
         return _Result(
-            action="updated",
-            document_id=existing["id"],
+            action=action,
+            document_id=doc_id,
             chunks_written=len(chunks),
-            doc_version=existing["version"],
+            doc_version=self._documents[key]["version"],
         )
 
-    async def tombstone(self, source_id: uuid.UUID, external_id: str) -> bool:
+    async def upsert_graph(
+        self,
+        source_id: uuid.UUID,
+        document_id: uuid.UUID,
+        entities: list[Any],
+        edges: list[Any],
+        workspace_id: uuid.UUID | None = None,
+        snapshot_at: Any | None = None,
+    ) -> None:
+        # Neo4j fan-out — mirrors IndexWriter.upsert_graph.
+        if self._graph_store is not None and workspace_id is not None:
+            for ent in entities:
+                if hasattr(ent, "metadata"):
+                    ent.metadata["workspace_id"] = str(workspace_id)
+                elif isinstance(ent, dict):
+                    ent.setdefault("metadata", {})["workspace_id"] = str(workspace_id)
+            await self._graph_store.upsert_graph(
+                source_id=source_id,
+                document_id=document_id,
+                entities=entities,
+                edges=edges,
+                snapshot_at=snapshot_at,
+            )
+
+    async def tombstone(
+        self,
+        source_id: uuid.UUID,
+        external_id: str,
+        workspace_id: uuid.UUID | None = None,
+    ) -> bool:
         key = (source_id, external_id)
         if key in self._documents:
             del self._documents[key]
@@ -174,12 +235,13 @@ class _InMemoryIndexWriter:
 def neo4j_container() -> Any:
     from testcontainers.neo4j import Neo4jContainer
 
-    # testcontainers>=4.8 derives NEO4J_AUTH from the constructor ``password``
-    # in Neo4jContainer._configure(); a manual .with_env("NEO4J_AUTH", ...) is
-    # clobbered at start() and causes an AuthError when the client connects
-    # with a different password.  Pass the password through the constructor so
-    # the container auth and the neo4j_store fixture agree.
-    with Neo4jContainer(image="neo4j:5.20", password="test_password") as c:
+    # Pass the password through the constructor so the wrapper's _configure()
+    # sets NEO4J_AUTH correctly.  Using .with_env("NEO4J_AUTH", ...) is
+    # silently overridden by the wrapper's own default — the container would
+    # then reject the connection below with an AuthError.  This mirrors every
+    # other testcontainers Neo4j fixture in the suite (e.g.
+    # tests/test_graph_store_contract.py, tests/integration/test_replay.py).
+    with Neo4jContainer("neo4j:5.20", password="test_password") as c:
         yield c
 
 
@@ -284,12 +346,15 @@ async def test_ingestion_writes_to_all_three_stores(
         )
         return [ent], []
 
+    # The pipeline writes to all three stores *through* the index_writer
+    # (the worker-write architecture from #126): Postgres + Qdrant via
+    # upsert_document, Neo4j via upsert_graph.  The pipeline itself does
+    # not take graph_store/vector_store — those live behind the writer.
+    index_writer = _InMemoryIndexWriter(graph_store=neo4j_store, vector_store=qdrant_store)
     pipeline = IngestionPipeline(
         connector=connector,
         embedding_provider=_StubEmbedding(),  # type: ignore[arg-type]
-        index_writer=_InMemoryIndexWriter(),  # type: ignore[arg-type]
-        graph_store=neo4j_store,
-        vector_store=qdrant_store,
+        index_writer=index_writer,  # type: ignore[arg-type]
         graph_extractor=_stub_extractor,
     )
 
