@@ -2,28 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import uuid
-from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from omniscience_connectors.otel import ParsedSpan, ParsedTrace, ParsedTraces
-from omniscience_core.db.models import Edge, Entity, Source, SourceType, OutboxEvent
-from omniscience_core.queue.messages import EntityUpsertEvent, EdgeUpsertEvent
-from omniscience_core.storage.graph import EntityUpsert, EdgeUpsert, GraphStore
+from omniscience_core.db.models import Edge, Entity, OutboxEvent, Source, SourceType
+from omniscience_core.queue.messages import EdgeUpsertEvent, EntityUpsertEvent
+from omniscience_core.storage.graph import GraphStore
 from omniscience_core.storage.vector import VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
+from omniscience_server.outbox_consumer import OutboxConsumerWorker
+from omniscience_server.outbox_worker import OutboxWorker
 from omniscience_server.rest.otlp_ingester import (
     CROSS_REF_EDGE_TYPE,
-    OTEL_POD_ENTITY_TYPE,
-    OTEL_SERVICE_ENTITY_TYPE,
-    OTEL_TRACE_ENTITY_TYPE,
     OtlpIngester,
 )
-from omniscience_server.outbox_worker import OutboxWorker
-from omniscience_server.outbox_consumer import OutboxConsumerWorker
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
@@ -238,7 +233,7 @@ async def test_outbox_consumer_worker_updates_neo4j_and_qdrant() -> None:
     v_kwargs = vector_store.upsert_chunks.call_args[1]
     assert v_kwargs["source_id"] == uuid.UUID(src_id)
     assert v_kwargs["external_id"] == f"entity:{ent_id}"
-    assert v_kwargs["uri"] == f"entity://otel_service/service://checkout"
+    assert v_kwargs["uri"] == "entity://otel_service/service://checkout"
     assert v_kwargs["metadata"] == {"workspace_id": ws_id}
     assert len(v_kwargs["chunks"]) == 1
     assert v_kwargs["chunks"][0]["embedding"] == [0.1, 0.2, 0.3]

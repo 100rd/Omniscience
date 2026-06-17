@@ -35,7 +35,7 @@ from omniscience_connectors.otel import (
     canonical_service_name,
     canonical_trace_name,
 )
-from omniscience_core.db.models import Edge, Entity, Source, SourceStatus, SourceType, OutboxEvent
+from omniscience_core.db.models import Edge, Entity, OutboxEvent, Source, SourceStatus, SourceType
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -148,7 +148,11 @@ class OtlpIngester:
     # ------------------------------------------------------------------
 
     async def _upsert_trace(
-        self, session: AsyncSession, workspace_id: uuid.UUID | None, source_id: uuid.UUID, trace: ParsedTrace
+        self,
+        session: AsyncSession,
+        workspace_id: uuid.UUID | None,
+        source_id: uuid.UUID,
+        trace: ParsedTrace,
     ) -> None:
         trace_entity = await self._upsert_entity(
             session,

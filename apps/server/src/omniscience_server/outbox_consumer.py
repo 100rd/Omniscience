@@ -5,11 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import uuid
-from typing import Any
+
 import structlog
 from omniscience_core.queue import NatsConnection, QueueConsumer
-from omniscience_core.queue.messages import EntityUpsertEvent, EdgeUpsertEvent
-from omniscience_core.storage.graph import GraphStore, EntityUpsert, EdgeUpsert
+from omniscience_core.queue.messages import EdgeUpsertEvent, EntityUpsertEvent
+from omniscience_core.storage.graph import EdgeUpsert, EntityUpsert, GraphStore
 from omniscience_core.storage.vector import VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
 

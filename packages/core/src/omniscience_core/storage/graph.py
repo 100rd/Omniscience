@@ -54,6 +54,7 @@ class EntityNodeView:
     valid_from: datetime | None = None
     valid_to: datetime | None = None
     recorded_at: datetime | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -300,6 +301,25 @@ class GraphStore(Protocol):
         non-negative counts.  Used to assemble the per-source stats
         table without N+1 queries.
         """
+        ...
+
+    async def merge_nodes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        source_id: uuid.UUID,
+        target_id: uuid.UUID,
+    ) -> bool:
+        """Merge source_id node into target_id node reversibly."""
+        ...
+
+    async def unmerge_node(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        merged_node_id: uuid.UUID,
+    ) -> bool:
+        """Split/unmerge a previously merged node back to its original identity."""
         ...
 
 
