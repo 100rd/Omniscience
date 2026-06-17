@@ -383,7 +383,7 @@ class ReconcileWorker:
         )
         if not records:
             return 0
-        point_ids = [str(r.id) for r in records]
+        point_ids: list[int | str | uuid.UUID] = [str(r.id) for r in records]
         await self._vector_store._qc.delete(
             collection_name=self._vector_store.collection_name,
             points_selector=qm.PointIdsList(points=point_ids),

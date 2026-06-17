@@ -137,6 +137,14 @@ def _make_app_with_source(source: Source | None = None) -> FastAPI:
     token.is_active = True
     token.last_used_at = None
 
+    # Workspace scoping is mandatory: the token must carry a workspace_id and
+    # the source's tenant_id must match it, otherwise get_workspace_id /
+    # _get_source_or_404 fail-close (403/404).  Bind both to one workspace.
+    workspace_id = uuid.uuid4()
+    token.workspace_id = workspace_id
+    if source is not None:
+        source.tenant_id = workspace_id
+
     app = create_app(settings=_make_settings())
 
     token_session = _make_token_session(token)
