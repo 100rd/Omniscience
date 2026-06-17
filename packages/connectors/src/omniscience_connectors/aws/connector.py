@@ -1100,9 +1100,16 @@ def _ci_to_ref(ci: dict[str, Any]) -> DocumentRef | None:
     )
 
 
+# The Config aggregator API is region-agnostic for org-wide queries, but the
+# boto3 client still needs a home region for its endpoint. Default to us-east-1
+# (mirrors ``_ORG_REGION``) so client construction never raises NoRegionError
+# when no ambient region (env/profile) is configured.
+_CONFIG_CLIENT_REGION = "us-east-1"
+
+
 def _build_config_client(secrets: dict[str, str], region: str | None = None) -> Any:
     """Return a boto3 config client for Config aggregator queries."""
-    return _build_client("config", secrets, region)
+    return _build_client("config", secrets, region or _CONFIG_CLIENT_REGION)
 
 
 def _list_aggregate_cis_for_type(
@@ -1356,33 +1363,57 @@ class AwsConnector(Connector):
                 yield ref
             return
 
-        # --- describe path (original, byte-for-byte preserved) ---
+        # --- describe path ---
+        # Each service block is isolated: an AccessDenied / SCP deny on one
+        # service (e.g. an org SCP blocking s3:ListAllMyBuckets) logs a warning
+        # and is skipped, so the remaining services still ingest.  Mirrors the
+        # per-kind graceful skip in the config path and the K8s connector.
         account_id = await asyncio.to_thread(_get_account_id, secrets)
         filters = cfg.resource_type_filters
 
         # Global services (no region iteration)
         if "s3" in cfg.services:
-            refs = await asyncio.to_thread(_discover_s3, secrets, account_id, filters)
-            for ref in refs:
+            for ref in await self._safe_discover("s3", _discover_s3, secrets, account_id, filters):
                 yield ref
 
         if "iam" in cfg.services:
-            refs = await asyncio.to_thread(_discover_iam, secrets, account_id, filters)
-            for ref in refs:
+            for ref in await self._safe_discover(
+                "iam", _discover_iam, secrets, account_id, filters
+            ):
                 yield ref
 
         # Regional services
         if "ec2" in cfg.services:
             for region in cfg.regions:
-                refs = await asyncio.to_thread(_discover_ec2, secrets, account_id, region, filters)
-                for ref in refs:
+                for ref in await self._safe_discover(
+                    f"ec2/{region}", _discover_ec2, secrets, account_id, region, filters
+                ):
                     yield ref
 
         # Organizations (opt-in, global)
         if cfg.include_organizations:
-            refs = await asyncio.to_thread(_discover_organizations, secrets, filters)
-            for ref in refs:
+            for ref in await self._safe_discover(
+                "organizations", _discover_organizations, secrets, filters
+            ):
                 yield ref
+
+    @staticmethod
+    async def _safe_discover(
+        label: str,
+        fn: Any,
+        *args: Any,
+    ) -> list[DocumentRef]:
+        """Run a synchronous describe helper, skipping it on access errors.
+
+        Returns the helper's refs, or an empty list (with a warning) when the
+        call is denied — so one inaccessible service never aborts the whole sync.
+        """
+        try:
+            return await asyncio.to_thread(fn, *args)
+        except botocore.exceptions.ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            logger.warning("aws.describe.service_skipped", extra={"service": label, "code": code})
+            return []
 
     async def _discover_config(
         self,

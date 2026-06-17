@@ -156,8 +156,9 @@ def _require_matching_workspace(
     body) so operations can correlate audit-log entries with denied
     requests without exposing credentials.
     """
-    token_workspace = get_workspace_id(token)
-    if token_workspace is None:
+    try:
+        token_workspace = get_workspace_id(token)
+    except PermissionError as exc:
         log.warning(
             "operator_endpoint_rejected_no_workspace",
             token_prefix=token.token_prefix,
@@ -168,7 +169,7 @@ def _require_matching_workspace(
                 "code": "forbidden",
                 "message": "Operator endpoint requires a workspace-scoped token.",
             },
-        )
+        ) from exc
     if token_workspace != requested_workspace_id:
         log.warning(
             "operator_endpoint_rejected_workspace_mismatch",

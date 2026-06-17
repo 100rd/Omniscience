@@ -256,17 +256,20 @@ class Settings(BaseSettings):
         ),
     )
 
-    # --- Bitemporal schema rollout (ADR-0008 §8 phase 2, issue #130) ---
+    # --- Bitemporal schema rollout (ADR-0008 §8, issues #130-#139, #317) ---
     graph_bitemporal: Literal["enabled", "disabled"] = Field(
-        default="disabled",
+        default="enabled",
         description=(
             "Bitemporal write-path rollout flag for the Neo4j graph. "
-            "Default 'disabled' keeps the writer behaviour from PR #104 "
-            "verbatim; 'enabled' is wired through DI but is a no-op in "
-            "this PR (gates issue #131's writer changes per ADR-0008 §8). "
-            "The flag flips after the bootstrap DDL lands and the "
-            "operator-driven backfill (`Neo4jGraphStore.backfill_bitemporal`) "
-            "completes on a representative dataset."
+            "Default 'enabled' (flipped in issue #317): the bitemporal "
+            "write path is the canonical behaviour — removals end-date "
+            "instead of hard-deleting and `as_of` reads traverse the "
+            "`:EntityState` version chain (ADR-0008 §8, fully implemented "
+            "across #130-#139). Set 'disabled' to restore PR #104's "
+            "legacy hard-delete writer verbatim; existing flag-off "
+            "deployments should run the operator-driven backfill "
+            "(`Neo4jGraphStore.backfill_bitemporal`) on their dataset "
+            "before flipping on so legacy rows carry the bitemporal triple."
         ),
     )
 
@@ -411,6 +414,33 @@ class Settings(BaseSettings):
             "TTL re-assignment (operator authority is sticky forever); "
             "-1 disables the dedup gate entirely (debug only). Honoured "
             "under the env var OMNISCIENCE_INGEST_DEDUP_TTL_HOURS."
+        ),
+    )
+
+    # --- Background workers (lite-profile toggles, issue #319) ---
+    #
+    # The discovery and reconcile workers run unconditionally in the v0.2
+    # baseline.  The 'lite' deployment profile (docker-compose.lite.yml)
+    # sheds background load by turning them off, mirroring the existing
+    # ``scheduler_enabled`` / ``retention_enabled`` switches.  Both default
+    # to True so a stock ``docker compose up`` is byte-for-byte unchanged in
+    # behaviour; only the lite profile flips them to False.
+    discovery_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the discovery worker runs in the background and "
+            "periodically provisions new sources via discovery connectors "
+            "(GitHub, GitLab). Set False in the lite profile to reduce the "
+            "number of moving parts for first-run / evaluation deployments."
+        ),
+    )
+    reconcile_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the reconcile worker runs in the background and "
+            "periodically detects + repairs cross-store drift between "
+            "Postgres, Qdrant, and Neo4j. Set False in the lite profile; "
+            "drift repair can be run on demand or re-enabled later."
         ),
     )
 

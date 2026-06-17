@@ -86,7 +86,7 @@ services:
   # of v0.2 (#105 cutover); the pgvector extension is no longer required.
   # ---------------------------------------------------------------------------
   postgres:
-    image: ankane/pgvector:v0.5.1
+    image: postgres:16-alpine
     ports:
       - "127.0.0.1:15432:5432"
     environment:

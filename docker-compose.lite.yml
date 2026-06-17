@@ -1,0 +1,93 @@
+# ===========================================================================
+# Omniscience — 'lite' deployment profile (issue #319)
+#
+# Goal: lower the barrier to a first-run / evaluation deployment by trimming
+# the optional moving parts from the default stack, WITHOUT forking the
+# application or changing the full profile's behaviour.
+#
+# This is a Compose *override*. Always layer it on top of the base file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.lite.yml up -d
+#
+# (or, for the published-image variant:)
+#
+#     docker compose -f docker-compose.prod.yml -f docker-compose.lite.yml up -d
+#
+# ---------------------------------------------------------------------------
+# What the lite profile removes vs. the default stack
+# ---------------------------------------------------------------------------
+#   - ollama + ollama-pull      → embeddings run IN-PROCESS via the bundled
+#                                 sentence-transformers model (no model pull,
+#                                 no extra container, no GPU, no API key).
+#   - pgbackup                   → the daily pg_dump sidecar is disabled;
+#                                 first-run / eval data is disposable.
+#   - discovery / reconcile /    → background workers are turned off via the
+#     scheduler / retention        config toggles wired in omniscience_core
+#                                  Settings (all default ON in the full
+#                                  profile, so this override is the only
+#                                  thing that changes their state).
+#
+# What the lite profile KEEPS (these are hard runtime dependencies the app
+# opens connections to at startup — see apps/server/.../app.py::_lifespan):
+#   - postgres   (operational metadata)
+#   - nats       (ingestion queue / JetStream)
+#   - neo4j      (graph store, ADR-0005)  — heap/pagecache trimmed for laptops
+#   - qdrant     (vector store, ADR-0006)
+#
+# For a *fully managed* low-ops pathway (external Postgres, etc.) see the
+# "Lite deployment profile" section of docs/architecture.md.
+# ===========================================================================
+
+services:
+  # The default `app` service depends on `ollama-pull`. Override its config
+  # so the lite stack uses in-process embeddings and never waits on Ollama.
+  app:
+    environment:
+      # In-process sentence-transformers embeddings — no Ollama container.
+      EMBEDDING_PROVIDER: local
+      LOCAL_MODEL_NAME: ${LOCAL_MODEL_NAME:-all-MiniLM-L6-v2}
+      LOCAL_MODEL_DEVICE: ${LOCAL_MODEL_DEVICE:-cpu}
+      # Shed background workers to minimise moving parts for first-run / eval.
+      # All four default to enabled in the full profile.
+      DISCOVERY_ENABLED: "false"
+      RECONCILE_ENABLED: "false"
+      SCHEDULER_ENABLED: "false"
+      RETENTION_ENABLED: "false"
+    # Replace the base depends_on (which waits on ollama-pull) with just the
+    # four required stores. Compose deep-merges depends_on by default, so the
+    # base ollama-pull entry would survive a plain restatement; the `!override`
+    # tag tells Compose to replace the whole mapping instead of merging it.
+    depends_on: !override
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+
+  # Neo4j Community on a laptop: shrink the heap + page cache from the
+  # full-profile defaults (1G/2G/1G) so the stack fits comfortably in ~4 GB.
+  neo4j:
+    environment:
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_INITIAL:-512m}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_MAX:-512m}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE:-256m}
+
+  # ---------------------------------------------------------------------------
+  # Disabled containers.
+  #
+  # Compose has no "remove a service" directive for overrides, so optional
+  # services are parked behind a profile that the lite invocation never
+  # activates. They are defined in the base file under no profile (i.e.
+  # always-on); re-declaring them with a profile here makes them opt-in only.
+  # ---------------------------------------------------------------------------
+  ollama:
+    profiles: ["full-embeddings"]
+
+  ollama-pull:
+    profiles: ["full-embeddings"]
+
+  pgbackup:
+    profiles: ["backups"]

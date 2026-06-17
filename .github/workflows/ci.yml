@@ -183,3 +183,7 @@ jobs:
           #   tests/integration/test_incident_demo_historical.py
           #   tests/property/test_bitemporal_contract.py
           OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS: "1"
+          # Unlocks tests in:
+          #   tests/test_ingestion_e2e.py
+          # Neo4j + Qdrant service containers are already running in this job.
+          OMNISCIENCE_RUN_E2E_INGESTION: "1"

@@ -56,45 +56,36 @@ Failures flow to DLQ. Retries are bounded with exponential backoff. Freshness SL
 
 ### 3. Index layer (`packages/index/`)
 
-Three specialized stores behind one writer (v0.2, Epic #96):
+**v0.2+ backend split** (ADR-0005 + ADR-0006; see also [ADR-0008](decisions/0008-bitemporal-schema-for-neo4j.md)):
 
-- **Postgres** — operational metadata: `sources`, `documents` (with `content_hash` + `tombstoned_at`), `chunks` (text + lineage), `ingestion_runs`, `api_tokens`, workspaces.
-- **Qdrant** — chunk embeddings + payload index. Powers the vector leg of hybrid search and the exact `enumerate`/`count` path.
-- **Neo4j** — entities + edges with the bitemporal triple (`valid_from`, `valid_to`, `recorded_at`); see [ADR-0008](decisions/0008-bitemporal-schema-for-neo4j.md).
+- **Postgres** (`documents`, `chunks`, `ingestion_runs`, `sources`) — operational metadata, lineage, content-hash dedup, tombstones. No embeddings column after cutover.
+- **Qdrant** — chunk embeddings (named vector `dense_primary`) + sparse BM25 vectors (named vector `sparse_bm25`) + per-point payload (workspace_id, source_id, text, metadata, bitemporal fields). One collection per embedding model × dimension.
+- **Neo4j** — entities, edges, ownership / dependency graph. Bitemporal properties (`valid_from`, `valid_to`, `recorded_at`) per ADR-0008.
 
-A reconcile worker keeps the three stores consistent. (For the v0.1 single-store pgvector layout, see the `v0.1.x` tag.)
+**Bitemporal write path** (Stage 1, `refactor/bitemporal-vector-hybrid`): when a document's `content_hash` changes, old Qdrant points are **end-dated** (`valid_to = now()`) rather than hard-deleted. `as_of=T` queries on Qdrant return the chunk version valid at T, consistent with the Neo4j graph state at T (ADR-0008 §6).
+
+**Enumerate mode** (Stage 4): `enumerate_chunks` / `count_enumerate` bypass HNSW and use Qdrant payload indexes + `count(exact=True)` + `scroll` for 100% recall on "list all X / count all Y" queries.
 
 ### 4. Retrieval service (`packages/retrieval/`)
 
-Hybrid search — **staged**, see [ADR 0004](decisions/0004-retrieval-strategy-staged.md).
+Hybrid search — **staged**, see [ADR-0004](decisions/0004-retrieval-strategy-staged.md) and its Stage 3 amendment.
 
-#### v0.1 — Hybrid baseline
+`GraphRAGComposer` dispatches per `retrieval_strategy`:
 
-1. **Vector** — pgvector HNSW top-K
-2. **BM25-like** — tsvector ranking
-3. **Merge** — reciprocal rank fusion
-4. **Filter** — ACL, source subset, freshness cap
+| `retrieval_strategy` | Dense (Qdrant HNSW) | Sparse (Qdrant BM25) | Graph (Neo4j) |
+|---|---|---|---|
+| `"hybrid"` (default) | yes | yes — RRF merge | anchor stage |
+| `"auto"` | yes | yes — RRF merge | anchor stage |
+| `"keyword"` | no | yes — sparse only | anchor stage |
+| `"structural"` | yes — dense only | no | anchor stage |
 
-#### v0.2 — Adaptive retrieval
+**RRF merge** (k=60, Cormack et al. 2009): `score(d) = Σ 1/(60 + rank_i(d))` over dense and sparse ranked lists. Graph-affinity re-scoring is applied on top by `GraphRAGComposer._run_merge_stage`.
 
-Add structural strategies using edges already present in source data (no LLM extraction):
+**`retrieval_strategy` was accepted but ignored before Stage 3** (branch `refactor/bitemporal-vector-hybrid`). All four values now drive real dispatch.
 
-- **Code**: imports, calls, class inheritance — from tree-sitter output
-- **Infrastructure**: DEPENDS_ON from Terraform state, k8s ownerReferences, Helm chart deps
-- **Docs**: markdown links, ADR supersedes
-- **Cross-source entity linking**: resource-name matching across connectors
+**Bitemporal search** (`as_of` parameter): both graph traversal and Qdrant vector search honour `as_of=T`, returning the system state as it was at T. The open-closed predicate `valid_from <= T AND (T < valid_to OR valid_to IS NULL)` is applied via `QdrantFilterBuilder.with_as_of()`.
 
-Storage: same Postgres, new `entities` + `edges` tables. Queries via recursive CTEs or Apache AGE (Cypher). **No separate graph database.**
-
-Callers (or an internal `"auto"` classifier) select the strategy per query via the `retrieval_strategy` parameter.
-
-#### v0.3+ — Full GraphRAG (optional, triggered by evidence)
-
-LLM-extracted entities + community detection — only if v0.2 structural coverage leaves clear gaps on text-heavy sources (ADRs, post-mortems, wikis).
-
-#### v0.3 — Re-ranking
-
-Cross-encoder second pass over top-N to boost precision. Cheap quality win.
+**Degraded detector**: when an anchor entity is not found in the graph at `as_of` AND the vector layer also returns empty, `SearchResult.meta.degraded_response = "as_of_before_recorded_history"` signals that the query precedes any recorded history for that entity. After Stage 1 end-dating this is a genuine signal — not a content-rewrite artefact.
 
 Returns chunks with citations and provenance.
 
@@ -102,7 +93,7 @@ Returns chunks with citations and provenance.
 
 Two transports:
 
-- **MCP server** (primary) — stdio + streamable-http. Tools: `search`, `get_document`, `get_entity`, `get_related_entities`, `resolve_incident`, `incident_timeline`, `blast_radius`, `replay_context`, `suggest_runbook`, `find_similar_incidents`, `generate_postmortem`, `list_sources`, `source_stats`. See [api/mcp.md](api/mcp.md).
+- **MCP server** (primary) — stdio + streamable-http. Tools: `search`, `get_document`, `get_related_entities`, `get_entity`, `list_entities`, `list_sources`, `source_stats`, `resolve_incident`, `incident_timeline`, `blast_radius`, `replay_context`, `suggest_runbook`, `find_similar_incidents`, `generate_postmortem`. See [api/mcp.md](api/mcp.md).
 - **REST** (secondary) — `/search`, `/sources`, `/documents/:id`, `/ingest/webhook/:source`, `/health`.
 
 Both hit the same retrieval service.
@@ -121,7 +112,8 @@ Single `docker-compose.yml` brings up:
 - `ollama` (optional — if using local embeddings)
 - `caddy` — TLS termination
 
-Helm chart available for Kubernetes.
+Helm chart available for Kubernetes. For a trimmed first-run / evaluation
+stack, see the [Lite deployment profile](#lite-deployment-profile) below.
 
 ### Managed Postgres
 
@@ -133,6 +125,56 @@ Nothing in Omniscience requires the built-in Postgres. Any Postgres 14+ with pgv
 - **Aurora PostgreSQL** — pgvector supported
 
 Set `DATABASE_URL` to the external instance; drop the `postgres` service from Compose. Daily `pg_dump` backup sidecar can be similarly disabled in favor of the managed provider's backup mechanism.
+
+### Lite deployment profile
+
+The full stack runs five backing services (Postgres + Neo4j + Qdrant + NATS
+JetStream + Ollama), which is a meaningful ops-burden just to evaluate the
+system (issue #319). The **lite profile** trims that to the minimum required
+for a working install, without forking the application or changing the full
+profile's behaviour.
+
+Bring it up by layering the `docker-compose.lite.yml` override on the base
+file:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.lite.yml up -d
+# or, for the published-image variant:
+docker compose -f docker-compose.prod.yml -f docker-compose.lite.yml up -d
+```
+
+What the override changes versus the default `docker compose up`:
+
+| Aspect | Full profile | Lite profile |
+|---|---|---|
+| Embeddings | `ollama` + `ollama-pull` containers | in-process `sentence-transformers` (`EMBEDDING_PROVIDER=local`) — no extra container, no model pull, no GPU, no API key |
+| Postgres backups | `pgbackup` sidecar (daily `pg_dump`) | disabled (eval data is disposable) |
+| Discovery worker | on | off (`DISCOVERY_ENABLED=false`) |
+| Reconcile worker | on | off (`RECONCILE_ENABLED=false`) |
+| Scheduler worker | on | off (`SCHEDULER_ENABLED=false`) |
+| Retention worker | on | off (`RETENTION_ENABLED=false`) |
+| Neo4j memory | 1G/2G/1G heap/pagecache | 512m/512m/256m (laptop-friendly) |
+| Running containers | 9 | 6 (`postgres`, `nats`, `neo4j`, `qdrant`, `app`, `admin`) |
+
+`postgres`, `nats`, `neo4j`, and `qdrant` are **kept** — the application opens
+connections to all four at startup (`apps/server/.../app.py::_lifespan`), so
+they are hard runtime dependencies rather than optional add-ons. Consolidating
+them into a single embedded store (SQLite/DuckDB) is a larger architectural
+change tracked separately; the lite profile is the low-risk first step.
+
+The background-worker switches (`discovery_enabled`, `reconcile_enabled`,
+`scheduler_enabled`, `retention_enabled` in `omniscience_core.config.Settings`)
+all default to **`True`**, so the only thing that disables them is this
+override — a stock `docker compose up` is byte-for-byte unchanged. Re-enable any
+of them in lite by setting the corresponding `*_ENABLED=true` env var.
+
+To re-attach the optional containers without leaving lite, activate their
+parked profiles, e.g. `--profile full-embeddings` (Ollama) or `--profile
+backups` (pgbackup).
+
+For an even lower-ops path, combine the lite profile with **managed Postgres**
+(above): point `DATABASE_URL` at RDS/Cloud SQL/Neon and drop the `postgres`
+service, leaving only NATS + Neo4j + Qdrant to self-host.
 
 ## Agent layer (for AgenticConnector only)
 

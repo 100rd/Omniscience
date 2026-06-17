@@ -15,12 +15,11 @@ Coverage:
 
 from __future__ import annotations
 
-import asyncio
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -208,6 +207,10 @@ async def test_ttl_cache_hit_does_not_recompute() -> None:
 
 @pytest.mark.asyncio
 async def test_ttl_cache_expires() -> None:
+    # Freeze time instead of sleeping: monotonic returns 0.0 on the first
+    # get_or_compute (entry is stored with expires_at=0.01) and 1.0 on the
+    # second call so the entry is deterministically expired without any real
+    # wall-clock wait.
     cache: TTLCache[int] = TTLCache(ttl_seconds=0.01)
     workspace_id = uuid.uuid4()
     calls = {"n": 0}
@@ -216,9 +219,11 @@ async def test_ttl_cache_expires() -> None:
         calls["n"] += 1
         return calls["n"]
 
-    await cache.get_or_compute(workspace_id=workspace_id, method="m", factory=factory)
-    await asyncio.sleep(0.02)
-    second = await cache.get_or_compute(workspace_id=workspace_id, method="m", factory=factory)
+    with patch("omniscience_core.stats.cache.time") as mock_time:
+        mock_time.monotonic.side_effect = [0.0, 1.0]
+        await cache.get_or_compute(workspace_id=workspace_id, method="m", factory=factory)
+        second = await cache.get_or_compute(workspace_id=workspace_id, method="m", factory=factory)
+
     assert second == 2
 
 

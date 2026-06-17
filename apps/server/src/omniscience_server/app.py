@@ -53,6 +53,7 @@ from omniscience_server.ingestion.worker import IngestionWorker
 from omniscience_server.mcp.mount import create_mcp_asgi_app
 from omniscience_server.mcp.server import mcp_server
 from omniscience_server.middleware import TelemetryMiddleware, TracingMiddleware
+from omniscience_server.reconcile_worker import ReconcileWorker
 from omniscience_server.rest import api_v1_router, register_error_handlers
 from omniscience_server.rest.otlp_ingester import OtlpIngester
 from omniscience_server.retention_worker import RetentionWorker
@@ -183,10 +184,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     await neo4j_graph_store.connect()
     app.state.graph_store = neo4j_graph_store
     app.state.neo4j_graph_store = neo4j_graph_store
-    # ADR-0008 §8 phase 2 — bitemporal write-path rollout flag.  Read-only
-    # in this PR (issue #130 lands the schema DDL); the writer that gates
-    # on it lands in #131.  Defaults to "disabled" so PR #104's writer
-    # behaviour is preserved verbatim until #131.
+    # ADR-0008 §8 — bitemporal write-path rollout flag.  Fully implemented
+    # across #130-#139 and on by default since #317: the bitemporal writer
+    # (end-dating + :EntityState versioning) is the canonical path.  Set
+    # GRAPH_BITEMPORAL=disabled to restore PR #104's legacy hard-delete writer.
     app.state.graph_bitemporal_enabled = settings.graph_bitemporal == "enabled"
 
     # --- Vector store (Qdrant, ADR-0006) ---
@@ -273,19 +274,32 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         embedding_provider=embedding_provider,
         index_writer=index_writer,
         session_factory=session_factory,
+        # Gap A bridge: route operator-sourced events into Neo4j in addition
+        # to the vector path.  The worker no-ops the routing for non-operator
+        # events and when no payload is present.
+        graph_store=neo4j_graph_store,
     )
     worker_task = asyncio.create_task(worker.start())
     app.state.ingestion_worker = worker
     log.info("ingestion_worker_started")
 
     # --- Discovery worker (v0.4 Preview) ---
-    discovery_worker = DiscoveryWorker(
-        session_factory=session_factory,
-        settings=settings,
-    )
-    discovery_task = asyncio.create_task(discovery_worker.start())
-    app.state.discovery_worker = discovery_worker
-    log.info("discovery_worker_started")
+    # Gated by ``discovery_enabled`` (default True) so the lite profile
+    # (issue #319) can shed this background task; full-profile behaviour
+    # is unchanged.
+    discovery_task: asyncio.Task[None] | None = None
+    discovery_worker: DiscoveryWorker | None = None
+    if settings.discovery_enabled:
+        discovery_worker = DiscoveryWorker(
+            session_factory=session_factory,
+            settings=settings,
+        )
+        discovery_task = asyncio.create_task(discovery_worker.start())
+        app.state.discovery_worker = discovery_worker
+        log.info("discovery_worker_started")
+    else:
+        app.state.discovery_worker = None
+        log.info("discovery_worker_disabled")
 
     # --- Freshness worker ---
     freshness_worker = FreshnessWorker(
@@ -322,6 +336,29 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.retention_worker = None
         log.info("retention_worker_disabled")
 
+    # --- Reconcile worker ---
+    # Gated by ``reconcile_enabled`` (default True) so the lite profile
+    # (issue #319) can shed cross-store drift detection; full-profile
+    # behaviour is unchanged.
+    reconcile_task: asyncio.Task[None] | None = None
+    reconcile_worker: ReconcileWorker | None = None
+    if settings.reconcile_enabled:
+        reconcile_worker = ReconcileWorker(
+            session_factory=session_factory,
+            vector_store=qdrant_store,
+            graph_store=neo4j_graph_store,
+            settings=settings,
+        )
+        reconcile_task = asyncio.create_task(reconcile_worker.start())
+        app.state.reconcile_worker = reconcile_worker
+        log.info(
+            "reconcile_worker_started",
+            tick_seconds=getattr(settings, "reconcile_tick_seconds", 3600),
+        )
+    else:
+        app.state.reconcile_worker = None
+        log.info("reconcile_worker_disabled")
+
     # --- Scheduler worker ---
     scheduler_task: asyncio.Task[None] | None = None
     scheduler: SchedulerWorker | None = None
@@ -352,11 +389,16 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     # --- Shutdown ---
     log.info("shutdown", app=settings.app_name)
 
-    discovery_worker.stop()
-    discovery_task.cancel()
+    if discovery_worker is not None and discovery_task is not None:
+        discovery_worker.stop()
+        discovery_task.cancel()
 
     freshness_worker.stop()
     freshness_task.cancel()
+
+    if reconcile_worker is not None and reconcile_task is not None:
+        reconcile_worker.stop()
+        reconcile_task.cancel()
 
     if scheduler is not None and scheduler_task is not None:
         await scheduler.stop()

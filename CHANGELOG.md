@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Deployment: 'lite' profile to reduce ops-burden (issue #319).** A new
+  `docker-compose.lite.yml` override trims the first-run / evaluation stack
+  from nine containers to six: embeddings run in-process via
+  `sentence-transformers` (`EMBEDDING_PROVIDER=local`, no Ollama containers
+  or model pull), the `pgbackup` sidecar is parked behind an opt-in profile,
+  the discovery / reconcile / scheduler / retention background workers are
+  turned off, and Neo4j heap/pagecache are trimmed for laptops. Two new
+  `Settings` toggles — `discovery_enabled` and `reconcile_enabled` (env
+  `DISCOVERY_ENABLED` / `RECONCILE_ENABLED`) — join the existing
+  `scheduler_enabled` / `retention_enabled` switches; all four default to
+  `true`, so the full profile is byte-for-byte unchanged. Bring it up with
+  `docker compose -f docker-compose.yml -f docker-compose.lite.yml up -d`
+  or `make up-lite`. See docs/architecture.md §"Lite deployment profile".
+
 - **Operator: `LimitRange` watcher (issue #202).** The operator now watches
   `core/v1 LimitRange` cluster-wide and emits a deterministic-JSON
   representation of `spec.limits[]` (defaults / min / max /

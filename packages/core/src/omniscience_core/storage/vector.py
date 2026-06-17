@@ -22,6 +22,13 @@ Design rules (ADR-0006 + issue #117)
 3. **No SQLAlchemy dependency here.**  This module imports only stdlib
    and the retrieval response dataclasses — by design, the protocol
    layer is backend-neutral.
+
+Stage 4 — enumerate mode (refactor/bitemporal-vector-hybrid)
+-------------------------------------------------------------
+``enumerate_chunks`` and ``count_enumerate`` bypass HNSW entirely and
+use ``scroll`` / ``count(exact=True)`` on payload indexes for 100%
+recall on "list all X / count all Y" queries.  Both methods are
+workspace-scoped per the ACL invariant (ADR-0006 §ACL).
 """
 
 from __future__ import annotations
@@ -274,6 +281,75 @@ class VectorStore(Protocol):
         backend round-trip rather than N source-id queries.  ``as_of``
         (issue #134) narrows the histogram to chunks valid at the
         supplied bitemporal anchor.
+        """
+        ...
+
+    # ------------------------------------------------------------------
+    # Enumerate API — Stage 4 (refactor/bitemporal-vector-hybrid)
+    # ------------------------------------------------------------------
+
+    async def enumerate_chunks(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        metadata_key: str,
+        metadata_value: str,
+        source_id: uuid.UUID | None = None,
+    ) -> list[dict[str, Any]]:
+        """Return all current chunks matching a payload dimension.
+
+        Stage 4 (enumerate mode): bypasses HNSW entirely, uses
+        ``scroll`` on payload indexes for 100% recall.  Suitable for
+        "list all X / count all Y" questions that must not miss any
+        matching document.
+
+        Results are deduplicated by ``document_id`` — the first chunk
+        for each logical document is returned with its full payload.
+
+        Workspace scoping is mandatory per ADR-0006 §ACL.
+
+        Parameters
+        ----------
+        metadata_key:
+            One of the indexed enumerate dimensions
+            (``service``, ``resource_type``, ``account_id``,
+            ``kind``, ``namespace``).
+        metadata_value:
+            Exact match value for the given dimension.
+        source_id:
+            Optional source-level narrowing.
+
+        Returns
+        -------
+        List of payload dicts, one per unique ``document_id``.
+        """
+        ...
+
+    async def count_enumerate(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        metadata_key: str,
+        metadata_value: str,
+        source_id: uuid.UUID | None = None,
+    ) -> int:
+        """Return the exact chunk count matching a payload dimension.
+
+        Stage 4: uses ``count(exact=True)`` for O(index) exact counting.
+        Unlike ``count_chunks`` this operates at the chunk level (not the
+        document level).  For document-level counts call
+        ``enumerate_chunks`` and take ``len(result)``.
+
+        Workspace scoping is mandatory per ADR-0006 §ACL.
+
+        Parameters
+        ----------
+        metadata_key:
+            Enumerate dimension key (``service``, ``kind``, etc.).
+        metadata_value:
+            Exact match value.
+        source_id:
+            Optional source-level narrowing.
         """
         ...
 

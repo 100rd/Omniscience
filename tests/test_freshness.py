@@ -444,18 +444,24 @@ async def test_rest_freshness_all_returns_200() -> None:
     app = create_app(settings=settings)
 
     tok, pt = _make_api_token(["sources:read"])
-    ref = datetime.now(tz=UTC)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
     src = _fresh_source_at(ref, age_seconds=60)
     src.id = uuid.uuid4()
     src.name = "demo"
     factory = _make_rest_session([src])
     app.state.db_session_factory = factory
 
-    with patch(
-        "omniscience_core.auth.middleware._lookup_token",
-        new_callable=AsyncMock,
-        return_value=tok,
+    with (
+        patch(
+            "omniscience_core.auth.middleware._lookup_token",
+            new_callable=AsyncMock,
+            return_value=tok,
+        ),
+        patch("omniscience_core.freshness.datetime") as mock_dt,
     ):
+        mock_dt.now.return_value = ref
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
@@ -487,7 +493,9 @@ async def test_rest_freshness_all_stale_count() -> None:
     app = create_app(settings=settings)
 
     tok, pt = _make_api_token(["sources:read"])
-    ref = datetime.now(tz=UTC)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
     stale = _stale_source_at(ref, age_seconds=9999)
     stale.id = uuid.uuid4()
     stale.name = "stale"
@@ -497,11 +505,15 @@ async def test_rest_freshness_all_stale_count() -> None:
     factory = _make_rest_session([stale, fresh])
     app.state.db_session_factory = factory
 
-    with patch(
-        "omniscience_core.auth.middleware._lookup_token",
-        new_callable=AsyncMock,
-        return_value=tok,
+    with (
+        patch(
+            "omniscience_core.auth.middleware._lookup_token",
+            new_callable=AsyncMock,
+            return_value=tok,
+        ),
+        patch("omniscience_core.freshness.datetime") as mock_dt,
     ):
+        mock_dt.now.return_value = ref
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
@@ -532,7 +544,9 @@ async def test_rest_freshness_single_returns_200() -> None:
     app = create_app(settings=settings)
 
     tok, pt = _make_api_token(["sources:read"])
-    ref = datetime.now(tz=UTC)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
     src_id = uuid.uuid4()
     src = _fresh_source_at(ref, age_seconds=45)
     src.id = src_id
@@ -540,11 +554,15 @@ async def test_rest_freshness_single_returns_200() -> None:
     factory = _make_rest_session([src])
     app.state.db_session_factory = factory
 
-    with patch(
-        "omniscience_core.auth.middleware._lookup_token",
-        new_callable=AsyncMock,
-        return_value=tok,
+    with (
+        patch(
+            "omniscience_core.auth.middleware._lookup_token",
+            new_callable=AsyncMock,
+            return_value=tok,
+        ),
+        patch("omniscience_core.freshness.datetime") as mock_dt,
     ):
+        mock_dt.now.return_value = ref
         transport = httpx.ASGITransport(app=app)
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             resp = await client.get(
@@ -667,7 +685,10 @@ async def test_mcp_list_sources_includes_is_stale() -> None:
     """mcp_list_sources response includes is_stale per source."""
     from omniscience_server.mcp.tools import mcp_list_sources
 
-    ref = datetime.now(tz=UTC)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
+    workspace_id = uuid.uuid4()
     stale_src = _stale_source_at(ref, age_seconds=9999)
     stale_src.id = uuid.uuid4()
     stale_src.name = "stale"
@@ -676,7 +697,9 @@ async def test_mcp_list_sources_includes_is_stale() -> None:
     app = MagicMock()
     app.state.db_session_factory = factory
 
-    result = await mcp_list_sources(app=app)
+    with patch("omniscience_server.mcp.tools.datetime") as mock_dt:
+        mock_dt.now.return_value = ref
+        result = await mcp_list_sources(app=app, workspace_id=workspace_id)
 
     assert "sources" in result
     assert len(result["sources"]) == 1
@@ -690,7 +713,10 @@ async def test_mcp_list_sources_includes_age_seconds() -> None:
     """mcp_list_sources response includes age_seconds per source."""
     from omniscience_server.mcp.tools import mcp_list_sources
 
-    ref = datetime.now(tz=UTC)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
+    workspace_id = uuid.uuid4()
     fresh_src = _fresh_source_at(ref, age_seconds=30)
     fresh_src.id = uuid.uuid4()
     fresh_src.name = "fresh"
@@ -699,11 +725,13 @@ async def test_mcp_list_sources_includes_age_seconds() -> None:
     app = MagicMock()
     app.state.db_session_factory = factory
 
-    result = await mcp_list_sources(app=app)
+    with patch("omniscience_server.mcp.tools.datetime") as mock_dt:
+        mock_dt.now.return_value = ref
+        result = await mcp_list_sources(app=app, workspace_id=workspace_id)
 
     src_dict = result["sources"][0]
     assert "age_seconds" in src_dict
-    assert src_dict["age_seconds"] == pytest.approx(30.0, abs=5.0)
+    assert src_dict["age_seconds"] == pytest.approx(30.0, abs=1.0)
 
 
 @pytest.mark.asyncio
@@ -711,17 +739,35 @@ async def test_mcp_source_stats_includes_is_stale() -> None:
     """mcp_source_stats response includes is_stale."""
     from omniscience_server.mcp.tools import mcp_source_stats
 
-    ref = datetime.now(tz=UTC)
-    stale_src = _stale_source_at(ref, age_seconds=999)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
+    workspace_id = uuid.uuid4()
     src_id = uuid.uuid4()
+    stale_src = _stale_source_at(ref, age_seconds=999)
     stale_src.id = src_id
     stale_src.name = "stale"
+    stale_src.tenant_id = workspace_id  # ACL check: src.tenant_id must equal workspace_id
 
-    factory = _make_rest_session([stale_src])
+    # mcp_source_stats uses session.get() + multiple scalar_one() execute calls;
+    # build a minimal session mock that satisfies each call in order.
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=stale_src)
+    # scalar_one() for doc_count and chunk_count; scalar_one_or_none() for last_run
+    scalar_result = MagicMock()
+    scalar_result.scalar_one.return_value = 0
+    scalar_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=scalar_result)
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
     app = MagicMock()
     app.state.db_session_factory = factory
 
-    result = await mcp_source_stats(app=app, source_id=str(src_id))
+    with patch("omniscience_server.mcp.tools.datetime") as mock_dt:
+        mock_dt.now.return_value = ref
+        result = await mcp_source_stats(app=app, source_id=str(src_id), workspace_id=workspace_id)
 
     assert "is_stale" in result
     assert result["is_stale"] is True
@@ -732,18 +778,35 @@ async def test_mcp_source_stats_includes_staleness_margin() -> None:
     """mcp_source_stats response includes staleness_margin_seconds."""
     from omniscience_server.mcp.tools import mcp_source_stats
 
-    ref = datetime.now(tz=UTC)
-    stale_src = _stale_source_at(ref, age_seconds=900)
+    ref = (
+        _NOW  # fixed reference — avoids race between mock-data construction and SUT datetime.now()
+    )
+    workspace_id = uuid.uuid4()
     src_id = uuid.uuid4()
+    stale_src = _stale_source_at(ref, age_seconds=900)
     stale_src.id = src_id
     stale_src.name = "overdue"
+    stale_src.tenant_id = workspace_id  # ACL check: src.tenant_id must equal workspace_id
 
-    factory = _make_rest_session([stale_src])
+    # mcp_source_stats uses session.get() + multiple scalar_one() execute calls;
+    # build a minimal session mock that satisfies each call in order.
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=stale_src)
+    scalar_result = MagicMock()
+    scalar_result.scalar_one.return_value = 0
+    scalar_result.scalar_one_or_none.return_value = None
+    session.execute = AsyncMock(return_value=scalar_result)
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
     app = MagicMock()
     app.state.db_session_factory = factory
 
-    result = await mcp_source_stats(app=app, source_id=str(src_id))
+    with patch("omniscience_server.mcp.tools.datetime") as mock_dt:
+        mock_dt.now.return_value = ref
+        result = await mcp_source_stats(app=app, source_id=str(src_id), workspace_id=workspace_id)
 
     assert "staleness_margin_seconds" in result
-    # 900s age - 300s SLA = 600s margin
-    assert result["staleness_margin_seconds"] == pytest.approx(600.0, abs=10.0)
+    # 900s age - 300s SLA = 600s margin (exact, since time is frozen)
+    assert result["staleness_margin_seconds"] == pytest.approx(600.0, abs=1.0)

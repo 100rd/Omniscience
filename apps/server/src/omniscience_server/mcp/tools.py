@@ -4,6 +4,22 @@ Each function is a standalone async callable that accepts the FastAPI
 app (for access to db_session_factory and retrieval_service) and the
 validated tool arguments.  The server.py module wires them to the
 FastMCP instance.
+
+ACL invariant (cross-tenant isolation)
+---------------------------------------
+``mcp_list_sources``, ``mcp_source_stats``, and ``mcp_get_document`` now
+require a ``workspace_id`` argument (extracted from the caller's bearer
+token by the server-layer wrapper in ``mcp/server.py``).  When
+``workspace_id`` is ``None`` (legacy token without workspace scope) the
+function raises ``RuntimeError("forbidden:workspace_required")`` — fail-closed.
+
+For ``mcp_get_document`` and ``mcp_source_stats`` a cross-tenant resource
+access raises ``ValueError("document_not_found:<id>")`` /
+``ValueError("source_not_found:<id>")`` respectively — 404-semantics, no
+existence leak.
+
+``mcp_list_sources`` filters ``Source.tenant_id == workspace_id`` so a
+caller can only enumerate their own workspace's sources.
 """
 
 from __future__ import annotations
@@ -125,8 +141,26 @@ async def mcp_search(
 # ---------------------------------------------------------------------------
 
 
-async def mcp_get_document(app: FastAPI, document_id: str) -> dict[str, Any]:
-    """Fetch a full document and all its chunks by document id."""
+async def mcp_get_document(
+    app: FastAPI,
+    document_id: str,
+    workspace_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """Fetch a full document and all its chunks by document id.
+
+    ACL: ``workspace_id`` is required.  When ``None`` (legacy token) the
+    function raises ``RuntimeError("forbidden:workspace_required")`` —
+    fail-closed.  When the document's parent source belongs to a different
+    workspace the function raises ``ValueError("document_not_found:<id>")``
+    — 404-semantics, avoids existence leak.
+
+    The ``document_not_found:`` error prefix is preserved so the
+    server-layer wrapper in ``mcp/server.py`` can re-wrap it as
+    ``source_not_found:`` for the MCP wire format.
+    """
+    if workspace_id is None:
+        raise RuntimeError("forbidden:workspace_required")
+
     factory = getattr(app.state, "db_session_factory", None)
     if factory is None:
         raise RuntimeError("db_session_factory not available on app.state")
@@ -139,7 +173,11 @@ async def mcp_get_document(app: FastAPI, document_id: str) -> dict[str, Any]:
         if doc_row is None:
             raise ValueError(f"document_not_found:{document_id}")
 
+        # Tenant isolation: verify parent source belongs to caller's workspace.
         source_row = await session.get(Source, doc_row.source_id)
+        if source_row is None or source_row.tenant_id != workspace_id:
+            raise ValueError(f"document_not_found:{document_id}")
+
         chunk_result = await session.execute(
             select(Chunk).where(Chunk.document_id == doc_uuid).order_by(Chunk.ord)
         )
@@ -183,8 +221,20 @@ async def mcp_get_document(app: FastAPI, document_id: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def mcp_list_sources(app: FastAPI) -> dict[str, Any]:
-    """List all configured sources with freshness information."""
+async def mcp_list_sources(
+    app: FastAPI,
+    workspace_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """List configured sources with freshness information.
+
+    ACL: ``workspace_id`` is required.  When ``None`` (legacy token) the
+    function raises ``RuntimeError("forbidden:workspace_required")`` —
+    fail-closed.  Results are filtered to
+    ``Source.tenant_id == workspace_id`` — no cross-tenant sources leak.
+    """
+    if workspace_id is None:
+        raise RuntimeError("forbidden:workspace_required")
+
     factory = getattr(app.state, "db_session_factory", None)
     if factory is None:
         raise RuntimeError("db_session_factory not available on app.state")
@@ -193,12 +243,14 @@ async def mcp_list_sources(app: FastAPI) -> dict[str, Any]:
 
     session: AsyncSession
     async with factory() as session:
-        result = await session.execute(select(Source))
+        result = await session.execute(select(Source).where(Source.tenant_id == workspace_id))
         sources = result.scalars().all()
 
-        # Count indexed documents per source
+        # Count indexed documents per source (scoped to same workspace)
         count_result = await session.execute(
             select(Document.source_id, func.count(Document.id).label("cnt"))
+            .join(Source, Document.source_id == Source.id)
+            .where(Source.tenant_id == workspace_id)
             .where(Document.tombstoned_at.is_(None))
             .group_by(Document.source_id)
         )
@@ -251,8 +303,22 @@ async def mcp_list_sources(app: FastAPI) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def mcp_source_stats(app: FastAPI, source_id: str) -> dict[str, Any]:
-    """Return detailed statistics for a single source."""
+async def mcp_source_stats(
+    app: FastAPI,
+    source_id: str,
+    workspace_id: uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """Return detailed statistics for a single source.
+
+    ACL: ``workspace_id`` is required.  When ``None`` (legacy token) the
+    function raises ``RuntimeError("forbidden:workspace_required")`` —
+    fail-closed.  When the source belongs to a different workspace the
+    function raises ``ValueError("source_not_found:<id>")`` — 404-semantics,
+    no existence leak.
+    """
+    if workspace_id is None:
+        raise RuntimeError("forbidden:workspace_required")
+
     factory = getattr(app.state, "db_session_factory", None)
     if factory is None:
         raise RuntimeError("db_session_factory not available on app.state")
@@ -262,7 +328,8 @@ async def mcp_source_stats(app: FastAPI, source_id: str) -> dict[str, Any]:
     session: AsyncSession
     async with factory() as session:
         src = await session.get(Source, src_uuid)
-        if src is None:
+        # 404-semantics for absent or cross-tenant source.
+        if src is None or src.tenant_id != workspace_id:
             raise ValueError(f"source_not_found:{source_id}")
 
         doc_count_result = await session.execute(
@@ -453,6 +520,58 @@ async def mcp_get_entity(
             "entity": _entity_view_to_dict(node),
             "effective_as_of": resolve_effective_as_of(normalised_as_of).isoformat(),
             "meta": None,
+        }
+
+
+async def mcp_list_entities(
+    app: FastAPI,
+    workspace_id: uuid.UUID,
+    kind: str,
+    cluster: str | None = None,
+    name: str | None = None,
+    as_of: datetime | None = None,
+) -> dict[str, Any]:
+    """List entities of ``kind`` within the caller's workspace.
+
+    Pass-through to ``GraphStore.list_entities`` (committed in f8240b7),
+    optionally filtered by the first-class indexed ``cluster`` property
+    and/or an exact ``name``.  Answers deterministic platform-state
+    questions for the change-validation gate ("which StorageClasses exist
+    in cluster X", "does StorageClass 'gold' exist in cluster X") via an
+    index seek on ``(workspace_id, kind, cluster)`` — never a metadata
+    substring scan.
+
+    Mirrors :func:`mcp_get_entity` for the response envelope: each entity
+    uses the same per-entity shape as ``get_entity`` (``_entity_view_to_dict``),
+    and the envelope carries ``effective_as_of`` (ADR-0008 §5 echo-back)
+    plus ``meta``.  ``as_of`` returns the version valid at T; ``None``
+    returns the still-current state.
+    """
+    normalised_as_of = enforce_utc(as_of)
+    graph_store: GraphStore | None = getattr(app.state, "graph_store", None)
+    if graph_store is None:
+        raise RuntimeError("graph_store not available on app.state")
+
+    with record_request_duration(
+        surface="mcp", tool="list_entities", as_of=normalised_as_of
+    ) as patcher:
+        nodes: list[EntityNodeView] = await graph_store.list_entities(
+            workspace_id=workspace_id,
+            kind=kind,
+            cluster=cluster,
+            name=name,
+            as_of=normalised_as_of,
+        )
+        if not nodes and normalised_as_of is not None:
+            patcher.mark_pre_history()
+        return {
+            "entities": [_entity_view_to_dict(node) for node in nodes],
+            "effective_as_of": resolve_effective_as_of(normalised_as_of).isoformat(),
+            "meta": (
+                {"degraded_response": DEGRADED_PRE_HISTORY}
+                if not nodes and normalised_as_of is not None
+                else None
+            ),
         }
 
 

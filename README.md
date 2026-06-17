@@ -128,6 +128,18 @@ EOF
 docker compose up -d
 ```
 
+> **Lower the ops-burden for a first run.** The default stack runs five
+> backing services. The **lite profile** trims it to the minimum (in-process
+> embeddings, no Ollama/backup containers, background workers off,
+> laptop-friendly memory):
+>
+> ```bash
+> docker compose -f docker-compose.yml -f docker-compose.lite.yml up -d
+> # or: make up-lite
+> ```
+>
+> The full profile is unchanged — see [docs/architecture.md](docs/architecture.md#lite-deployment-profile).
+
 Wait for all services to become healthy, then verify:
 
 ```bash

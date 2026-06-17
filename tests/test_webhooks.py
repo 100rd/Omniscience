@@ -168,10 +168,16 @@ async def test_delivery_tracker_different_ids_not_duplicate() -> None:
 @pytest.mark.asyncio
 async def test_delivery_tracker_expired_not_duplicate() -> None:
     """IDs older than the window are purged and no longer count as duplicates."""
-    tracker = DeliveryTracker(window_seconds=0.05)  # 50 ms window
-    await tracker.record("expiring-id")
-    await asyncio.sleep(0.1)
-    assert await tracker.is_duplicate("expiring-id") is False
+    # Freeze time instead of sleeping: the first two monotonic() calls happen
+    # inside record() (_purge_expired + timestamp write) at t=0.0; the third
+    # call happens inside is_duplicate()/_purge_expired at t=100.0, making
+    # cutoff = 100.0 - 0.05 = 99.95 which is greater than the stored 0.0,
+    # so the entry is deterministically purged without any real wall-clock wait.
+    with patch("omniscience_server.rest.delivery_tracker.time") as mock_time:
+        mock_time.monotonic.side_effect = [0.0, 0.0, 100.0]
+        tracker = DeliveryTracker(window_seconds=0.05)
+        await tracker.record("expiring-id")
+        assert await tracker.is_duplicate("expiring-id") is False
 
 
 @pytest.mark.asyncio

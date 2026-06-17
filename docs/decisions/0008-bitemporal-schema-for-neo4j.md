@@ -191,7 +191,7 @@ A well-meaning future PR is likely to drag bitemporality into Alembic. This sect
 
 **Phase 1 — backfill.** A one-shot migration sets `valid_from = created_at`, `valid_to = NULL`, `recorded_at = updated_at` on every existing `:Entity` node and every existing relationship in Neo4j. The pre-bitemporal data has no `:EntityState` chain — backfill creates the initial `(:EntityState)` for each identity with the same triple, points a single `[:HAD_STATE]` relationship at it, and leaves the identity node's mirror in place. The migration is idempotent: every SET is guarded by `WHERE n.valid_from IS NULL`, so re-runs are no-ops on rows already migrated. The backfill runs as a Neo4j adapter method invoked from a one-shot CLI (e.g. `omniscience-admin migrate-bitemporal`); the FastAPI lifespan does **not** run the backfill (operator-driven, not request-path-driven). Issue [#130](https://github.com/100rd/Omniscience/issues/130) is the binding sub-issue.
 
-**Phase 2 — feature-flag rollout.** The new write path is governed by environment flag **`GRAPH_BITEMPORAL=enabled|disabled`**, default `disabled` for the rollout window. With the flag disabled, the writer emits the pre-bitemporal MERGE shape and existing reads continue unchanged. With the flag enabled, the writer emits the new MERGE-plus-`:HAD_STATE`-plus-`SET-valid_to` shape and reads can carry the optional `as_of` predicate. The flag flips after the backfill migration is verified on a representative dataset and the property tests in [#138](https://github.com/100rd/Omniscience/issues/138) pass.
+**Phase 2 — feature-flag rollout.** The new write path is governed by environment flag **`GRAPH_BITEMPORAL=enabled|disabled`**. It defaulted to `disabled` during the rollout window and **flipped to `enabled` by default in [#317](https://github.com/100rd/Omniscience/issues/317)** now that every wave (#130–#139) is implemented and the property-test gate (#138) is green. With the flag disabled, the writer emits the pre-bitemporal MERGE shape and existing reads continue unchanged. With the flag enabled (now the default), the writer emits the new MERGE-plus-`:HAD_STATE`-plus-`SET-valid_to` shape and reads can carry the optional `as_of` predicate. **Back-compat for flag-off deployments:** an operator upgrading from a flag-off deployment must run the Phase 1 backfill (`Neo4jGraphStore.backfill_bitemporal`, idempotent / workspace-scoped) so legacy `:Entity` rows and relationships carry the bitemporal triple before the on-by-default writer runs; `GRAPH_BITEMPORAL=disabled` remains a supported explicit override to stay on the legacy writer in the meantime.
 
 **Cutover criterion.** Same shape as the ADR-0005 / ADR-0006 cutover ([#105](https://github.com/100rd/Omniscience/issues/105)): the property-test suite passes against the bitemporal write path in CI on a representative fixture, the read-latency parity test in [#138](https://github.com/100rd/Omniscience/issues/138) shows no regression on the current-state path, and a rollback PR is staged that flips `GRAPH_BITEMPORAL=disabled`. The post-cutover follow-up drops the legacy MERGE templates in a subsequent PR.
 
@@ -327,3 +327,56 @@ The same discipline ADR-0005 mandated for the Neo4j adapter and ADR-0006 mandate
 - ACL carry-forward: [#117](https://github.com/100rd/Omniscience/issues/117), [#119](https://github.com/100rd/Omniscience/issues/119), [ADR-0005](0005-neo4j-as-graph-store.md) §Consequences-security
 - Vision sections: [`docs/vision.md`](../vision.md) §5.3 (line 71-77), §11 (line 177)
 - Adapter touched by future migration (this ADR specifies, [#130](https://github.com/100rd/Omniscience/issues/130) implements): [`packages/index/src/omniscience_index/stores/neo4j_store.py`](../../packages/index/src/omniscience_index/stores/neo4j_store.py)
+
+---
+
+## Amendment — Vector-layer end-dating and `valid_to IS NULL` current-state reads (refactor/bitemporal-vector-hybrid, 2026-06-10)
+
+**Status**: Implemented (branch `refactor/bitemporal-vector-hybrid`)
+
+### Accepted compromise: end-dating on the write path
+
+ADR-0008 §6 required the vector store to honour the bitemporal contract but deferred
+implementation.  This amendment records the actual implementation and its trade-offs.
+
+**Previous behaviour (violated §6)**: `_write_document` called `_delete_points` on
+content-hash change.  `as_of=T` searches returned empty for updated documents.
+
+**Implemented behaviour**: Old chunk points are end-dated (`valid_to = now()`) via
+`set_payload`.  The write path is now:
+
+```
+1. _find_document(current_only=True)  → get current content_hash + doc_version
+2. content_hash unchanged?            → skip (no write)
+3. content_hash changed?
+   a. _end_date_points(old_ids, valid_to=now())   [set_payload, wait=True]
+   b. insert new points with valid_from=now(), valid_to=null
+```
+
+**Cost**: one extra `set_payload` round-trip per update.  Mitigated by: (a) updates are
+less frequent than first-time ingests; (b) `wait=True` is required for durability anyway;
+(c) the retention worker (ADR-0009) eventually hard-deletes end-dated points so storage
+growth is bounded.
+
+### `valid_to IS NULL` current-state reads
+
+After end-dating, the collection contains both old (end-dated) and new (current) points for
+the same `(source_id, external_id)`.  Current-state reads must filter to `valid_to IS NULL`
+to avoid double-counting.  The following methods add `with_current_only()` when `as_of=None`:
+
+- `_find_document` — always, so content-hash comparison and doc_version increment are correct.
+- `count()` — when `as_of=None`.
+- `count_chunks()` — when `as_of=None`.
+- `count_chunks_by_source()` — when `as_of=None`.
+
+The `search()` hot path (`as_of=None`) does NOT add `valid_to IS NULL` — most end-dated points
+are already excluded by the tombstone filter, and the performance overhead on the HNSW path is
+undesirable.  If a strict "only current points" requirement emerges for the search path, that
+is a separate amendment.
+
+### Cross-store consistency (§6)
+
+After this amendment: `as_of=T` on Neo4j and `as_of=T` on Qdrant both return the state
+valid at T.  The bitemporal contract described in ADR-0008 §6 is now satisfied.
+
+See **ADR-0006** amendment (same branch) for the Qdrant-side implementation details.
