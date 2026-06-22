@@ -75,14 +75,14 @@ class FullStore(StoreContract):
     async def resolve_pending_stubs(self, *, workspace_id: uuid.UUID) -> int:
         return await self._graph.resolve_pending_stubs(workspace_id=workspace_id)
 
-    async def get_entity(self, *, name: str, workspace_id: uuid.UUID) -> EntityNodeView | None:
-        return await self._graph.get_entity(name=name, workspace_id=workspace_id)
+    async def get_entity(self, *, entity_name: str, workspace_id: uuid.UUID, as_of: datetime | None = None) -> EntityNodeView | None:
+        return await self._graph.get_entity(entity_name=entity_name, workspace_id=workspace_id, as_of=as_of)
 
-    async def find_related(self, *, name: str, edge_type: str | None = None, direction: str = "both", max_depth: int = 1, workspace_id: uuid.UUID) -> GraphResultView:
-        return await self._graph.find_related(name=name, edge_type=edge_type, direction=direction, max_depth=max_depth, workspace_id=workspace_id)
+    async def find_related(self, *, entity_name: str, workspace_id: uuid.UUID, as_of: datetime | None = None, max_depth: int = 1, edge_types: list[str] | None = None) -> GraphResultView:
+        return await self._graph.find_related(entity_name=entity_name, workspace_id=workspace_id, as_of=as_of, max_depth=max_depth, edge_types=edge_types)
 
-    async def traverse(self, *, start_name: str, end_name: str, max_depth: int = 3, workspace_id: uuid.UUID) -> GraphResultView:
-        return await self._graph.traverse(start_name=start_name, end_name=end_name, max_depth=max_depth, workspace_id=workspace_id)
+    async def traverse(self, *, entity_name: str, workspace_id: uuid.UUID, as_of: datetime | None = None, max_depth: int = 1, edge_types: list[str] | None = None) -> GraphResultView:
+        return await self._graph.traverse(entity_name=entity_name, workspace_id=workspace_id, as_of=as_of, max_depth=max_depth, edge_types=edge_types)
 
     async def list_entities(self, *, workspace_id: uuid.UUID, limit: int = 100, offset: int = 0) -> list[EntityNodeView]:
         return await self._graph.list_entities(workspace_id=workspace_id, limit=limit, offset=offset)

@@ -506,3 +506,87 @@ async def test_multiple_workspaces_separate_reports() -> None:
     ws_ids = {r.workspace_id for r in report.per_workspace}
     assert _WS in ws_ids
     assert ws2 in ws_ids
+
+@pytest.mark.asyncio
+async def test_check_entity_drift_creates_outbox_events() -> None:
+    from omniscience_core.db.models import Entity, Source, OutboxEvent
+    from omniscience_server.reconcile_worker import ReconcileWorker
+
+    ws_id = uuid.uuid4()
+    src_id = uuid.uuid4()
+    ent_id_1 = uuid.uuid4()
+    ent_id_2 = uuid.uuid4()
+
+    # ent_1 is outdated in Qdrant (PG version > Qdrant version)
+    # ent_2 is missing in Neo4j (Neo4j version = 0)
+    ent_1 = MagicMock(spec=Entity)
+    ent_1.id = ent_id_1
+    ent_1.source_id = src_id
+    ent_1.entity_type = "service"
+    ent_1.name = "svc.auth"
+    ent_1.display_name = "Auth Service"
+    ent_1.entity_metadata = {}
+    ent_1.version = 5
+
+    ent_2 = MagicMock(spec=Entity)
+    ent_2.id = ent_id_2
+    ent_2.source_id = src_id
+    ent_2.entity_type = "service"
+    ent_2.name = "svc.db"
+    ent_2.display_name = "DB Service"
+    ent_2.entity_metadata = {}
+    ent_2.version = 2
+
+    # Mock DB
+    result_mock = MagicMock()
+    result_mock.scalars().all.return_value = [ent_1, ent_2]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+    
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    session.begin = MagicMock(return_value=tx)
+
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+
+    factory = MagicMock(return_value=cm)
+
+    # Mock stores
+    vs = _make_vector_store()
+    vs.get_entity_versions = AsyncMock(return_value={ent_id_1: 4, ent_id_2: 2})
+    
+    gs = _make_graph_store()
+    gs.get_entity_versions = AsyncMock(return_value={ent_id_1: 5, ent_id_2: 0})
+
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=_make_settings(),
+    )
+
+    await worker._check_entity_drift(workspace_id=ws_id)
+
+    # Both entities should be backfilled (ent_1 due to qdrant, ent_2 due to neo4j)
+    assert session.add.call_count == 2
+    
+    # Verify the payloads
+    args1, _ = session.add.call_args_list[0]
+    event1 = args1[0]
+    assert isinstance(event1, OutboxEvent)
+    assert event1.event_type == "entity.upsert"
+    assert event1.payload["id"] == str(ent_id_1)
+    assert event1.payload["is_backfill"] is True
+    assert event1.payload["version"] == 5
+
+    args2, _ = session.add.call_args_list[1]
+    event2 = args2[0]
+    assert isinstance(event2, OutboxEvent)
+    assert event2.event_type == "entity.upsert"
+    assert event2.payload["id"] == str(ent_id_2)
+    assert event2.payload["is_backfill"] is True
+    assert event2.payload["version"] == 2

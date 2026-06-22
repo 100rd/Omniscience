@@ -8,12 +8,10 @@ transaction is atomic.  Qdrant and Neo4j writes run outside it:
 1. ``Postgres`` — document + chunk rows inside ``session.begin()``.
    ACID-guaranteed: either fully committed or rolled back.
 
-2. ``Qdrant`` — ``upsert_chunks`` is called *inside* the ``session.begin()``
-   context so that a Qdrant failure causes the surrounding context-manager
-   to roll back the Postgres transaction **before commit**.  This prevents
-   the ``pg_missing_qdrant`` drift class in the common failure case.
-   However, a crash after Postgres commits and before Qdrant ACKs still
-   leaves permanent drift (e.g. process SIGKILL between the two).
+2. ``Qdrant`` — ``upsert_chunks`` is called *outside* the Postgres
+   transaction. A Qdrant failure no longer rolls back Postgres.
+   Instead, we rely on min-checkpoint replay: Postgres commits, and on
+   retry, Qdrant skips already-processed versions.
 
 3. ``Neo4j`` — ``upsert_graph`` is called by ``IngestionWorker`` *after*
    the ``upsert_document`` call returns.  It is entirely outside the
@@ -106,18 +104,16 @@ class IndexWriter:
         chunks: list[ChunkData],
         workspace_id: uuid.UUID | None = None,
         ingestion_run_id: uuid.UUID | None = None,
-        version: int | None = None,
     ) -> UpsertResult:
         """Persist a document and its chunks across Postgres and Qdrant.
 
-        **Failure semantics (not atomic):**
+        **Failure semantics (min-checkpoint replay):**
         Postgres and Qdrant writes are *not* wrapped in a distributed
-        transaction.  Qdrant ``upsert_chunks`` is called inside the
-        ``session.begin()`` scope so that a Qdrant failure triggers a
-        Postgres rollback — preventing drift in the common crash case.
-        A process crash *after* the Postgres commit but *before* the
-        Qdrant ACK still produces ``pg_missing_qdrant`` drift.
-        The ``ReconcileWorker`` detects and compensates for this case.
+        transaction. Qdrant ``upsert_chunks`` is called *outside* the
+        Postgres transaction. A Qdrant failure leaves Postgres committed,
+        preventing duplicate writes. On replay, this method does not short-circuit;
+        instead it delegates to Qdrant, which uses its own per-store
+        checkpoint to skip or write.
 
         ``upsert_graph`` (Neo4j) is called by the caller after this
         method returns and is always outside the Postgres transaction.
@@ -126,68 +122,66 @@ class IndexWriter:
             existing = await self._find_document(session, source_id, external_id)
 
             if existing is not None and existing.content_hash == content_hash:
-                return UpsertResult(
-                    action="unchanged",
-                    document_id=existing.id,
-                    chunks_written=0,
-                    doc_version=existing.doc_version,
-                )
-
-            # 1. Postgres Metadata Write
-            if existing is None:
-                doc = await self._insert_document(
-                    session, source_id, external_id, uri, title, content_hash, metadata
-                )
-                action: Literal["created", "updated"] = "created"
-            else:
-                await self._delete_chunks(session, existing.id)
-                await self._update_document(session, existing, uri, title, content_hash, metadata)
                 doc = existing
-                action = "updated"
+                action = "unchanged"
+            else:
+                # 1. Postgres Metadata Write
+                if existing is None:
+                    doc = await self._insert_document(
+                        session, source_id, external_id, uri, title, content_hash, metadata
+                    )
+                    action = "created"  # type: ignore[assignment]
+                else:
+                    await self._delete_chunks(session, existing.id)
+                    await self._update_document(
+                        session, existing, uri, title, content_hash, metadata
+                    )
+                    doc = existing
+                    action = "updated"  # type: ignore[assignment]
 
-            await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
+                await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
 
-            # 2. Qdrant Vector Write (if adapter provided)
-            #    Executed inside session.begin() so that a Qdrant failure
-            #    causes the surrounding context-manager to roll back the PG
-            #    transaction before it is committed.
-            if self._vector_store and workspace_id:
-                vector_metadata = dict(metadata)
-                vector_metadata["workspace_id"] = str(workspace_id)
+        # 2. Qdrant Vector Write (if adapter provided)
+        #    Executed outside session.begin() to support min-checkpoint replay.
+        #    If Qdrant fails, Postgres is already committed. On retry, Qdrant
+        #    uses its own store checkpoint to avoid duplicating work.
+        if self._vector_store and workspace_id:
+            vector_metadata = dict(metadata)
+            vector_metadata["workspace_id"] = str(workspace_id)
 
-                payloads: list[ChunkPayload] = [
-                    {
-                        "ord": c.ord,
-                        "text": c.text,
-                        "embedding": c.embedding,
-                        "symbol": c.symbol,
-                        "metadata": c.metadata,
-                        "embedding_model": c.embedding_model,
-                        "embedding_provider": c.embedding_provider,
-                        "parser_version": c.parser_version,
-                        "chunker_strategy": c.chunker_strategy,
-                    }
-                    for c in chunks
-                ]
+            payloads: list[ChunkPayload] = [
+                {
+                    "ord": c.ord,
+                    "text": c.text,
+                    "embedding": c.embedding,
+                    "symbol": c.symbol,
+                    "metadata": c.metadata,
+                    "embedding_model": c.embedding_model,
+                    "embedding_provider": c.embedding_provider,
+                    "parser_version": c.parser_version,
+                    "chunker_strategy": c.chunker_strategy,
+                }
+                for c in chunks
+            ]
 
-                await self._vector_store.upsert_chunks(
-                    source_id=source_id,
-                    external_id=external_id,
-                    uri=uri,
-                    title=title,
-                    content_hash=content_hash,
-                    metadata=vector_metadata,
-                    chunks=payloads,
-                    ingestion_run_id=ingestion_run_id,
-                    version=version,
-                )
-
-            return UpsertResult(
-                action=action,
-                document_id=doc.id,
-                chunks_written=len(chunks),
-                doc_version=doc.doc_version,
+            await self._vector_store.upsert_chunks(
+                source_id=source_id,
+                external_id=external_id,
+                uri=uri,
+                title=title,
+                content_hash=content_hash,
+                metadata=vector_metadata,
+                chunks=payloads,
+                ingestion_run_id=ingestion_run_id,
+                version=doc.doc_version,
             )
+
+        return UpsertResult(
+            action=action,
+            document_id=doc.id,
+            chunks_written=len(chunks) if action != "unchanged" else 0,
+            doc_version=doc.doc_version,
+        )
 
     async def tombstone(
         self,
@@ -274,8 +268,6 @@ class IndexWriter:
                 snapshot_at=snapshot_at,
                 version=version,
             )
-
-
 
     # ------------------------------------------------------------------
     # Private helpers — each kept < 30 lines

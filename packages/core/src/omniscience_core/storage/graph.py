@@ -52,6 +52,7 @@ class EntityNodeView:
     valid_from: datetime | None = None
     valid_to: datetime | None = None
     recorded_at: datetime | None = None
+    version: int | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
 
 

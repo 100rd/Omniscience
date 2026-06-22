@@ -258,6 +258,8 @@ class ReconcileWorker:
             workspace_id=workspace_id,
             pg_source_ids=pg_source_ids,
         )
+        
+        await self._check_entity_drift(workspace_id=workspace_id)
 
         return WorkspaceReconcileReport(
             workspace_id=workspace_id,
@@ -266,6 +268,51 @@ class ReconcileWorker:
             qdrant_orphans_deleted=qdrant_orphans_deleted,
             neo4j_orphan_sources=neo4j_orphan_sources,
         )
+
+    async def _check_entity_drift(self, *, workspace_id: uuid.UUID) -> None:
+        """Check for missing or out-of-date entities across stores."""
+        from omniscience_core.db.models import Entity, Source, OutboxEvent
+        
+        async with self._session_factory() as session:
+            stmt = select(Entity).join(Source).where(Source.tenant_id == workspace_id)
+            result = await session.execute(stmt)
+            pg_entities = {e.id: e for e in result.scalars().all()}
+            
+        qdrant_versions = await self._vector_store.get_entity_versions(workspace_id=workspace_id)
+        neo4j_versions = await self._graph_store.get_entity_versions(workspace_id=workspace_id)
+        
+        to_backfill = []
+        for ent_id, ent in pg_entities.items():
+            q_v = qdrant_versions.get(ent_id, 0)
+            n_v = neo4j_versions.get(ent_id, 0)
+            
+            if q_v < ent.version or n_v < ent.version:
+                to_backfill.append(ent)
+                
+        if to_backfill:
+            log.warning("reconcile_entity_drift_detected", count=len(to_backfill), workspace_id=str(workspace_id))
+            async with self._session_factory() as session, session.begin():
+                for ent in to_backfill:
+                    event_payload = {
+                        "workspace_id": str(workspace_id),
+                        "id": str(ent.id),
+                        "source_id": str(ent.source_id),
+                        "entity_type": ent.entity_type,
+                        "name": ent.name,
+                        "display_name": ent.display_name,
+                        "metadata": ent.entity_metadata,
+                        "version": ent.version,
+                        "is_backfill": True,
+                    }
+                    session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
+                
+                # To clear parked status from OutboxConsumerWorker, we would normally use app.state,
+                # but since we're re-publishing an OutboxEvent with a HIGHER version, we need to ensure
+                # that if the outbox consumer parked it previously, it un-parks it.
+                # However, since parked_entities is a memory set, the consumer handles parsing.
+                # Since we cannot easily clear it without IPC, restarting or exposing an endpoint is needed.
+                # For now, we assume the Reconciler just initiates backfill by pushing OutboxEvents.
+                pass
 
     # ------------------------------------------------------------------
     # Drift check A: PG document with no Qdrant chunks

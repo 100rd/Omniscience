@@ -33,10 +33,10 @@ MU_IMPACT_DEPTH = 0.25  # Impact depth decay factor (exponential decay: e^(-mu *
 ALPHA_CENTRALITY = 0.15  # Centrality weight factor: 1 - e^(-alpha * centrality)
 
 
-def calculate_time_decay(valid_from: datetime | None, as_of: datetime | None = None) -> float:
-    """Calculate exponential time decay: P_time = e^(-lambda * t) where t is age in days."""
+def calculate_watermark_age(valid_from: datetime | None, as_of: datetime | None = None) -> float:
+    """Calculate the age of the data in days relative to the as_of anchor."""
     if valid_from is None:
-        return 1.0
+        return 0.0
 
     anchor_time = as_of or datetime.now(UTC)
     if anchor_time.tzinfo is None:
@@ -45,9 +45,20 @@ def calculate_time_decay(valid_from: datetime | None, as_of: datetime | None = N
         valid_from = valid_from.replace(tzinfo=UTC)
 
     if valid_from > anchor_time:
+        return 0.0
+
+    return (anchor_time - valid_from).total_seconds() / 86400.0
+
+
+def calculate_time_decay(valid_from: datetime | None, as_of: datetime | None = None) -> float:
+    """Calculate exponential time decay: P_time = e^(-lambda * t) where t is age in days."""
+    if valid_from is None:
         return 1.0
 
-    delta_days = (anchor_time - valid_from).total_seconds() / 86400.0
+    delta_days = calculate_watermark_age(valid_from, as_of)
+    if delta_days <= 0.0:
+        return 1.0
+
     return math.exp(-LAMBDA_TIME_DECAY * delta_days)
 
 
@@ -78,6 +89,8 @@ def calibrate_isotonic(
     score: float,
     thresholds: list[float] | None = None,
     values: list[float] | None = None,
+    support_size: int | None = None,
+    min_support: int = 30,
 ) -> float:
     """Apply isotonic calibration based on piecewise constant/linear mapping."""
     if thresholds is None:
@@ -88,20 +101,28 @@ def calibrate_isotonic(
     if len(thresholds) != len(values):
         raise ValueError("thresholds and values must have the same length")
 
+    iso_score = score
     if score <= thresholds[0]:
-        return values[0]
-    if score >= thresholds[-1]:
-        return values[-1]
+        iso_score = values[0]
+    elif score >= thresholds[-1]:
+        iso_score = values[-1]
+    else:
+        for i in range(len(thresholds) - 1):
+            if thresholds[i] <= score <= thresholds[i + 1]:
+                t_low, t_high = thresholds[i], thresholds[i + 1]
+                v_low, v_high = values[i], values[i + 1]
+                if t_high == t_low:
+                    iso_score = v_low
+                else:
+                    iso_score = v_low + (score - t_low) * (v_high - v_low) / (t_high - t_low)
+                break
 
-    for i in range(len(thresholds) - 1):
-        if thresholds[i] <= score <= thresholds[i + 1]:
-            t_low, t_high = thresholds[i], thresholds[i + 1]
-            v_low, v_high = values[i], values[i + 1]
-            if t_high == t_low:
-                return v_low
-            return v_low + (score - t_low) * (v_high - v_low) / (t_high - t_low)
+    if support_size is not None and support_size < min_support:
+        alpha = support_size / min_support
+        platt_score = calibrate_platt(score)
+        return alpha * iso_score + (1.0 - alpha) * platt_score
 
-    return score
+    return iso_score
 
 
 def calculate_probabilistic_confidence(
@@ -174,11 +195,14 @@ def calculate_probabilistic_incident_confidence(
     classified: Any,  # ClassifiedNeighbours
     max_depth: int,
     as_of: datetime | None = None,
-) -> float:
+    support_size: int | None = None,
+    min_support: int = 30,
+) -> tuple[float, bool]:
     """Calculate the probabilistic confidence score for an incident resolution recommendation.
 
     Considers source reliability of alert, PR, and resource; age (time decay) of data;
     and graph topology (depth of the resource).
+    Returns (confidence, is_provisional) tuple.
     """
     alert_source = alert.source if hasattr(alert, "source") else None
     alert_time = alert.valid_from if hasattr(alert, "valid_from") else None
@@ -221,4 +245,10 @@ def calculate_probabilistic_incident_confidence(
         confidence = base_p * alert_rel * alert_decay
 
     raw_confidence = max(0.0, min(1.0, confidence))
-    return calibrate_isotonic(raw_confidence)
+    calibrated = calibrate_isotonic(
+        raw_confidence,
+        support_size=support_size,
+        min_support=min_support,
+    )
+    is_provisional = support_size is not None and support_size < min_support
+    return calibrated, is_provisional

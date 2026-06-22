@@ -43,9 +43,11 @@ class PostgresOnlyStore:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         embedding_provider: EmbeddingProvider | None = None,
+        degraded: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._embedding_provider = embedding_provider
+        self.degraded = degraded
 
     async def connect(self) -> None:
         """Dynamically enable pgvector extension and add embedding column to chunks table."""
@@ -346,6 +348,7 @@ class PostgresOnlyStore:
                 source=str(ent.source_id),
                 chunk_text=chunk_text,
                 display_name=ent.display_name,
+                version=ent.version,
             )
 
     async def find_related(
@@ -544,6 +547,7 @@ class PostgresOnlyStore:
                         source=str(ent.source_id),
                         chunk_text=chunk_text,
                         display_name=ent.display_name,
+                        version=ent.version,
                     )
                 )
             return views
@@ -582,6 +586,7 @@ class PostgresOnlyStore:
                         source=str(ent.source_id),
                         chunk_text=chunk_text,
                         display_name=ent.display_name,
+                        version=ent.version,
                     )
                 )
             return views
@@ -606,6 +611,7 @@ class PostgresOnlyStore:
                         source=str(ent.source_id),
                         chunk_text=chunk_text,
                         display_name=ent.display_name,
+                        version=ent.version,
                     )
                 )
             return views
@@ -825,6 +831,8 @@ class PostgresOnlyStore:
             hits = []
             for chk, doc, src, dist in rows:
                 score = float(1.0 - dist) if dist is not None else 0.0
+                if getattr(self, "degraded", False):
+                    score *= 0.8  # Lite mode degraded discount
 
                 hits.append(
                     SearchHit(
@@ -851,10 +859,15 @@ class PostgresOnlyStore:
                             chunker_strategy=chk.chunker_strategy,
                         ),
                         metadata=chk.chunk_metadata,
+                        applied_version=doc.doc_version,
+                        staleness=max(0.0, (datetime.now(UTC) - doc.indexed_at).total_seconds()) if doc.indexed_at else None,
                     )
                 )
 
             duration_ms = (time.monotonic() - start) * 1000.0
+
+            versions = [h.applied_version for h in hits if h.applied_version is not None]
+            min_applied_version = min(versions) if versions else None
 
             return SearchResult(
                 hits=hits,
@@ -864,6 +877,7 @@ class PostgresOnlyStore:
                     text_matches=0,
                     duration_ms=duration_ms,
                 ),
+                min_applied_version=min_applied_version,
                 effective_as_of=as_of or datetime.now(UTC),
             )
 

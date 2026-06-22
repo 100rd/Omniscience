@@ -13,6 +13,7 @@ from omniscience_retrieval.probabilistic_scoring import (
     calculate_probabilistic_incident_confidence,
     calculate_source_reliability,
     calculate_time_decay,
+    calculate_watermark_age,
     calibrate_isotonic,
     calibrate_platt,
 )
@@ -129,10 +130,13 @@ def test_calculate_probabilistic_incident_confidence() -> None:
 
     # Only alert exists (base_p = 0.15, alert_rel = 0.70 for alerts, alert_decay = 1.0)
     # Expected: 0.15 * 0.70 * 1.0 = 0.105
-    res = calculate_probabilistic_incident_confidence(
-        alert=alert, classified=classified, max_depth=3, as_of=now
+    raw_expected = 0.105
+    expected = calibrate_isotonic(raw_expected, support_size=100)
+    res, is_prov = calculate_probabilistic_incident_confidence(
+        alert=alert, classified=classified, max_depth=3, as_of=now, support_size=100
     )
-    assert pytest.approx(res, abs=1e-5) == 0.105
+    assert not is_prov
+    assert pytest.approx(res, abs=1e-5) == expected
 
     # With target resource (base_p = 0.45, depth=2, res_rel = 0.95 for k8s)
     res_node = MagicMock()
@@ -142,8 +146,38 @@ def test_calculate_probabilistic_incident_confidence() -> None:
     classified.target_resource = res_node
 
     # Expected: 0.45 * 0.70 * 0.95 * 1.0 * 1.0 * e^(-0.15 * 1) = 0.29925 * e^(-0.15)
-    expected = 0.45 * 0.70 * 0.95 * math.exp(-0.15)
-    res = calculate_probabilistic_incident_confidence(
-        alert=alert, classified=classified, max_depth=3, as_of=now
+    raw_expected = 0.45 * 0.70 * 0.95 * math.exp(-0.15)
+    expected = calibrate_isotonic(raw_expected, support_size=100)
+    res, is_prov = calculate_probabilistic_incident_confidence(
+        alert=alert, classified=classified, max_depth=3, as_of=now, support_size=100
     )
+    assert not is_prov
     assert pytest.approx(res, abs=1e-5) == expected
+
+def test_temporal_hold_out() -> None:
+    now = datetime.now(UTC)
+    # Test that watermark age correctly calculates hold out
+    two_days_ago = now - timedelta(days=2)
+    # the age should be 2.0 days
+    age = calculate_watermark_age(two_days_ago, now)
+    assert pytest.approx(age, abs=1e-5) == 2.0
+
+    # Test hold out future dates (should be 0)
+    future = now + timedelta(days=1)
+    age_future = calculate_watermark_age(future, now)
+    assert age_future == 0.0
+
+def test_cold_start_fallback() -> None:
+    score = 0.5
+    # with min_support=30, support_size=15
+    alpha = 15 / 30
+    iso_val = calibrate_isotonic(score, support_size=100) # no fallback
+    platt_val = calibrate_platt(score)
+    expected = alpha * iso_val + (1.0 - alpha) * platt_val
+
+    actual = calibrate_isotonic(score, support_size=15, min_support=30)
+    assert pytest.approx(actual, abs=1e-5) == expected
+
+    # support_size=0 -> purely platt
+    actual_cold = calibrate_isotonic(score, support_size=0, min_support=30)
+    assert pytest.approx(actual_cold, abs=1e-5) == platt_val

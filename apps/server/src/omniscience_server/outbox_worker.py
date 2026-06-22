@@ -88,11 +88,9 @@ class OutboxWorker:
                 try:
                     if event.event_type == "entity.upsert":
                         payload = EntityUpsertEvent.model_validate(event.payload)
-                        payload.version = base_time + i
                         subject = "outbox.entity.upsert"
                     elif event.event_type == "edge.upsert":
                         payload = EdgeUpsertEvent.model_validate(event.payload)
-                        payload.version = base_time + i
                         subject = "outbox.edge.upsert"
                     else:
                         log.warning("outbox_unknown_event_type", event_type=event.event_type)

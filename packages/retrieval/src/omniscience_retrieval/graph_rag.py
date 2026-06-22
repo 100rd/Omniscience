@@ -685,7 +685,9 @@ class GraphRAGComposer:
         ]
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="merge").observe(duration)
-        return SearchResult(hits=top_hits, query_stats=vector_result.query_stats)
+        versions = [h.applied_version for h in top_hits if getattr(h, "applied_version", None) is not None]
+        min_applied_version = min(versions) if versions else None
+        return SearchResult(hits=top_hits, query_stats=vector_result.query_stats, min_applied_version=min_applied_version)
 
     async def _validate_entities(
         self,

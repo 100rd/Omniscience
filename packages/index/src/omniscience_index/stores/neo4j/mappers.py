@@ -302,6 +302,7 @@ def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
         valid_from=_optional_datetime(record.get("valid_from")),
         valid_to=_optional_datetime(record.get("valid_to")),
         recorded_at=_optional_datetime(record.get("recorded_at")),
+        version=record.get("version"),
         metadata=record.get("metadata") or {},
     )
 
@@ -319,6 +320,7 @@ def _neighbour_to_view(payload: dict[str, Any]) -> EntityNodeView:
         valid_from=_optional_datetime(payload.get("valid_from")),
         valid_to=_optional_datetime(payload.get("valid_to")),
         recorded_at=_optional_datetime(payload.get("recorded_at")),
+        version=payload.get("version"),
         metadata=payload.get("metadata") or {},
     )
 
@@ -351,6 +353,7 @@ def _rows_to_graph_result(row: dict[str, Any]) -> GraphResultView:
         valid_from=_optional_datetime(row.get("seed_valid_from")),
         valid_to=_optional_datetime(row.get("seed_valid_to")),
         recorded_at=_optional_datetime(row.get("seed_recorded_at")),
+        version=row.get("seed_version"),
         metadata=row.get("seed_metadata") or {},
     )
     related_raw = row.get("neighbours") or []

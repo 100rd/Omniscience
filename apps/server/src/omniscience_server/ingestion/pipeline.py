@@ -158,6 +158,7 @@ class IndexWriterProtocol(Protocol):
         edges: list[Any],
         workspace_id: UUID | None = None,
         snapshot_at: Any | None = None,
+        version: int | None = None,
     ) -> None: ...
 
     async def tombstone(
@@ -374,7 +375,7 @@ class IngestionPipeline:
         embeddings = await self._stage_embed(chunks_text, event.source_type, bound)
         chunks = self._build_chunks(chunks_text, embeddings)
 
-        upsert_action, document_id = await self._stage_index(
+        upsert_action, document_id, doc_version = await self._stage_index(
             event, ref, fetched, content_text, chunks, workspace_id, ingestion_run_id, bound
         )
 
@@ -383,6 +384,7 @@ class IngestionPipeline:
             content_bytes=fetched.content_bytes,
             document_id=document_id,
             workspace_id=workspace_id,
+            doc_version=doc_version,
             bound=bound,
         )
 
@@ -530,7 +532,7 @@ class IngestionPipeline:
         workspace_id: uuid.UUID,
         ingestion_run_id: UUID | None,
         bound: Any,
-    ) -> tuple[str, UUID]:
+    ) -> tuple[str, UUID, int]:
         """Write chunks to the hybrid index (Postgres + Qdrant).
 
         Uses ``ref`` (not ``event``) for ``external_id`` / ``uri`` / ``metadata``
@@ -552,11 +554,12 @@ class IngestionPipeline:
             )
             action: str = result.action
             document_id: UUID = result.document_id
+            doc_version: int = result.doc_version
             if action == "unchanged":
                 bound.debug("stage_index_unchanged")
             else:
                 bound.debug("stage_index_ok", action=action, chunks_written=result.chunks_written)
-            return action, document_id
+            return action, document_id, doc_version
         except Exception as exc:
             INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="index").inc()
             bound.error("stage_index_error", error=str(exc))
@@ -571,6 +574,7 @@ class IngestionPipeline:
         content_bytes: bytes,
         document_id: UUID,
         workspace_id: uuid.UUID,
+        doc_version: int,
         bound: Any,
     ) -> None:
         """Extract and persist the symbol graph via orchestrated index_writer.
@@ -597,6 +601,7 @@ class IngestionPipeline:
                 entities=entities,
                 edges=edges,
                 workspace_id=workspace_id,
+                version=doc_version,
             )
             bound.debug("stage_graph_ok", entities=len(entities), edges=len(edges))
         except Exception as exc:

@@ -219,3 +219,20 @@ RECONCILE_WORKER_DURATION_SECONDS: Histogram = Histogram(
     documentation="Wall-clock time in seconds for one full reconcile tick across all workspaces.",
     buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0),
 )
+
+# ---------------------------------------------------------------------------
+# Outbox consumer metrics
+# ---------------------------------------------------------------------------
+
+OUTBOX_PARKED_ENTITIES: Gauge = Gauge(
+    name="omniscience_outbox_parked_total",
+    documentation="Current number of entities or edges parked due to processing failures.",
+    labelnames=["kind"],
+)
+
+OUTBOX_EVENT_LAG_SECONDS: Histogram = Histogram(
+    name="omniscience_outbox_event_lag_seconds",
+    documentation="Wall-clock lag in seconds between outbox event generation and consumption.",
+    labelnames=["kind"],
+    buckets=(0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0),
+)

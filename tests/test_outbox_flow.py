@@ -305,20 +305,27 @@ async def test_outbox_consumer_worker_park_the_entity() -> None:
 
     consumer_worker._entity_consumer = AsyncMock()
 
-    # Simulate iterating over two messages
+    # Simulate iterating over messages (4 times for msg1 to exceed 3 retries, then 1 time for msg2)
     async def fake_entity_iter():
-        yield entity_msg1
+        for _ in range(4):
+            yield entity_msg1
         yield entity_msg2
 
     consumer_worker._entity_consumer.__aiter__ = lambda self: fake_entity_iter()
 
-    # Execute consumer function once (processes both messages)
+    # Execute consumer function once (processes all yielded messages)
     await consumer_worker._consume_entities()
 
-    # Verify first message failed, parked entity, sent to DLQ, and termed
+    # Verify message 1 was retried 3 times (nak with delay)
+    assert entity_msg1.nak.call_count == 3
+    assert entity_msg1.nak.call_args_list[0][1] == {"delay": 2}
+    assert entity_msg1.nak.call_args_list[1][1] == {"delay": 4}
+    assert entity_msg1.nak.call_args_list[2][1] == {"delay": 8}
+
+    # Verify fourth failure parked the entity
     assert uuid.UUID(ent_id) in consumer_worker._parked_entities
 
-    # DLQ producer should be called twice (once for failure, once for parked skip)
+    # DLQ producer should be called twice (once for final failure of msg1, once for parked skip of msg2)
     assert consumer_worker._dlq_producer.publish.call_count == 2
 
     # First DLQ call
@@ -331,9 +338,9 @@ async def test_outbox_consumer_worker_park_the_entity() -> None:
     assert subject2 == "ingest.dlq.outbox_entity"
     assert "is parked due to previous failure" in dlq_msg2.error
 
-    # Verify both messages were termed (removed from queue to avoid retry loop since we DLQ'd them)
-    entity_msg1.term.assert_called_once()
-    entity_msg2.term.assert_called_once()
+    # Verify both messages were termed when DLQ'd
+    assert entity_msg1.term.call_count == 1
+    assert entity_msg2.term.call_count == 1
 
     # Verify neither was acked
     entity_msg1.ack.assert_not_called()

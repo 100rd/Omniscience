@@ -159,14 +159,17 @@ async def mcp_resolve_incident(
 
         classified = _classify_neighbours(graph_result)
         scoring_config = await _load_scoring_config(app, workspace_id)
-        confidence = _score_incident(
+        confidence, is_provisional = _score_incident(
             alert=seed,
             classified=classified,
             max_depth=clamped_depth,
             config=scoring_config,
             as_of=normalised_as_of,
+            support_size=0,  # Cold start assumed for now
         )
-        meta = _build_meta(confidence=confidence, config=scoring_config)
+        meta = _build_meta(
+            confidence=confidence, config=scoring_config, is_provisional=is_provisional
+        )
         similar_past = await _augment_with_similar_past(
             app=app,
             alert_id=alert_id,

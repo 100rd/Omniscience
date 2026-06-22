@@ -190,6 +190,7 @@ class QueueConsumer[T: BaseModel]:
             ack=raw.ack,
             nak=raw.nak,
             term=raw.term,
+            published_at=_get_timestamp(raw),
         )
 
         elapsed = time.monotonic() - start
@@ -243,3 +244,13 @@ def _get_num_delivered(raw: Msg) -> int:
     except Exception as exc:
         log.debug("consumer_metadata_unavailable", error=str(exc))
     return 1
+
+def _get_timestamp(raw: Msg) -> datetime.datetime | None:
+    """Extract publish timestamp from message metadata."""
+    try:
+        meta = raw.metadata
+        if meta is not None and hasattr(meta, "timestamp"):
+            return meta.timestamp
+    except Exception:
+        pass
+    return None

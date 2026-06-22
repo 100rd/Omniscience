@@ -1,0 +1,60 @@
+groups:
+  - name: omniscience-outbox
+    interval: 1m
+    rules:
+      - alert: OutboxParkedEntitiesCount
+        expr: omniscience_outbox_parked_entities_total > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: outbox-consumer
+        annotations:
+          summary: "One or more entities are parked in the outbox consumer"
+          description: |
+            There are {{ $value }} parked entities in the outbox consumer.
+            This means some entities failed to process repeatedly and are now skipped
+            to unblock the queue. They need manual intervention or backfill.
+          runbook_url: "docs/runbooks/outbox.md#outboxparkedentitiescount"
+
+      - alert: OutboxParkedEdgesCount
+        expr: omniscience_outbox_parked_edges_total > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: outbox-consumer
+        annotations:
+          summary: "One or more edges are parked in the outbox consumer"
+          description: |
+            There are {{ $value }} parked edges in the outbox consumer.
+            This means some edges failed to process repeatedly and are now skipped.
+          runbook_url: "docs/runbooks/outbox.md#outboxparkededgescount"
+
+      - alert: OutboxParkedEntityLagHigh
+        expr: omniscience_outbox_parked_entities_oldest_age_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: outbox-consumer
+        annotations:
+          summary: "Oldest parked entity has been stuck for over 1 hour"
+          description: |
+            The oldest parked entity has been stuck in parked state for {{ $value }} seconds.
+            A backfill or manual unpark is required to restore graph sync.
+          runbook_url: "docs/runbooks/outbox.md#outboxparkedentitylaghigh"
+
+      - alert: OutboxParkedEdgeLagHigh
+        expr: omniscience_outbox_parked_edges_oldest_age_seconds > 3600
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          component: outbox-consumer
+        annotations:
+          summary: "Oldest parked edge has been stuck for over 1 hour"
+          description: |
+            The oldest parked edge has been stuck in parked state for {{ $value }} seconds.
+            A backfill or manual unpark is required to restore graph sync.
+          runbook_url: "docs/runbooks/outbox.md#outboxparkededgelaghigh"

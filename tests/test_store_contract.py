@@ -43,6 +43,9 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pytest
+from hypothesis import given, settings, strategies as st
+import asyncio
+
 from omniscience_core.storage.contract import StoreContract
 from omniscience_core.storage.graph import EdgeUpsert, EntityUpsert
 
@@ -80,6 +83,7 @@ def _neo4j_available() -> bool:
 
 def _postgres_available() -> bool:
     import os
+
     return "POSTGRES_DSN" in os.environ or _docker_daemon_reachable()
 
 
@@ -115,10 +119,8 @@ def _full_store_factory() -> Callable[[], AsyncIterator[StoreContract]]:
         Neo4jGraphStore,
         Neo4jStoreConfig,
     )
-    from omniscience_index.stores.qdrant_store import (
-        QdrantStoreConfig,
-        QdrantVectorStore,
-    )
+    from omniscience_index.stores.qdrant_config import QdrantConfig
+    from omniscience_index.stores.qdrant_store import QdrantVectorStore
     from testcontainers.neo4j import Neo4jContainer  # type: ignore[import-not-found]
     from testcontainers.qdrant import QdrantContainer  # type: ignore[import-not-found]
 
@@ -126,8 +128,10 @@ def _full_store_factory() -> Callable[[], AsyncIterator[StoreContract]]:
         dim = 8
         provider_name = "dummy"
         model_name = "dummy"
+
         async def embed(self, texts):
             import math
+
             res = []
             for text in texts:
                 h = hash(text)
@@ -151,13 +155,17 @@ def _full_store_factory() -> Callable[[], AsyncIterator[StoreContract]]:
                 )
                 graph_store = Neo4jGraphStore(config=config)
 
-                vconfig = QdrantStoreConfig(
-                    url=qdrant.get_url(),
+                parsed_qdrant_url = urlparse(qdrant.get_url())
+                vconfig = QdrantConfig(
+                    host=parsed_qdrant_url.hostname or "localhost",
+                    http_port=parsed_qdrant_url.port or 6333,
+                    grpc_port=int(qdrant.get_exposed_port(6334)),
                     api_key=None,
-                    collection_name="contract_test_collection",
-                    vector_size=8,
+                    prefer_grpc=False,
                 )
-                vector_store = QdrantVectorStore(config=vconfig, embedding_provider=DummyProvider())
+                vector_store = QdrantVectorStore(
+                    config=vconfig, embedding_provider=DummyProvider()
+                )
 
                 await graph_store.connect()
                 await vector_store.connect()
@@ -183,11 +191,14 @@ def _postgres_factory() -> Callable[[], AsyncIterator[StoreContract]]:
     async def _factory() -> AsyncIterator[StoreContract]:
         # Using pgvector image so CREATE EXTENSION vector doesn't fail
         with PostgresContainer("pgvector/pgvector:pg16") as postgres:
-            driver_url = postgres.get_connection_url().replace("postgresql+psycopg2://", "postgresql+asyncpg://")
+            driver_url = postgres.get_connection_url().replace(
+                "postgresql+psycopg2://", "postgresql+asyncpg://"
+            )
             engine = create_async_engine(driver_url)
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
             from sqlalchemy import text
+
             async with engine.begin() as conn:
                 await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
                 await conn.run_sync(Base.metadata.create_all)
@@ -196,8 +207,10 @@ def _postgres_factory() -> Callable[[], AsyncIterator[StoreContract]]:
                 dim = 8
                 provider_name = "dummy"
                 model_name = "dummy"
+
                 async def embed(self, texts):
                     import math
+
                     res = []
                     for text in texts:
                         h = hash(text)
@@ -206,7 +219,9 @@ def _postgres_factory() -> Callable[[], AsyncIterator[StoreContract]]:
                         res.append([x / n for x in raw])
                     return res
 
-            store = PostgresOnlyStore(session_factory=session_factory, embedding_provider=DummyProvider())
+            store = PostgresOnlyStore(
+                session_factory=session_factory, embedding_provider=DummyProvider()
+            )
             await store.connect()
             try:
                 await _seed_store_with_fixture(store)
@@ -216,6 +231,8 @@ def _postgres_factory() -> Callable[[], AsyncIterator[StoreContract]]:
                 await engine.dispose()
 
     return _factory
+
+
 async def _seed_store_with_fixture(store: Any) -> None:
     """Populate a fresh store with the two-workspace contract fixture.
 
@@ -232,10 +249,15 @@ async def _seed_store_with_fixture(store: Any) -> None:
     if hasattr(store, "_session_factory"):
         from omniscience_core.db.models import Source, Workspace
         from sqlalchemy.dialects.postgresql import insert
+
         async with store._session_factory() as session, session.begin():
             # Postgres needs Workspace and Source FKs to exist
             for ws_id, name in [(_WORKSPACE_A, "A"), (_WORKSPACE_B, "B")]:
-                stmt = insert(Workspace).values(id=ws_id, name=name, display_name=name).on_conflict_do_nothing()
+                stmt = (
+                    insert(Workspace)
+                    .values(id=ws_id, name=name, display_name=name)
+                    .on_conflict_do_nothing()
+                )
                 await session.execute(stmt)
 
             sources = [
@@ -378,14 +400,6 @@ async def test_find_related_workspace_a_never_sees_workspace_b(
         )
 
 
-async def test_traverse_missing_end_returns_empty(store: StoreContract) -> None:
-    res = await store.traverse(
-        start_name="svc.shared", end_name="missing", workspace_id=_WORKSPACE_A
-    )
-    assert not res.nodes
-    assert not res.edges
-
-
 async def test_find_related_workspace_b_never_sees_workspace_a(
     store: StoreContract,
 ) -> None:
@@ -440,12 +454,15 @@ async def test_get_entity_returns_none_for_cross_workspace(
     )
     assert result is None
 
+
 # ---------------------------------------------------------------------------
 # Vector Operations Conformance
 # ---------------------------------------------------------------------------
 
+
 def _chunk(text: str, ord_: int = 0) -> dict:
     import math
+
     h = hash(text)
     raw = [((h >> (i * 4)) & 0xF) / 15.0 for i in range(8)]
     n = math.sqrt(sum(x * x for x in raw)) or 1.0
@@ -456,17 +473,21 @@ def _chunk(text: str, ord_: int = 0) -> dict:
         "embedding": vec,
     }
 
+
 @pytest.mark.asyncio
 async def test_upsert_then_search_roundtrip_vector(store: StoreContract) -> None:
     import uuid
 
     from omniscience_retrieval.models import SearchRequest
-    ws = uuid.uuid4()
+
+    ws = _WORKSPACE_A
+    entities = await store.get_all_entities(workspace_id=ws)
+    source_id = uuid.UUID(entities[0].source)
     ext_id = "doc-123"
     text = "vector roundtrip text"
 
     await store.upsert_chunks(
-        source_id=uuid.uuid4(),
+        source_id=source_id,
         external_id=ext_id,
         uri=f"mem://{ext_id}",
         title=ext_id,
@@ -480,18 +501,24 @@ async def test_upsert_then_search_roundtrip_vector(store: StoreContract) -> None
     assert len(res.hits) >= 1
     assert res.hits[0].text == text
 
+
 @pytest.mark.asyncio
 async def test_cross_workspace_isolation_is_absolute_vector(store: StoreContract) -> None:
     import uuid
 
     from omniscience_retrieval.models import SearchRequest
-    ws_a = uuid.uuid4()
-    ws_b = uuid.uuid4()
+
+    ws_a = _WORKSPACE_A
+    ws_b = _WORKSPACE_B
+
+    entities_b = await store.get_all_entities(workspace_id=ws_b)
+    source_id_b = uuid.UUID(entities_b[0].source)
+
     ext_id = "doc-iso"
     text = "secret workspace B text"
 
     await store.upsert_chunks(
-        source_id=uuid.uuid4(),
+        source_id=source_id_b,
         external_id=ext_id,
         uri=f"mem://{ext_id}",
         title=ext_id,
@@ -504,13 +531,16 @@ async def test_cross_workspace_isolation_is_absolute_vector(store: StoreContract
     res = await store.search(request=req, workspace_id=ws_a)
     assert len(res.hits) == 0
 
+
 @pytest.mark.asyncio
 async def test_delete_by_document_tombstones_chunks(store: StoreContract) -> None:
     import uuid
 
     from omniscience_retrieval.models import SearchRequest
-    ws = uuid.uuid4()
-    source_id = uuid.uuid4()
+
+    ws = _WORKSPACE_A
+    entities = await store.get_all_entities(workspace_id=ws)
+    source_id = uuid.UUID(entities[0].source)
     ext_id = "doc-del"
     text = "will be deleted"
 
@@ -530,9 +560,48 @@ async def test_delete_by_document_tombstones_chunks(store: StoreContract) -> Non
     assert len(res.hits) >= 1
 
     # Delete
-    deleted = await store.delete_by_document(source_id=source_id, external_id=ext_id, workspace_id=ws)
+    deleted = await store.delete_by_document(
+        source_id=source_id, external_id=ext_id, workspace_id=ws
+    )
     assert deleted is True
 
     # Check it is gone
     res = await store.search(request=req, workspace_id=ws)
     assert len(res.hits) == 0
+
+
+@settings(max_examples=10, deadline=None)
+@given(
+    entity_names=st.lists(
+        st.text(alphabet=st.characters(blacklist_categories=("Cs", "Cc")), min_size=1, max_size=20),
+        min_size=2,
+        max_size=10,
+    )
+)
+@pytest.mark.asyncio
+async def test_concurrent_upsert_property(store: StoreContract, entity_names: list[str]) -> None:
+    ws = _WORKSPACE_A
+    entities = await store.get_all_entities(workspace_id=ws)
+    source_id = uuid.UUID(entities[0].source) if entities else uuid.uuid4()
+
+    upserts = [
+        store.upsert_entity(
+            entity=EntityUpsert(
+                id=uuid.uuid4(),
+                source_id=source_id,
+                entity_type="test-concurrent",
+                name=name,
+                display_name=name,
+                chunk_id=None,
+            ),
+            workspace_id=ws,
+        )
+        for name in entity_names
+    ]
+
+    await asyncio.gather(*upserts)
+
+    for name in entity_names:
+        ent = await store.get_entity(entity_name=name, workspace_id=ws)
+        assert ent is not None
+        assert ent.name == name

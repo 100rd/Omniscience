@@ -95,6 +95,8 @@ class AlertSummary(BaseModel):
     source: str | None = None
     chunk_text: str | None = None
     valid_from: datetime | None = None
+    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
+    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
 
 
 class ResourceSummary(BaseModel):
@@ -107,6 +109,8 @@ class ResourceSummary(BaseModel):
         default=None,
         description="The edge_type by which the alert reached this resource.",
     )
+    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
+    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
 
 
 class PrSummary(BaseModel):
@@ -124,6 +128,8 @@ class PrSummary(BaseModel):
             "(GitHub PR #150).  Calibrated extraction lands in #155."
         ),
     )
+    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
+    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
 
 
 class SlackThreadSummary(BaseModel):
@@ -134,6 +140,8 @@ class SlackThreadSummary(BaseModel):
     source: str | None = None
     chunk_text: str | None = None
     edge_type: str | None = None
+    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
+    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
 
 
 class ResolveIncidentResponse(BaseModel):
@@ -166,6 +174,10 @@ class ResolveIncidentResponse(BaseModel):
             "Shape matches SimilarIncident; empty when clustering yields "
             "no matches or is unavailable."
         ),
+    )
+    min_applied_version: int | None = Field(
+        default=None,
+        description="The minimum applied version among all evidence in this response."
     )
 
 
@@ -294,7 +306,8 @@ def compute_confidence(
     alert: EntityNodeView,
     classified: ClassifiedNeighbours,
     as_of: datetime | None = None,
-) -> float:
+    support_size: int | None = None,
+) -> tuple[float, bool]:
     """Probabilistic confidence calculation (issue #315).
 
     Considers source reliability of alert, PR, and resource; age (time decay) of data;
@@ -309,6 +322,7 @@ def compute_confidence(
         classified=classified,
         max_depth=3,  # default max depth fallback
         as_of=as_of,
+        support_size=support_size,
     )
 
 
@@ -340,7 +354,8 @@ def score_incident(
     max_depth: int,
     config: Any,  # IncidentScoringConfig | None — avoid circular import at type level
     as_of: datetime | None = None,
-) -> float:
+    support_size: int | None = None,
+) -> tuple[float, bool]:
     """Pick the calibrated path or fall back to the v0.1 ladder.
 
     ``config`` is an :class:`~omniscience_retrieval.incidents.scoring.IncidentScoringConfig`
@@ -350,7 +365,9 @@ def score_incident(
     from omniscience_retrieval.incidents.scoring import apply_weights, compute_components
 
     if config is None or config.weights is None:
-        return compute_confidence(alert=alert, classified=classified, as_of=as_of)
+        return compute_confidence(
+            alert=alert, classified=classified, as_of=as_of, support_size=support_size
+        )
     components = compute_components(
         alert_valid_from=alert.valid_from,
         pr_valid_from=(
@@ -365,27 +382,39 @@ def score_incident(
         max_depth=max_depth,
         pr_recency_window_seconds=PR_RECENCY_WINDOW_SECONDS,
     )
-    return apply_weights(components, config.weights)
+    raw = apply_weights(components, config.weights)
+    is_provisional = support_size is not None and support_size < 30
+    return raw, is_provisional
 
 
 def build_meta(
     *,
     confidence: float,
     config: Any,  # IncidentScoringConfig | None
+    is_provisional: bool = False,
 ) -> dict[str, Any] | None:
     """Populate ``meta.below_trust_threshold`` when the score is below threshold."""
     from omniscience_retrieval.incidents.scoring import DEFAULT_CONFIDENCE_THRESHOLD
 
+    meta: dict[str, Any] = {}
     threshold = config.confidence_threshold if config is not None else DEFAULT_CONFIDENCE_THRESHOLD
     if confidence < threshold:
-        return {"below_trust_threshold": True, "confidence_threshold": threshold}
-    return None
+        meta["below_trust_threshold"] = True
+        meta["confidence_threshold"] = threshold
+    if is_provisional:
+        meta["is_provisional"] = True
+    return meta if meta else None
 
 
 # ---------------------------------------------------------------------------
 # Response assembly
 # ---------------------------------------------------------------------------
 
+
+def _compute_staleness(node: EntityNodeView | None, now: datetime) -> float | None:
+    if node is None or node.recorded_at is None:
+        return None
+    return max(0.0, (now - node.recorded_at).total_seconds())
 
 def build_resolve_response(
     *,
@@ -398,25 +427,41 @@ def build_resolve_response(
     similar_past: list[dict[str, Any]] | None = None,
 ) -> ResolveIncidentResponse:
     """Produce the bounded :class:`ResolveIncidentResponse` payload."""
+    alert_summary = AlertSummary(
+        name=alert.name,
+        kind=alert.kind,
+        source=alert.source,
+        chunk_text=alert.chunk_text,
+        valid_from=alert.valid_from,
+        staleness=_compute_staleness(alert, effective_as_of),
+        applied_version=alert.version,
+    )
+    target_resource = _summarise_resource(classified.target_resource, effective_as_of)
+    responsible_pr = _summarise_pr(classified.responsible_pr, effective_as_of)
+    slack_threads = [_summarise_thread(t, effective_as_of) for t in classified.slack_threads]
+
+    versions = [v for v in [
+        alert_summary.applied_version,
+        target_resource.applied_version if target_resource else None,
+        responsible_pr.applied_version if responsible_pr else None,
+        *[t.applied_version for t in slack_threads]
+    ] if v is not None]
+    min_applied_version = min(versions) if versions else None
+
     return ResolveIncidentResponse(
-        alert=AlertSummary(
-            name=alert.name,
-            kind=alert.kind,
-            source=alert.source,
-            chunk_text=alert.chunk_text,
-            valid_from=alert.valid_from,
-        ),
-        target_resource=_summarise_resource(classified.target_resource),
-        responsible_pr=_summarise_pr(classified.responsible_pr),
-        slack_threads=[_summarise_thread(t) for t in classified.slack_threads],
+        alert=alert_summary,
+        target_resource=target_resource,
+        responsible_pr=responsible_pr,
+        slack_threads=slack_threads,
         confidence_score=confidence,
         effective_as_of=effective_as_of,
         meta=meta,
         similar_past=list(similar_past or []),
+        min_applied_version=min_applied_version,
     )
 
 
-def _summarise_resource(node: EntityNodeView | None) -> ResourceSummary | None:
+def _summarise_resource(node: EntityNodeView | None, now: datetime) -> ResourceSummary | None:
     if node is None:
         return None
     return ResourceSummary(
@@ -424,10 +469,12 @@ def _summarise_resource(node: EntityNodeView | None) -> ResourceSummary | None:
         kind=node.kind,
         source=node.source,
         edge_type=node.edge_type,
+        staleness=_compute_staleness(node, now),
+        applied_version=node.version,
     )
 
 
-def _summarise_pr(node: EntityNodeView | None) -> PrSummary | None:
+def _summarise_pr(node: EntityNodeView | None, now: datetime) -> PrSummary | None:
     if node is None:
         return None
     return PrSummary(
@@ -436,16 +483,20 @@ def _summarise_pr(node: EntityNodeView | None) -> PrSummary | None:
         source=node.source,
         edge_type=node.edge_type,
         merged_at=node.valid_from,
+        staleness=_compute_staleness(node, now),
+        applied_version=node.version,
     )
 
 
-def _summarise_thread(node: EntityNodeView) -> SlackThreadSummary:
+def _summarise_thread(node: EntityNodeView, now: datetime) -> SlackThreadSummary:
     return SlackThreadSummary(
         name=node.name,
         kind=node.kind,
         source=node.source,
         chunk_text=node.chunk_text,
         edge_type=node.edge_type,
+        staleness=_compute_staleness(node, now),
+        applied_version=node.version,
     )
 
 

@@ -307,6 +307,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         graph_store=neo4j_graph_store,
         vector_store=qdrant_store,
         embedding_provider=embedding_provider,
+        session_factory=session_factory,
     )
     outbox_consumer_task = asyncio.create_task(outbox_consumer.start())
     app.state.outbox_consumer = outbox_consumer

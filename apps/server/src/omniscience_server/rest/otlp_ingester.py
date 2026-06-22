@@ -226,6 +226,7 @@ class OtlpIngester:
         existing = (await session.execute(stmt)).scalars().first()
         if existing is not None:
             existing.entity_metadata = {**existing.entity_metadata, **metadata}
+            existing.version += 1
             event_payload = {
                 "workspace_id": str(workspace_id) if workspace_id else None,
                 "id": str(existing.id),
@@ -234,6 +235,7 @@ class OtlpIngester:
                 "name": name,
                 "display_name": display_name,
                 "metadata": existing.entity_metadata,
+                "version": existing.version,
             }
             session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
             return existing
@@ -256,6 +258,7 @@ class OtlpIngester:
             "name": name,
             "display_name": display_name,
             "metadata": metadata,
+            "version": entity.version,
         }
         session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
         return entity
@@ -295,6 +298,7 @@ class OtlpIngester:
             "target_entity_id": str(target_id),
             "edge_type": CROSS_REF_EDGE_TYPE,
             "metadata": edge.edge_metadata,
+            "version": edge.version,
         }
         session.add(OutboxEvent(event_type="edge.upsert", payload=event_payload))
 

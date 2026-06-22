@@ -622,10 +622,10 @@ class TestIndexWriterWithVectorStore:
             )
 
     @pytest.mark.asyncio
-    async def test_qdrant_failure_triggers_pg_rollback_path(self) -> None:
-        """When upsert_chunks raises, the begin() context manager receives the
-        exception — in production SQLAlchemy this triggers an automatic rollback.
-        We verify the exception exits through begin().__aexit__ with exc_info.
+    async def test_qdrant_failure_does_not_trigger_pg_rollback_path(self) -> None:
+        """When upsert_chunks raises, the begin() context manager does NOT receive the
+        exception, because the call happens outside the transaction to support
+        min-checkpoint replay. Postgres commits, and Qdrant throws.
         """
         workspace_id = uuid.uuid4()
         vector_store = AsyncMock()
@@ -647,12 +647,12 @@ class TestIndexWriterWithVectorStore:
                 workspace_id=workspace_id,
             )
 
-        # __aexit__ must have been called with the exception type (not None),
-        # which is what SQLAlchemy's real begin() uses to issue ROLLBACK.
+        # __aexit__ must have been called with None, meaning Postgres transaction
+        # was committed successfully before Qdrant threw the exception.
         tx_exit_call = tx_mock.__aexit__.call_args
         exc_type = tx_exit_call[0][0]  # positional arg 0: exc_type
-        assert exc_type is RuntimeError, (
-            "begin().__aexit__ must receive the exception so SQLAlchemy can rollback"
+        assert exc_type is None, (
+            "begin().__aexit__ must NOT receive the exception; PG must commit"
         )
 
     @pytest.mark.asyncio

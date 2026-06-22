@@ -126,6 +126,15 @@ class SearchHit(BaseModel):
         le=1.0,
         description="Probabilistic impact score for this search hit.",
     )
+    staleness: float | None = Field(
+        default=None,
+        description="Lag of this evidence from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None,
+        description="Version of this evidence projection."
+    )
+
 
 
 class QueryStats(BaseModel):
@@ -170,4 +179,8 @@ class SearchResult(BaseModel):
             "``degraded_response`` when the requested ``as_of`` "
             "predates any recorded history for the workspace."
         ),
+    )
+    min_applied_version: int | None = Field(
+        default=None,
+        description="The minimum applied version among all evidence in this response."
     )

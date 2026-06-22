@@ -324,6 +324,36 @@ class QdrantVectorStore:
             raise RuntimeError("QdrantVectorStore: connect() must be awaited first")
         return self._client
 
+    async def get_entity_versions(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, int]:
+        """Return a mapping of entity ID to its version for all entities in the workspace."""
+        from qdrant_client import models as qm
+        from omniscience_index.stores.qdrant_filters import QdrantFilterBuilder
+
+        flt = QdrantFilterBuilder(workspace_id=workspace_id).build()
+        try:
+            records, _ = await self._qc.scroll(
+                collection_name=self.collection_name,
+                scroll_filter=flt,
+                limit=100_000,
+                with_payload=["version"],
+                with_vectors=False,
+            )
+            result = {}
+            for r in records:
+                if str(r.id).startswith("entity:"):
+                    try:
+                        ent_id = uuid.UUID(str(r.id).replace("entity:", ""))
+                        result[ent_id] = int(r.payload.get("version", 0))
+                    except ValueError:
+                        pass
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Qdrant get_entity_versions failed: {e}") from e
+
     @property
     def collection_name(self) -> str:
         """Return the collection name used by this adapter instance."""
@@ -1762,6 +1792,7 @@ def _build_search_result(
         SearchResult,
         SourceInfo,
     )
+    from datetime import datetime, UTC
 
     hits: list[SearchHit] = []
     for sp in scored[:top_k]:
@@ -1791,8 +1822,14 @@ def _build_search_result(
                     chunker_strategy=str(payload.get(PAYLOAD_CHUNKER_STRATEGY, "")),
                 ),
                 metadata=_safe_dict(payload.get(PAYLOAD_METADATA)),
+                applied_version=int(payload.get(PAYLOAD_DOC_VERSION, 0)),
+                staleness=max(0.0, (datetime.now(UTC) - _parse_datetime(payload.get(PAYLOAD_RECORDED_AT))).total_seconds()) if payload.get(PAYLOAD_RECORDED_AT) else None,
             )
         )
+    
+    versions = [h.applied_version for h in hits if h.applied_version is not None]
+    min_applied_version = min(versions) if versions else None
+
     return SearchResult(
         hits=hits,
         query_stats=QueryStats(
@@ -1801,6 +1838,7 @@ def _build_search_result(
             text_matches=text_matches,
             duration_ms=duration_ms,
         ),
+        min_applied_version=min_applied_version,
     )
 
 
