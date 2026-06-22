@@ -144,6 +144,8 @@ class VectorStore(Protocol):
         chunks: list[ChunkPayload],
         ingestion_run_id: uuid.UUID | None = None,
         version: int | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> UpsertOutcome:
         """Atomically create or update a document and its chunks.
 

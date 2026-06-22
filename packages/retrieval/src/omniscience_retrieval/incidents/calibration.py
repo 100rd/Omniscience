@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import random
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -207,13 +208,108 @@ def fit_isotonic_regression(
     return final_thresholds, final_values
 
 
+def apply_isotonic(p: float, thresholds: list[float], values: list[float]) -> float:
+    """Apply isotonic piecewise linear interpolation."""
+    for i in range(len(thresholds) - 1):
+        if thresholds[i] <= p <= thresholds[i+1]:
+            if thresholds[i+1] == thresholds[i]:
+                return values[i]
+            t = (p - thresholds[i]) / (thresholds[i+1] - thresholds[i])
+            return values[i] * (1 - t) + values[i+1] * t
+    if p < thresholds[0]:
+        return values[0]
+    return values[-1]
+
+
+def get_out_of_fold_predictions(
+    predictions: list[float],
+    labels: list[int],
+    weights: list[float],
+    k_folds: int = 5
+) -> list[float]:
+    """Compute out-of-fold isotonic predictions."""
+    n = len(predictions)
+    if n < k_folds:
+        k_folds = n
+    if k_folds <= 1:
+        thresholds, values = fit_isotonic_regression(predictions, labels, weights)
+        return [apply_isotonic(p, thresholds, values) for p in predictions]
+
+    indices = list(range(n))
+    random.seed(42)  # For reproducibility
+    random.shuffle(indices)
+
+    oof_preds = [0.0] * n
+    fold_sizes = [n // k_folds + (1 if i < n % k_folds else 0) for i in range(k_folds)]
+
+    current = 0
+    for i in range(k_folds):
+        fold_size = fold_sizes[i]
+        val_indices = indices[current:current + fold_size]
+        train_indices = [idx for idx in indices if idx not in val_indices]
+        current += fold_size
+
+        train_p = [predictions[idx] for idx in train_indices]
+        train_y = [labels[idx] for idx in train_indices]
+        train_w = [weights[idx] for idx in train_indices]
+
+        thresholds, values = fit_isotonic_regression(train_p, train_y, train_w)
+
+        for idx in val_indices:
+            oof_preds[idx] = apply_isotonic(predictions[idx], thresholds, values)
+
+    return oof_preds
+
+
+def bootstrap_metrics(
+    predictions: list[float],
+    labels: list[int],
+    weights: list[float],
+    num_bootstraps: int = 200,
+    confidence_level: float = 0.95
+) -> dict[str, tuple[float, float]]:
+    """Compute bootstrap confidence intervals for Brier and ECE scores."""
+    n = len(predictions)
+    if n == 0:
+        return {"brier_ci": (0.0, 0.0), "ece_ci": (0.0, 0.0)}
+
+    briers = []
+    eces = []
+    random.seed(42)
+
+    for _ in range(num_bootstraps):
+        idx = [random.randint(0, n - 1) for _ in range(n)]
+        boot_p = [predictions[i] for i in idx]
+        boot_y = [labels[i] for i in idx]
+        boot_w = [weights[i] for i in idx]
+
+        briers.append(compute_brier_score(boot_p, boot_y, boot_w))
+        eces.append(compute_ece(boot_p, boot_y, boot_w))
+
+    briers.sort()
+    eces.sort()
+
+    lower_idx = int((1 - confidence_level) / 2 * num_bootstraps)
+    upper_idx = int((1 + confidence_level) / 2 * num_bootstraps)
+
+    if upper_idx >= num_bootstraps:
+        upper_idx = num_bootstraps - 1
+
+    return {
+        "brier_ci": (briers[lower_idx], briers[upper_idx]),
+        "ece_ci": (eces[lower_idx], eces[upper_idx])
+    }
+
+
 class CalibrationPipeline:
     """End-to-end pipeline for running confidence calibration."""
 
-    def __init__(self, as_of: datetime | None = None):
+    def __init__(self, as_of: datetime | None = None, min_samples: int = 50, k_folds: int = 5):
         self.as_of = as_of or datetime.now(UTC)
         if self.as_of.tzinfo is None:
             self.as_of = self.as_of.replace(tzinfo=UTC)
+        self.min_samples = min_samples
+        self.k_folds = k_folds
 
     def run(self, raw_data: list[dict[str, Any]]) -> dict[str, Any]:
         """
@@ -228,15 +324,30 @@ class CalibrationPipeline:
         labels = [inc.true_label for inc in incidents]
         weights = [calculate_watermark_weight(inc.timestamp, self.as_of) for inc in incidents]
 
-        brier = compute_brier_score(predictions, labels, weights)
-        ece = compute_ece(predictions, labels, weights)
-        thresholds, values = fit_isotonic_regression(predictions, labels, weights)
+        num_samples = len(incidents)
+
+        if num_samples < self.min_samples:
+            # Uncalibrated fallback (fixed prior)
+            thresholds, values = [0.0, 1.0], [0.0, 1.0]
+            eval_predictions = predictions
+        else:
+            # Out-of-fold predictions for unbiased evaluation
+            eval_predictions = get_out_of_fold_predictions(predictions, labels, weights, self.k_folds)
+            # Final isotonic thresholds fitted on full data
+            thresholds, values = fit_isotonic_regression(predictions, labels, weights)
+
+        brier = compute_brier_score(eval_predictions, labels, weights)
+        ece = compute_ece(eval_predictions, labels, weights)
+        ci_metrics = bootstrap_metrics(eval_predictions, labels, weights)
 
         return {
             "brier_score": brier,
+            "brier_ci": ci_metrics["brier_ci"],
             "ece": ece,
+            "ece_ci": ci_metrics["ece_ci"],
             "isotonic_thresholds": thresholds,
             "isotonic_values": values,
-            "num_samples": len(incidents),
-            "discounted_weight_sum": sum(weights)
+            "num_samples": num_samples,
+            "discounted_weight_sum": sum(weights),
+            "mode": "calibrated" if num_samples >= self.min_samples else "uncalibrated"
         }

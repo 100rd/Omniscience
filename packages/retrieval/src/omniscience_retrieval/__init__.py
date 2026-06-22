@@ -32,6 +32,7 @@ from .graph_rag import (
     MERGE_ALPHA,
     GraphRAGComposer,
 )
+from omniscience_retrieval.reconciler import GlobalReconciler
 from .models import (
     ChunkLineage,
     Citation,
@@ -56,6 +57,7 @@ __all__ = [
     "FederatedInstance",
     "FederatedSearch",
     "FederationConfig",
+    "GlobalReconciler",
     "GraphQueryService",
     "GraphRAGComposer",
     "GraphResult",

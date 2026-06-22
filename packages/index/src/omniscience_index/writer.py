@@ -104,6 +104,8 @@ class IndexWriter:
         chunks: list[ChunkData],
         workspace_id: uuid.UUID | None = None,
         ingestion_run_id: uuid.UUID | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> UpsertResult:
         """Persist a document and its chunks across Postgres and Qdrant.
 
@@ -174,6 +176,8 @@ class IndexWriter:
                 chunks=payloads,
                 ingestion_run_id=ingestion_run_id,
                 version=doc.doc_version,
+                epoch=epoch,
+                forced_replay=forced_replay,
             )
 
         return UpsertResult(
@@ -245,6 +249,8 @@ class IndexWriter:
         workspace_id: uuid.UUID | None = None,
         snapshot_at: datetime | None = None,
         version: int | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> None:
         """Persist symbol graph into Neo4j (orchestrated).
 
@@ -267,6 +273,8 @@ class IndexWriter:
                 edges=edges,
                 snapshot_at=snapshot_at,
                 version=version,
+                epoch=epoch,
+                forced_replay=forced_replay,
             )
 
     # ------------------------------------------------------------------

@@ -5,7 +5,7 @@ import sys
 # Add scripts directory to path to import the linter
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from lint_stale_architecture import check_file, get_available_adrs, get_available_tests
+from lint_stale_architecture import check_file, get_available_adrs, get_available_tests, check_docstrings_ast, check_adr_file
 
 def test_get_available_adrs(tmp_path):
     docs_dir = tmp_path / "docs"
@@ -105,3 +105,57 @@ def foo():
     assert errors[0][0] == 3
     assert "Stale architecture comment/string detected" in errors[0][1]
     assert "pgvector was removed" in errors[0][1]
+
+def test_check_docstrings_ast_doc_drift():
+    content = '''
+def my_func(a, b):
+    """
+    My function.
+
+    Args:
+        a: The first arg
+        b: The second arg
+        c: A missing arg that causes drift
+    """
+    pass
+'''
+    errors = check_docstrings_ast(content, Path("app.py"))
+    assert len(errors) == 1
+    assert "doc-drift: Docstring for 'my_func' documents arguments that do not exist in signature: c" in errors[0][1]
+
+def test_check_docstrings_ast_no_drift():
+    content = '''
+def my_func(a, b):
+    """
+    My function.
+
+    Args:
+        a: The first arg
+        b: The second arg
+    """
+    pass
+'''
+    errors = check_docstrings_ast(content, Path("app.py"))
+    assert len(errors) == 0
+
+def test_check_adr_file_doc_drift(tmp_path):
+    root_dir = tmp_path
+    docs_dir = root_dir / "docs" / "decisions"
+    docs_dir.mkdir(parents=True)
+    adr_file = docs_dir / "0001-test.md"
+    
+    # Create an existing python file
+    pkg_dir = root_dir / "packages"
+    pkg_dir.mkdir()
+    (pkg_dir / "valid.py").touch()
+    
+    adr_file.write_text("""
+This ADR references an existing file: `packages/valid.py`.
+This ADR also references a missing file: `packages/missing.py`.
+    """, encoding="utf-8")
+    
+    errors = check_adr_file(adr_file, root_dir)
+    assert len(errors) == 1
+    assert errors[0][0] == 3
+    assert "doc-drift: ADR references missing file 'packages/missing.py'" in errors[0][1]
+

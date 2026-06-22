@@ -95,6 +95,8 @@ class EntityUpsert:
     chunk_id: uuid.UUID | None
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int | None = None
+    epoch: int | None = None
+    forced_replay: bool = False
 
 
 @dataclass(slots=True)
@@ -106,6 +108,8 @@ class EdgeUpsert:
     edge_type: str
     metadata: dict[str, Any] = field(default_factory=dict)
     version: int | None = None
+    epoch: int | None = None
+    forced_replay: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +134,8 @@ class GraphStore(Protocol):
         edges: list[Any],
         snapshot_at: datetime | None = None,
         version: int | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> None: ...
 
     async def upsert_entity(

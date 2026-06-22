@@ -315,11 +315,13 @@ class GraphRAGComposer:
         vector_store: _VectorSearchCallable,
         legacy_service: _LegacySearchCallable,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
+        global_reconciler: Any | None = None,
     ) -> None:
         self._graph_store = graph_store
         self._vector_store = vector_store
         self._legacy_service = legacy_service
         self._session_factory = session_factory
+        self._global_reconciler = global_reconciler
         self._graphrag_active = _should_use_graphrag(graph_store, vector_store)
 
     @property
@@ -385,6 +387,9 @@ class GraphRAGComposer:
 
         _COMPOSED_QUERIES_TOTAL.labels(path="graphrag").inc()
         start = time.monotonic()
+
+        if self._global_reconciler is not None:
+            await self._global_reconciler.wait_for_convergence(workspace_id)
 
         anchor = await self._run_anchor_stage(
             request=request,

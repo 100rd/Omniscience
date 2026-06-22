@@ -459,6 +459,8 @@ class QdrantVectorStore:
         chunks: list[ChunkPayload],
         ingestion_run_id: uuid.UUID | None = None,
         version: int | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> UpsertOutcome:
         """Atomically upsert a document and its chunks into Qdrant.
 
@@ -490,7 +492,19 @@ class QdrantVectorStore:
             )
             if points and points[0].payload:
                 existing_version = points[0].payload.get("version")
+                existing_epoch = points[0].payload.get("epoch")
+                
+                should_skip = False
                 if existing_version is not None and existing_version >= version:
+                    should_skip = True
+                    
+                if epoch is not None and existing_epoch is not None and epoch > existing_epoch:
+                    should_skip = False
+                    
+                if forced_replay:
+                    should_skip = False
+
+                if should_skip:
                     return UpsertOutcome(
                         action="unchanged",
                         document_id=uuid.uuid4(),
@@ -523,6 +537,7 @@ class QdrantVectorStore:
             ingestion_run_id=ingestion_run_id,
             checkpoint_id=checkpoint_id,
             version=version,
+            epoch=epoch,
         )
 
     async def _write_document(
@@ -540,6 +555,7 @@ class QdrantVectorStore:
         ingestion_run_id: uuid.UUID | None,
         checkpoint_id: str | None,
         version: int | None,
+        epoch: int | None = None,
     ) -> UpsertOutcome:
         """Create or replace the document's chunks as a single logical batch.
 
@@ -585,6 +601,7 @@ class QdrantVectorStore:
                         "is_checkpoint": True,
                         "source_id": str(source_id),
                         "version": version,
+                        "epoch": epoch,
                         "workspace_id": str(workspace_id)
                     }
                 )

@@ -8,6 +8,9 @@ from omniscience_retrieval.incidents.calibration import (
     compute_brier_score,
     compute_ece,
     fit_isotonic_regression,
+    bootstrap_metrics,
+    get_out_of_fold_predictions,
+    apply_isotonic,
 )
 from omniscience_retrieval.probabilistic_scoring import LAMBDA_TIME_DECAY
 
@@ -105,30 +108,54 @@ def test_fit_isotonic_regression():
     assert values[idx_0_4] == 0.5
 
 
-def test_calibration_pipeline():
+def test_bootstrap_metrics():
+    predictions = [0.8, 0.2, 0.9, 0.1]
+    labels = [1, 0, 1, 0]
+    weights = [1.0, 1.0, 1.0, 1.0]
+    metrics = bootstrap_metrics(predictions, labels, weights, num_bootstraps=50)
+    assert "brier_ci" in metrics
+    assert "ece_ci" in metrics
+    assert metrics["brier_ci"][0] <= metrics["brier_ci"][1]
+
+
+def test_get_out_of_fold_predictions():
+    predictions = [0.1, 0.4, 0.8, 0.9, 0.2]
+    labels = [0, 0, 1, 1, 0]
+    weights = [1.0, 1.0, 1.0, 1.0, 1.0]
+    oof_preds = get_out_of_fold_predictions(predictions, labels, weights, k_folds=2)
+    assert len(oof_preds) == 5
+    for p in oof_preds:
+        assert 0.0 <= p <= 1.0
+
+
+def test_calibration_pipeline_fallback():
     raw_data = [
-        {
-            "incident_id": "INC-001",
-            "predicted_confidence": 0.9,
-            "true_label": 1,
-            "timestamp": "2026-01-01T12:00:00Z"
-        },
-        {
-            "incident_id": "INC-002",
-            "predicted_confidence": 0.1,
-            "true_label": 0,
-            "timestamp": "2026-01-02T12:00:00Z"
-        }
+        {"incident_id": "INC-001", "predicted_confidence": 0.9, "true_label": 1, "timestamp": "2026-01-01T12:00:00Z"},
+        {"incident_id": "INC-002", "predicted_confidence": 0.1, "true_label": 0, "timestamp": "2026-01-02T12:00:00Z"}
     ]
 
-    pipeline = CalibrationPipeline(as_of=datetime(2026, 1, 3, tzinfo=UTC))
+    pipeline = CalibrationPipeline(as_of=datetime(2026, 1, 3, tzinfo=UTC), min_samples=10)
     result = pipeline.run(raw_data)
 
-    assert "brier_score" in result
-    assert "ece" in result
-    assert "isotonic_thresholds" in result
-    assert "isotonic_values" in result
-    assert result["num_samples"] == 2
-
-    # Brier should be ~0.01
+    assert result["mode"] == "uncalibrated"
+    assert result["isotonic_thresholds"] == [0.0, 1.0]
+    assert result["isotonic_values"] == [0.0, 1.0]
     assert result["brier_score"] < 0.05
+
+
+def test_calibration_pipeline_calibrated():
+    raw_data = []
+    # Create enough samples to trigger calibrated mode
+    for i in range(15):
+        raw_data.append({"incident_id": f"INC-A{i}", "predicted_confidence": 0.8, "true_label": 1})
+        raw_data.append({"incident_id": f"INC-B{i}", "predicted_confidence": 0.2, "true_label": 0})
+
+    pipeline = CalibrationPipeline(as_of=datetime(2026, 1, 3, tzinfo=UTC), min_samples=20, k_folds=3)
+    result = pipeline.run(raw_data)
+
+    assert result["mode"] == "calibrated"
+    assert "brier_score" in result
+    assert "brier_ci" in result
+    assert "ece" in result
+    assert "ece_ci" in result
+    assert len(result["isotonic_thresholds"]) >= 2

@@ -228,6 +228,8 @@ class Neo4jGraphStore:
         edges: list[Any],
         snapshot_at: datetime | None = None,
         version: int | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> None:
         """Persist a batch of entities+edges for one document (idempotent)."""
         workspace_id = self._workspace_from_entities(entities)
@@ -242,6 +244,8 @@ class Neo4jGraphStore:
                 self._bitemporal_enabled,
                 snap_iso,
                 version,
+                epoch,
+                forced_replay,
             )
         entities_end_dated, edges_end_dated = counts if counts is not None else (0, 0)
         if entities_end_dated:
@@ -286,22 +290,38 @@ class Neo4jGraphStore:
         bitemporal_enabled: bool,
         snapshot_at_iso: str | None,
         version: int | None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> tuple[int, int]:
         """Transaction body for :meth:`upsert_graph` (idempotent replace)."""
         now = datetime.now(UTC).isoformat()
 
         if version is not None:
             res = await tx.run(
-                "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version",
+                "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
                 {"workspace_id": str(workspace_id), "source_id": str(source_id)}
             )
             record = await res.single()
-            if record is not None and record["version"] is not None and record["version"] >= version:
+            
+            existing_version = record["version"] if record is not None else None
+            existing_epoch = record["epoch"] if record is not None else None
+            
+            should_skip = False
+            if existing_version is not None and existing_version >= version:
+                should_skip = True
+                
+            if epoch is not None and existing_epoch is not None and epoch > existing_epoch:
+                should_skip = False
+                
+            if forced_replay:
+                should_skip = False
+                
+            if should_skip:
                 return 0, 0
 
             await tx.run(
-                "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.updated_at = datetime($now)",
-                {"workspace_id": str(workspace_id), "source_id": str(source_id), "version": version, "now": now}
+                "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
+                {"workspace_id": str(workspace_id), "source_id": str(source_id), "version": version, "epoch": epoch, "now": now}
             )
 
         entities_end_dated = 0
@@ -412,15 +432,31 @@ class Neo4jGraphStore:
         async def _run(tx: Any) -> None:
             if getattr(entity, "version", None) is not None:
                 res = await tx.run(
-                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version",
+                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
                     {"workspace_id": str(workspace_id), "source_id": str(entity.source_id)}
                 )
                 record = await res.single()
-                if record is not None and record["version"] is not None and record["version"] >= entity.version:
+                
+                existing_version = record["version"] if record is not None else None
+                existing_epoch = record["epoch"] if record is not None else None
+                
+                should_skip = False
+                if existing_version is not None and existing_version >= entity.version:
+                    should_skip = True
+                    
+                ep = getattr(entity, "epoch", None)
+                if ep is not None and existing_epoch is not None and ep > existing_epoch:
+                    should_skip = False
+                    
+                fr = getattr(entity, "forced_replay", False)
+                if fr:
+                    should_skip = False
+                    
+                if should_skip:
                     return
                 await tx.run(
-                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.updated_at = datetime($now)",
-                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id), "version": entity.version, "now": now}
+                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
+                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id), "version": entity.version, "epoch": ep, "now": now}
                 )
             await tx.run(cypher, params)
 
@@ -453,15 +489,31 @@ class Neo4jGraphStore:
             if getattr(edge, "version", None) is not None and edge.metadata.get("source_id"):
                 source_id = str(edge.metadata["source_id"])
                 res = await tx.run(
-                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version",
+                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
                     {"workspace_id": str(workspace_id), "source_id": source_id}
                 )
                 record = await res.single()
-                if record is not None and record["version"] is not None and record["version"] >= edge.version:
+                
+                existing_version = record["version"] if record is not None else None
+                existing_epoch = record["epoch"] if record is not None else None
+                
+                should_skip = False
+                if existing_version is not None and existing_version >= edge.version:
+                    should_skip = True
+                    
+                ep = getattr(edge, "epoch", None)
+                if ep is not None and existing_epoch is not None and ep > existing_epoch:
+                    should_skip = False
+                    
+                fr = getattr(edge, "forced_replay", False)
+                if fr:
+                    should_skip = False
+                    
+                if should_skip:
                     return
                 await tx.run(
-                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.updated_at = datetime($now)",
-                    {"workspace_id": str(workspace_id), "source_id": source_id, "version": edge.version, "now": now}
+                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
+                    {"workspace_id": str(workspace_id), "source_id": source_id, "version": edge.version, "epoch": ep, "now": now}
                 )
             await tx.run(rendered, params)
 

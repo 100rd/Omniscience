@@ -76,6 +76,7 @@ class QdrantFilterBuilder:
     current_only_flag: bool = False
     as_of: datetime | None = None
     metadata_filters: tuple[tuple[str, str], ...] = field(default_factory=tuple)
+    checkpoint_flag: bool = False
 
     def with_source_ids(self, source_ids: list[uuid.UUID]) -> QdrantFilterBuilder:
         """Return a new builder narrowed to the given sources."""
@@ -132,6 +133,10 @@ class QdrantFilterBuilder:
         """
         return replace(self, metadata_filters=(*self.metadata_filters, (key, value)))
 
+    def with_checkpoint(self) -> QdrantFilterBuilder:
+        """Return a new builder narrowed to checkpoint points."""
+        return replace(self, checkpoint_flag=True)
+
     def build(self) -> qm.Filter:
         """Emit the concrete Qdrant filter.
 
@@ -181,6 +186,13 @@ class QdrantFilterBuilder:
                 qm.FieldCondition(
                     key=meta_key,
                     match=qm.MatchValue(value=meta_value),
+                )
+            )
+        if self.checkpoint_flag:
+            must.append(
+                qm.FieldCondition(
+                    key="is_checkpoint",
+                    match=qm.MatchValue(value=True),
                 )
             )
         return qm.Filter(must=must)

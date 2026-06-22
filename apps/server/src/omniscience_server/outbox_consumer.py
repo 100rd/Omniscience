@@ -56,6 +56,7 @@ class OutboxConsumerWorker:
         # Park-the-entity tracking
         self._parked_entities: dict[uuid.UUID, float] = {}
         self._parked_edges: dict[uuid.UUID, float] = {}
+        self._edge_deps: dict[uuid.UUID, tuple[uuid.UUID, uuid.UUID]] = {}
         self._unpark_timeout_seconds = 300.0  # 5 minutes
         self._entity_attempts: dict[uuid.UUID, int] = {}
         self._edge_attempts: dict[uuid.UUID, int] = {}
@@ -287,6 +288,37 @@ class OutboxConsumerWorker:
                     if entity_id in self._entity_attempts:
                         del self._entity_attempts[entity_id]
                     await msg.ack()
+
+                    # Auto-unpark dependent edges
+                    if self._session_factory:
+                        edges_to_unpark = []
+                        for e_id, (src_id, tgt_id) in list(self._edge_deps.items()):
+                            if src_id == entity_id or tgt_id == entity_id:
+                                other_id = tgt_id if src_id == entity_id else src_id
+                                if other_id not in self._parked_entities:
+                                    edges_to_unpark.append(e_id)
+                        
+                        if edges_to_unpark:
+                            async with self._session_factory() as session:
+                                stmt = select(Edge, Source.workspace_id).join(Entity, Edge.source_entity_id == Entity.id).join(Source, Entity.source_id == Source.id).where(Edge.id.in_(edges_to_unpark))
+                                res = await session.execute(stmt)
+                                producer = QueueProducer(self._nats_conn.jetstream)
+                                for edge, workspace_id in res:
+                                    backfill_event = EdgeUpsertEvent(
+                                        id=str(edge.id),
+                                        source_entity_id=str(edge.source_entity_id),
+                                        target_entity_id=str(edge.target_entity_id),
+                                        workspace_id=str(workspace_id) if workspace_id else None,
+                                        edge_type=edge.edge_type,
+                                        metadata=edge.edge_metadata,
+                                        version=edge.version,
+                                        is_backfill=True,
+                                    )
+                                    await producer.publish("outbox.edge.upsert", backfill_event)
+                                    log.info("auto_unpark_edge", edge_id=str(edge.id), trigger_entity_id=str(entity_id))
+                                    self._parked_edges.pop(edge.id, None)
+                                    self._edge_deps.pop(edge.id, None)
+                            self._update_metrics()
                 except Exception as exc:
                     log.error("outbox_consume_entity_failed", error=str(exc))
                     if 'entity_id' in locals():
@@ -328,6 +360,7 @@ class OutboxConsumerWorker:
 
                     if event.is_backfill:
                         self._parked_edges.pop(edge_id, None)
+                        self._edge_deps.pop(edge_id, None)
                         if edge_id in self._edge_attempts:
                             del self._edge_attempts[edge_id]
                         self._update_metrics()
@@ -345,9 +378,11 @@ class OutboxConsumerWorker:
                         log.warning("outbox_edge_skip_parked_entity", edge_id=str(edge_id))
                         if edge_id not in self._parked_edges:
                             self._parked_edges[edge_id] = time.monotonic()
+                            self._edge_deps[edge_id] = (source_entity_id, target_entity_id)
                         if len(self._parked_edges) > MAX_PARKED_ITEMS:
                             oldest_key = min(self._parked_edges, key=self._parked_edges.get)
                             del self._parked_edges[oldest_key]
+                            self._edge_deps.pop(oldest_key, None)
                         self._update_metrics()
                         await self._route_to_dlq(
                             msg,
@@ -390,9 +425,11 @@ class OutboxConsumerWorker:
                         else:
                             if edge_id not in self._parked_edges:
                                 self._parked_edges[edge_id] = time.monotonic()
+                                self._edge_deps[edge_id] = (source_entity_id, target_entity_id)
                             if len(self._parked_edges) > MAX_PARKED_ITEMS:
-                                oldest_key = next(iter(self._parked_edges))
+                                oldest_key = min(self._parked_edges, key=self._parked_edges.get)
                                 del self._parked_edges[oldest_key]
+                                self._edge_deps.pop(oldest_key, None)
                             self._update_metrics()
                             await self._route_to_dlq(
                                 msg,

@@ -38,7 +38,7 @@ from omniscience_index import IndexWriter
 from omniscience_index.stores import Neo4jGraphStore, Neo4jStoreConfig
 from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
-from omniscience_retrieval import GraphRAGComposer
+from omniscience_retrieval import GlobalReconciler, GraphRAGComposer
 from omniscience_retrieval.federation import FederatedSearch
 from omniscience_retrieval.federation_config import FederationConfig
 from omniscience_retrieval.models import SearchRequest, SearchResult
@@ -243,6 +243,13 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         federated = None
         app.state.federated_search = None
 
+    # --- Global Reconciler ---
+    global_reconciler = GlobalReconciler(
+        session_factory=session_factory,
+        vector_store=qdrant_store,
+        graph_store=neo4j_graph_store,
+    )
+
     # --- GraphRAG composer ---
     # The composer's type-based dispatch always lands on
     # the GraphRAG path; the ``legacy_service`` parameter is held for
@@ -252,6 +259,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         vector_store=qdrant_store,
         legacy_service=federated if federated is not None else _UnwiredLegacyService(),
         session_factory=session_factory,
+        global_reconciler=global_reconciler,
     )
     app.state.graph_rag_composer = graph_rag_composer
     log.info(
