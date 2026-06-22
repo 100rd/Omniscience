@@ -180,7 +180,7 @@ def _scrape_uuid_after(sql: str, marker: str) -> uuid.UUID | None:
     if idx < 0:
         return None
     rest = sql[idx + len(marker) :].strip()
-    # UUID literal is wrapped in single quotes: 'xxxx-...-xxxx'
+    # UUID literal is wrapped in single quotes: '0000-...-0000'
     if not rest.startswith("'"):
         return None
     end = rest.find("'", 1)

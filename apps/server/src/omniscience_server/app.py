@@ -74,9 +74,9 @@ connector_registry._connectors.setdefault(
 
 
 # ---------------------------------------------------------------------------
-# Backend values accepted by Settings.storage_*_backend after the #105
-# cutover.  Any other value causes startup to abort with a clear error so
-# ops that still have pre-v0.2 env vars get a loud failure, never a silent
+# Backend values accepted by Settings.storage_*_backend.
+# Any other value causes startup to abort with a clear error so
+# ops that have misconfigured env vars get a loud failure, never a silent
 # boot on an unintended backend.
 # ---------------------------------------------------------------------------
 
@@ -86,11 +86,10 @@ _SUPPORTED_VECTOR_BACKENDS: frozenset[str] = frozenset({"qdrant", "postgres"})
 
 
 class _UnwiredLegacyService:
-    """Placeholder for ``GraphRAGComposer.legacy_service`` post-cutover.
+    """Placeholder for ``GraphRAGComposer.legacy_service``.
 
-    After #105 removed the pgvector adapters, the composer always
-    dispatches to the Neo4j+Qdrant pipeline (``graphrag_active`` is
-    always True with the supported backend set).  The ``legacy_service``
+    The composer dispatches to the Neo4j+Qdrant/Postgres pipeline 
+    (``graphrag_active`` is always True). The ``legacy_service``
     branch is therefore unreachable at runtime; we still need to pass
     *something* that satisfies the ``_LegacySearchCallable`` protocol.
 
@@ -101,9 +100,8 @@ class _UnwiredLegacyService:
 
     async def search(self, request: SearchRequest) -> SearchResult:
         raise RuntimeError(
-            "legacy_retrieval_service_unwired: the pgvector retrieval path was "
-            "removed at the #105 cutover; all search requests must route through "
-            "the GraphRAG composer (Neo4j + Qdrant). See CHANGELOG.md §0.2.0."
+            "retrieval_service_unwired: all search requests must route through "
+            "the GraphRAG composer."
         )
 
 
@@ -160,24 +158,18 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         dim=embedding_provider.dim,
     )
 
-    # --- Backend validation (Epic #96 cutover, issue #105) ---
-    # Only 'neo4j' + 'qdrant' are accepted as of v0.2.  An unknown
-    # value is rejected here, before any connections are opened, so
-    # operators with leftover ``*_BACKEND=pgvector`` env vars see a
-    # clear failure instead of a silently-degraded boot.
+    # --- Backend validation ---
     graph_backend = str(settings.storage_graph_backend).lower()
     if graph_backend not in _SUPPORTED_GRAPH_BACKENDS:
         raise ValueError(
             f"unsupported_storage_graph_backend:{graph_backend!r} "
-            f"(supported: {sorted(_SUPPORTED_GRAPH_BACKENDS)}). "
-            "Pgvector was removed at the #105 cutover; see CHANGELOG.md §0.2.0."
+            f"(supported: {sorted(_SUPPORTED_GRAPH_BACKENDS)})."
         )
     vector_backend = str(settings.storage_vector_backend).lower()
     if vector_backend not in _SUPPORTED_VECTOR_BACKENDS:
         raise ValueError(
             f"unsupported_storage_vector_backend:{vector_backend!r} "
-            f"(supported: {sorted(_SUPPORTED_VECTOR_BACKENDS)}). "
-            "Pgvector was removed at the #105 cutover; see CHANGELOG.md §0.2.0."
+            f"(supported: {sorted(_SUPPORTED_VECTOR_BACKENDS)})."
         )
 
     if graph_backend == "postgres" and vector_backend == "postgres":
@@ -224,10 +216,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             collection=qdrant_store.collection_name,
         )
 
-    # --- Legacy retrieval handle (unwired after #105) ---
-    # The pgvector ``RetrievalService`` is no longer instantiated.
-    # Callers that require a non-workspace-scoped legacy fallback
-    # receive 503 from the REST/MCP layer.
+
     app.state.retrieval_service = None
 
     # --- Federation (optional) ---
@@ -254,11 +243,10 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         federated = None
         app.state.federated_search = None
 
-    # --- GraphRAG composer (issue #107) ---
-    # Post-#105 the composer's type-based dispatch always lands on
+    # --- GraphRAG composer ---
+    # The composer's type-based dispatch always lands on
     # the GraphRAG path; the ``legacy_service`` parameter is held for
     # backward compatibility of the constructor signature but is
-    # never invoked at runtime.  The placeholder raises if it ever is.
     graph_rag_composer = GraphRAGComposer(
         graph_store=neo4j_graph_store,
         vector_store=qdrant_store,

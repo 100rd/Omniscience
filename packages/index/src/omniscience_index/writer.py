@@ -106,6 +106,7 @@ class IndexWriter:
         chunks: list[ChunkData],
         workspace_id: uuid.UUID | None = None,
         ingestion_run_id: uuid.UUID | None = None,
+        version: int | None = None,
     ) -> UpsertResult:
         """Persist a document and its chunks across Postgres and Qdrant.
 
@@ -178,6 +179,7 @@ class IndexWriter:
                     metadata=vector_metadata,
                     chunks=payloads,
                     ingestion_run_id=ingestion_run_id,
+                    version=version,
                 )
 
             return UpsertResult(
@@ -248,6 +250,7 @@ class IndexWriter:
         edges: list[Any],
         workspace_id: uuid.UUID | None = None,
         snapshot_at: datetime | None = None,
+        version: int | None = None,
     ) -> None:
         """Persist symbol graph into Neo4j (orchestrated).
 
@@ -269,9 +272,10 @@ class IndexWriter:
                 entities=entities,
                 edges=edges,
                 snapshot_at=snapshot_at,
+                version=version,
             )
 
-        # SQL-side graph storage is now deprecated and removed from ingestion path.
+
 
     # ------------------------------------------------------------------
     # Private helpers — each kept < 30 lines

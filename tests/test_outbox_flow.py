@@ -248,3 +248,93 @@ async def test_outbox_consumer_worker_updates_neo4j_and_qdrant() -> None:
     # Verify acks
     entity_msg.ack.assert_called_once()
     edge_msg.ack.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_outbox_consumer_worker_park_the_entity() -> None:
+    """OutboxConsumerWorker routes to DLQ and parks entities on failure."""
+    nats_conn = MagicMock()
+    nats_conn.jetstream = AsyncMock()
+
+    graph_store = AsyncMock(spec=GraphStore)
+    vector_store = AsyncMock(spec=VectorStore)
+    embedding_provider = AsyncMock(spec=EmbeddingProvider)
+
+    # Make graph_store raise an exception on first call, succeed on second
+    graph_store.upsert_entity.side_effect = Exception("DB connection lost")
+
+    consumer_worker = OutboxConsumerWorker(
+        nats_conn=nats_conn,
+        graph_store=graph_store,
+        vector_store=vector_store,
+        embedding_provider=embedding_provider,
+    )
+    consumer_worker._dlq_producer = AsyncMock()
+
+    # Mock raw messages
+    entity_msg1 = AsyncMock()
+    entity_msg2 = AsyncMock()
+
+    ws_id = str(uuid.uuid4())
+    ent_id = str(uuid.uuid4())
+    src_id = str(uuid.uuid4())
+
+    payload1 = EntityUpsertEvent(
+        workspace_id=ws_id,
+        id=ent_id,
+        source_id=src_id,
+        entity_type="otel_service",
+        name="service://checkout",
+        display_name="checkout",
+        metadata={},
+    )
+    payload2 = EntityUpsertEvent(
+        workspace_id=ws_id,
+        id=ent_id,
+        source_id=src_id,
+        entity_type="otel_service",
+        name="service://checkout-updated",
+        display_name="checkout updated",
+        metadata={},
+    )
+
+    entity_msg1.payload = payload1
+    entity_msg1.subject = "outbox.entity.upsert"
+    entity_msg2.payload = payload2
+    entity_msg2.subject = "outbox.entity.upsert"
+
+    consumer_worker._entity_consumer = AsyncMock()
+
+    # Simulate iterating over two messages
+    async def fake_entity_iter():
+        yield entity_msg1
+        yield entity_msg2
+
+    consumer_worker._entity_consumer.__aiter__ = lambda self: fake_entity_iter()
+
+    # Execute consumer function once (processes both messages)
+    await consumer_worker._consume_entities()
+
+    # Verify first message failed, parked entity, sent to DLQ, and termed
+    assert uuid.UUID(ent_id) in consumer_worker._parked_entities
+
+    # DLQ producer should be called twice (once for failure, once for parked skip)
+    assert consumer_worker._dlq_producer.publish.call_count == 2
+
+    # First DLQ call
+    subject1, dlq_msg1 = consumer_worker._dlq_producer.publish.call_args_list[0][0]
+    assert subject1 == "ingest.dlq.outbox_entity"
+    assert "Processing failed: DB connection lost" in dlq_msg1.error
+
+    # Second DLQ call (parked skip)
+    subject2, dlq_msg2 = consumer_worker._dlq_producer.publish.call_args_list[1][0]
+    assert subject2 == "ingest.dlq.outbox_entity"
+    assert "is parked due to previous failure" in dlq_msg2.error
+
+    # Verify both messages were termed (removed from queue to avoid retry loop since we DLQ'd them)
+    entity_msg1.term.assert_called_once()
+    entity_msg2.term.assert_called_once()
+
+    # Verify neither was acked
+    entity_msg1.ack.assert_not_called()
+    entity_msg2.ack.assert_not_called()

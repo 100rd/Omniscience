@@ -31,6 +31,7 @@ from omniscience_core.auth.middleware import get_current_token, require_scope
 from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
+from pydantic import BaseModel, Field
 
 from omniscience_server.as_of import (
     INVALID_TIMEZONE_CODE,
@@ -156,6 +157,40 @@ async def resolve_incident(
             status_code=400,
             detail={"code": "bad_request", "message": msg},
         ) from exc
+
+
+class IncidentFeedback(BaseModel):
+    """User feedback on an incident resolution."""
+    predicted_confidence: float = Field(ge=0.0, le=1.0)
+    true_label: int = Field(description="1 if correct, 0 if incorrect", ge=0, le=1)
+
+
+@router.post(
+    "/incidents/{alert_id:path}/feedback",
+    summary="Submit user feedback on a resolved incident for calibration",
+    status_code=204,
+)
+async def submit_feedback(
+    alert_id: str,
+    feedback: IncidentFeedback,
+    request: Request,
+    token: ApiToken = _current_token_dep,
+) -> None:
+    """Collects user feedback to calibrate the confidence_score model."""
+    workspace_id = get_workspace_id(token)
+    if workspace_id is None:
+        raise HTTPException(status_code=403, detail="Workspace-scoped token required")
+
+    # In a real implementation, this would persist the feedback to the database
+    # For now, we emit a structured log event that can be aggregated
+    log.info(
+        "incident_feedback_collected",
+        alert_id=unquote(alert_id),
+        workspace_id=str(workspace_id),
+        predicted_confidence=feedback.predicted_confidence,
+        true_label=feedback.true_label,
+        timestamp=datetime.utcnow().isoformat() + "Z",
+    )
 
 
 __all__ = ["router"]

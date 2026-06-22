@@ -96,6 +96,7 @@ class EntityUpsertEvent(BaseModel):
     name: str = Field(..., description="Canonical FQN or URI name.")
     display_name: str = Field(..., description="Short display name.")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata dictionary.")
+    version: int | None = Field(None, description="Event sequence number or version for idempotency.")
 
 
 class EdgeUpsertEvent(BaseModel):
@@ -107,3 +108,4 @@ class EdgeUpsertEvent(BaseModel):
     target_entity_id: str = Field(..., description="Target entity UUID string.")
     edge_type: str = Field(..., description="Edge kind (e.g. cross_ref).")
     metadata: dict[str, Any] = Field(default_factory=dict, description="Metadata dictionary.")
+    version: int | None = Field(None, description="Event sequence number or version for idempotency.")

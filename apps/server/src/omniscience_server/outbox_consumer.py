@@ -7,8 +7,8 @@ import hashlib
 import uuid
 
 import structlog
-from omniscience_core.queue import NatsConnection, QueueConsumer
-from omniscience_core.queue.messages import EdgeUpsertEvent, EntityUpsertEvent
+from omniscience_core.queue import NatsConnection, QueueConsumer, QueueProducer
+from omniscience_core.queue.messages import DLQMessage, EdgeUpsertEvent, EntityUpsertEvent
 from omniscience_core.storage.graph import EdgeUpsert, EntityUpsert, GraphStore
 from omniscience_core.storage.vector import VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
@@ -36,10 +36,17 @@ class OutboxConsumerWorker:
         self._entity_task: asyncio.Task[None] | None = None
         self._edge_task: asyncio.Task[None] | None = None
 
+        # Park-the-entity tracking
+        self._parked_entities: set[uuid.UUID] = set()
+        self._parked_edges: set[uuid.UUID] = set()
+        self._dlq_producer: QueueProducer | None = None
+
     async def start(self) -> None:
         """Start the outbox consumer tasks."""
         self._running = True
         log.info("outbox_consumer_worker_starting")
+
+        self._dlq_producer = QueueProducer(self._nats_conn.jetstream)
 
         self._entity_consumer = QueueConsumer(
             js=self._nats_conn.jetstream,
@@ -78,6 +85,24 @@ class OutboxConsumerWorker:
 
         log.info("outbox_consumer_worker_stopped")
 
+    async def _route_to_dlq(self, msg, dlq_subject: str, error_msg: str) -> None:
+        """Route a message to the DLQ and term it."""
+        if not self._dlq_producer:
+            return
+
+        try:
+            dlq_msg = DLQMessage(
+                original_subject=msg.subject,
+                original_payload=msg.payload.model_dump_json() if hasattr(msg.payload, "model_dump_json") else str(msg.payload),
+                error=error_msg,
+                attempt_count=1,
+            )
+            await self._dlq_producer.publish(dlq_subject, dlq_msg)
+            await msg.term()
+        except Exception as exc:
+            log.error("outbox_dlq_publish_failed", error=str(exc))
+            await msg.nak()
+
     async def _consume_entities(self) -> None:
         """Loop to consume entity upsert events."""
         if not self._entity_consumer:
@@ -87,6 +112,17 @@ class OutboxConsumerWorker:
             async for msg in self._entity_consumer:
                 try:
                     event: EntityUpsertEvent = msg.payload
+                    entity_id = uuid.UUID(event.id)
+
+                    if entity_id in self._parked_entities:
+                        log.warning("outbox_entity_parked_skip", entity_id=str(entity_id))
+                        await self._route_to_dlq(
+                            msg,
+                            dlq_subject="ingest.dlq.outbox_entity",
+                            error_msg=f"Entity {entity_id} is parked due to previous failure",
+                        )
+                        continue
+
                     workspace_id = (
                         uuid.UUID(event.workspace_id)
                         if event.workspace_id
@@ -95,13 +131,14 @@ class OutboxConsumerWorker:
 
                     # 1. Update Neo4j
                     entity_upsert = EntityUpsert(
-                        id=uuid.UUID(event.id),
+                        id=entity_id,
                         source_id=uuid.UUID(event.source_id),
                         entity_type=event.entity_type,
                         name=event.name,
                         display_name=event.display_name,
                         chunk_id=None,
                         metadata=event.metadata,
+                        version=event.version,
                     )
                     await self._graph_store.upsert_entity(
                         entity=entity_upsert,
@@ -138,12 +175,21 @@ class OutboxConsumerWorker:
                         content_hash=content_hash,
                         metadata={"workspace_id": str(workspace_id)},
                         chunks=[chunk],
+                        version=event.version,
                     )
 
                     await msg.ack()
                 except Exception as exc:
                     log.error("outbox_consume_entity_failed", error=str(exc))
-                    await msg.nak()
+                    if 'entity_id' in locals():
+                        self._parked_entities.add(entity_id)
+                        await self._route_to_dlq(
+                            msg,
+                            dlq_subject="ingest.dlq.outbox_entity",
+                            error_msg=f"Processing failed: {exc}",
+                        )
+                    else:
+                        await msg.nak()
         except asyncio.CancelledError:
             pass
 
@@ -156,6 +202,29 @@ class OutboxConsumerWorker:
             async for msg in self._edge_consumer:
                 try:
                     event: EdgeUpsertEvent = msg.payload
+                    edge_id = uuid.UUID(event.id)
+                    source_entity_id = uuid.UUID(event.source_entity_id)
+                    target_entity_id = uuid.UUID(event.target_entity_id)
+
+                    if edge_id in self._parked_edges:
+                        log.warning("outbox_edge_parked_skip", edge_id=str(edge_id))
+                        await self._route_to_dlq(
+                            msg,
+                            dlq_subject="ingest.dlq.outbox_edge",
+                            error_msg=f"Edge {edge_id} is parked due to previous failure",
+                        )
+                        continue
+
+                    if source_entity_id in self._parked_entities or target_entity_id in self._parked_entities:
+                        log.warning("outbox_edge_skip_parked_entity", edge_id=str(edge_id))
+                        self._parked_edges.add(edge_id)
+                        await self._route_to_dlq(
+                            msg,
+                            dlq_subject="ingest.dlq.outbox_edge",
+                            error_msg=f"Edge {edge_id} involves parked entities",
+                        )
+                        continue
+
                     workspace_id = (
                         uuid.UUID(event.workspace_id)
                         if event.workspace_id
@@ -164,10 +233,11 @@ class OutboxConsumerWorker:
 
                     # 1. Update Neo4j
                     edge_upsert = EdgeUpsert(
-                        source_entity_id=uuid.UUID(event.source_entity_id),
-                        target_entity_id=uuid.UUID(event.target_entity_id),
+                        source_entity_id=source_entity_id,
+                        target_entity_id=target_entity_id,
                         edge_type=event.edge_type,
                         metadata=event.metadata,
+                        version=event.version,
                     )
                     await self._graph_store.upsert_edge(
                         edge=edge_upsert,
@@ -177,6 +247,14 @@ class OutboxConsumerWorker:
                     await msg.ack()
                 except Exception as exc:
                     log.error("outbox_consume_edge_failed", error=str(exc))
-                    await msg.nak()
+                    if 'edge_id' in locals():
+                        self._parked_edges.add(edge_id)
+                        await self._route_to_dlq(
+                            msg,
+                            dlq_subject="ingest.dlq.outbox_edge",
+                            error_msg=f"Processing failed: {exc}",
+                        )
+                    else:
+                        await msg.nak()
         except asyncio.CancelledError:
             pass

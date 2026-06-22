@@ -428,6 +428,7 @@ class QdrantVectorStore:
         metadata: dict[str, Any],
         chunks: list[ChunkPayload],
         ingestion_run_id: uuid.UUID | None = None,
+        version: int | None = None,
     ) -> UpsertOutcome:
         """Atomically upsert a document and its chunks into Qdrant.
 
@@ -448,6 +449,25 @@ class QdrantVectorStore:
         is rejected at this layer per ADR-0006 §ACL carry-forward.
         """
         workspace_id = _extract_workspace_id(metadata)
+
+        checkpoint_id = None
+        if version is not None:
+            checkpoint_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"checkpoint_{source_id}"))
+            points = await self._qc.retrieve(
+                collection_name=self._collection_name,
+                ids=[checkpoint_id],
+                with_payload=True
+            )
+            if points and points[0].payload:
+                existing_version = points[0].payload.get("version")
+                if existing_version is not None and existing_version >= version:
+                    return UpsertOutcome(
+                        action="unchanged",
+                        document_id=uuid.uuid4(),
+                        chunks_written=0,
+                        doc_version=0,
+                    )
+
         existing = await self._find_document(
             workspace_id=workspace_id,
             source_id=source_id,
@@ -471,6 +491,8 @@ class QdrantVectorStore:
             metadata=metadata,
             chunks=chunks,
             ingestion_run_id=ingestion_run_id,
+            checkpoint_id=checkpoint_id,
+            version=version,
         )
 
     async def _write_document(
@@ -486,6 +508,8 @@ class QdrantVectorStore:
         metadata: dict[str, Any],
         chunks: list[ChunkPayload],
         ingestion_run_id: uuid.UUID | None,
+        checkpoint_id: str | None,
+        version: int | None,
     ) -> UpsertOutcome:
         """Create or replace the document's chunks as a single logical batch.
 
@@ -522,6 +546,19 @@ class QdrantVectorStore:
             )
             for chunk in chunks
         ]
+        if checkpoint_id and version is not None:
+            points.append(
+                qm.PointStruct(
+                    id=checkpoint_id,
+                    vector={NAMED_VECTOR_DENSE_PRIMARY: [0.0] * self._embedding_provider.dim},
+                    payload={
+                        "is_checkpoint": True,
+                        "source_id": str(source_id),
+                        "version": version,
+                        "workspace_id": str(workspace_id)
+                    }
+                )
+            )
         if points:
             await self._qc.upsert(collection_name=self._collection_name, points=points, wait=True)
         return UpsertOutcome(

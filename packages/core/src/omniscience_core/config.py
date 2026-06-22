@@ -105,10 +105,9 @@ class Settings(BaseSettings):
     storage_vector_backend: str = Field(
         default="qdrant",
         description=(
-            "Vector-store backend. Only 'qdrant' is supported as of v0.2 "
-            "(pgvector was removed at the #105 cutover). The field is kept "
-            "for forward compatibility should additional backends land; any "
-            "other value is rejected at startup. See ADR-0006."
+            "Vector-store backend. "
+            "The field is kept for forward compatibility should additional backends land; "
+            "any other value is rejected at startup. See ADR-0006."
         ),
     )
     qdrant_host: str = Field(
@@ -203,10 +202,9 @@ class Settings(BaseSettings):
     storage_graph_backend: str = Field(
         default="neo4j",
         description=(
-            "Graph-store backend. Only 'neo4j' is supported as of v0.2 "
-            "(pgvector was removed at the #105 cutover). The field is kept "
-            "for forward compatibility should additional backends land; any "
-            "other value is rejected at startup. See ADR-0005."
+            "Graph-store backend. "
+            "The field is kept for forward compatibility should additional backends land; "
+            "any other value is rejected at startup. See ADR-0005."
         ),
     )
 

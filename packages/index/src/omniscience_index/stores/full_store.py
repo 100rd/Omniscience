@@ -1,0 +1,106 @@
+"""FullStore: A composite store implementing StoreContract for Full-mode."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timedelta
+from typing import Any
+
+from omniscience_core.storage.contract import StoreContract
+from omniscience_core.storage.graph import (
+    EdgeUpsert,
+    EntityNodeView,
+    EntityUpsert,
+    GraphResultView,
+    GraphStore,
+)
+from omniscience_core.storage.vector import (
+    ChunkPayload,
+    UpsertOutcome,
+    VectorStore,
+)
+
+
+class FullStore(StoreContract):
+    """Composite store delegating to distinct Vector and Graph backends."""
+
+    def __init__(self, vector_store: VectorStore, graph_store: GraphStore) -> None:
+        self._vector = vector_store
+        self._graph = graph_store
+
+    # --- VectorStore ---
+    async def upsert_chunks(self, *, source_id: uuid.UUID, external_id: str, uri: str, title: str | None, content_hash: str, metadata: dict[str, Any], chunks: list[ChunkPayload], ingestion_run_id: uuid.UUID | None = None, version: int | None = None) -> UpsertOutcome:
+        return await self._vector.upsert_chunks(source_id=source_id, external_id=external_id, uri=uri, title=title, content_hash=content_hash, metadata=metadata, chunks=chunks, ingestion_run_id=ingestion_run_id, version=version)
+
+    async def delete_by_document(self, *, source_id: uuid.UUID, external_id: str, workspace_id: uuid.UUID | None = None) -> bool:
+        return await self._vector.delete_by_document(source_id=source_id, external_id=external_id, workspace_id=workspace_id)
+
+    async def delete_tombstoned(self, older_than: timedelta) -> int:
+        return await self._vector.delete_tombstoned(older_than)
+
+    async def search(self, *, request: Any, workspace_id: uuid.UUID, as_of: datetime | None = None) -> Any:
+        return await self._vector.search(request=request, workspace_id=workspace_id, as_of=as_of)
+
+    async def count(self, *, source_id: uuid.UUID, as_of: datetime | None = None) -> int:
+        return await self._vector.count(source_id=source_id, as_of=as_of)
+
+    async def count_chunks(self, *, workspace_id: uuid.UUID, source_id: uuid.UUID | None = None, as_of: datetime | None = None) -> int:
+        return await self._vector.count_chunks(workspace_id=workspace_id, source_id=source_id, as_of=as_of)
+
+    async def count_chunks_by_source(self, *, workspace_id: uuid.UUID, as_of: datetime | None = None) -> dict[str, int]:
+        return await self._vector.count_chunks_by_source(workspace_id=workspace_id, as_of=as_of)
+
+    async def enumerate_chunks(self, *, workspace_id: uuid.UUID, metadata_key: str, metadata_value: str, source_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
+        return await self._vector.enumerate_chunks(workspace_id=workspace_id, metadata_key=metadata_key, metadata_value=metadata_value, source_id=source_id)
+
+    async def count_enumerate(self, *, workspace_id: uuid.UUID, metadata_key: str, metadata_value: str, source_id: uuid.UUID | None = None) -> int:
+        return await self._vector.count_enumerate(workspace_id=workspace_id, metadata_key=metadata_key, metadata_value=metadata_value, source_id=source_id)
+
+    # --- GraphStore ---
+    async def upsert_graph(self, *, entities: list[EntityUpsert], edges: list[EdgeUpsert], workspace_id: uuid.UUID) -> None:
+        return await self._graph.upsert_graph(entities=entities, edges=edges, workspace_id=workspace_id)
+
+    async def upsert_entity(self, *, entity: EntityUpsert, workspace_id: uuid.UUID) -> None:
+        return await self._graph.upsert_entity(entity=entity, workspace_id=workspace_id)
+
+    async def upsert_edge(self, *, edge: EdgeUpsert, workspace_id: uuid.UUID) -> None:
+        return await self._graph.upsert_edge(edge=edge, workspace_id=workspace_id)
+
+    async def upsert_edge_by_name(self, *, source_name: str, target_name: str, edge_type: str, workspace_id: uuid.UUID, properties: dict[str, Any] | None = None) -> None:
+        return await self._graph.upsert_edge_by_name(source_name=source_name, target_name=target_name, edge_type=edge_type, workspace_id=workspace_id, properties=properties)
+
+    async def delete_tombstoned_graph(self) -> int:
+        return await self._graph.delete_tombstoned_graph()
+
+    async def resolve_pending_stubs(self, *, workspace_id: uuid.UUID) -> int:
+        return await self._graph.resolve_pending_stubs(workspace_id=workspace_id)
+
+    async def get_entity(self, *, name: str, workspace_id: uuid.UUID) -> EntityNodeView | None:
+        return await self._graph.get_entity(name=name, workspace_id=workspace_id)
+
+    async def find_related(self, *, name: str, edge_type: str | None = None, direction: str = "both", max_depth: int = 1, workspace_id: uuid.UUID) -> GraphResultView:
+        return await self._graph.find_related(name=name, edge_type=edge_type, direction=direction, max_depth=max_depth, workspace_id=workspace_id)
+
+    async def traverse(self, *, start_name: str, end_name: str, max_depth: int = 3, workspace_id: uuid.UUID) -> GraphResultView:
+        return await self._graph.traverse(start_name=start_name, end_name=end_name, max_depth=max_depth, workspace_id=workspace_id)
+
+    async def list_entities(self, *, workspace_id: uuid.UUID, limit: int = 100, offset: int = 0) -> list[EntityNodeView]:
+        return await self._graph.list_entities(workspace_id=workspace_id, limit=limit, offset=offset)
+
+    async def find_entities_by_metadata(self, *, key: str, value: Any, workspace_id: uuid.UUID) -> list[EntityNodeView]:
+        return await self._graph.find_entities_by_metadata(key=key, value=value, workspace_id=workspace_id)
+
+    async def get_all_entities(self, *, workspace_id: uuid.UUID) -> list[EntityNodeView]:
+        return await self._graph.get_all_entities(workspace_id=workspace_id)
+
+    async def count_entities(self, *, workspace_id: uuid.UUID) -> int:
+        return await self._graph.count_entities(workspace_id=workspace_id)
+
+    async def count_entities_by_kind(self, *, workspace_id: uuid.UUID) -> dict[str, int]:
+        return await self._graph.count_entities_by_kind(workspace_id=workspace_id)
+
+    async def count_edges_by_type(self, *, workspace_id: uuid.UUID) -> dict[str, int]:
+        return await self._graph.count_edges_by_type(workspace_id=workspace_id)
+
+    async def count_entities_by_source(self, *, workspace_id: uuid.UUID) -> dict[str, int]:
+        return await self._graph.count_entities_by_source(workspace_id=workspace_id)

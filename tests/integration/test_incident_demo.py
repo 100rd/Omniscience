@@ -63,7 +63,6 @@ from omniscience_core.storage.graph import (
 )
 from omniscience_server.incidents import (
     CONFIDENCE_PR_NO_TEMPORAL_MATCH,
-    CONFIDENCE_PR_TEMPORAL_MATCH,
     PR_RECENCY_WINDOW_SECONDS,
     mcp_resolve_incident,
 )
@@ -387,21 +386,21 @@ class TestIncidentDemoEndToEnd:
         lowers nominally-high scores.
         """
         app, _, ws_a, _ = _build_app_with_both_workspaces()
+
+        # We must evaluate as of the fixture's anchor time, otherwise the
+        # probabilistic model's time-decay will plummet the confidence score
+        # since the static fixture is from April 2026.
+        anchor_time = datetime.fromisoformat(ws_a["alert_fired_at"])
+
         result = await mcp_resolve_incident(
             app=app,
             alert_id=ws_a["alert"]["name"],
             workspace_id=uuid.UUID(ws_a["workspace_id"]),
+            as_of=anchor_time,
         )
         score = float(result["confidence_score"])
         assert score >= _DEMO_CONFIDENCE_FLOOR, (
             f"demo path must return confidence >= {_DEMO_CONFIDENCE_FLOOR}; got {score}"
-        )
-        # Document the v0.1 actual: a 4h-old PR yields the temporal-match rung.
-        assert score == CONFIDENCE_PR_TEMPORAL_MATCH, (
-            f"v0.1 heuristic returns CONFIDENCE_PR_TEMPORAL_MATCH (0.9) for a "
-            f"PR within the 24h window; got {score}.  If #155's calibrated "
-            f"model lands and lowers this, drop the equality check but keep "
-            f"the >= {_DEMO_CONFIDENCE_FLOOR} floor."
         )
         # And it isn't the no-temporal-match rung — sanity check the
         # 7d-old PR did not win the tie-break.

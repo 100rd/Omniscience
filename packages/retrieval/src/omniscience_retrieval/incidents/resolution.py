@@ -293,6 +293,7 @@ def compute_confidence(
     *,
     alert: EntityNodeView,
     classified: ClassifiedNeighbours,
+    as_of: datetime | None = None,
 ) -> float:
     """Probabilistic confidence calculation (issue #315).
 
@@ -307,6 +308,7 @@ def compute_confidence(
         alert=alert,
         classified=classified,
         max_depth=3,  # default max depth fallback
+        as_of=as_of,
     )
 
 
@@ -337,6 +339,7 @@ def score_incident(
     classified: ClassifiedNeighbours,
     max_depth: int,
     config: Any,  # IncidentScoringConfig | None — avoid circular import at type level
+    as_of: datetime | None = None,
 ) -> float:
     """Pick the calibrated path or fall back to the v0.1 ladder.
 
@@ -347,7 +350,7 @@ def score_incident(
     from omniscience_retrieval.incidents.scoring import apply_weights, compute_components
 
     if config is None or config.weights is None:
-        return compute_confidence(alert=alert, classified=classified)
+        return compute_confidence(alert=alert, classified=classified, as_of=as_of)
     components = compute_components(
         alert_valid_from=alert.valid_from,
         pr_valid_from=(

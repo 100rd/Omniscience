@@ -43,7 +43,7 @@ class PagerDutyTeam(BaseModel):
     """A PagerDuty team — owns services and escalation policies."""
 
     id: str
-    """Stable PagerDuty team ID (e.g. ``PXXXXXX``)."""
+    """Stable PagerDuty team ID (e.g. ``P123456``)."""
 
     name: str
     """Human-readable team name."""

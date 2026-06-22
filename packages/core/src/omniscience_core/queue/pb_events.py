@@ -107,6 +107,8 @@ def serialize_entity_upsert_event(event: Any) -> bytes:
     buf += encode_string(5, event.name)
     buf += encode_string(6, event.display_name)
     buf += encode_string(7, json.dumps(event.metadata))
+    if getattr(event, "version", None) is not None:
+        buf += encode_int(8, event.version)
     return buf
 
 
@@ -126,6 +128,7 @@ def deserialize_entity_upsert_event(data: bytes) -> dict[str, Any]:
         "name": get_str_field(fields, 5),
         "display_name": get_str_field(fields, 6),
         "metadata": metadata,
+        "version": fields[8][0] if 8 in fields else None,
     }
 
 
@@ -137,6 +140,8 @@ def serialize_edge_upsert_event(event: Any) -> bytes:
     buf += encode_string(4, str(event.target_entity_id))
     buf += encode_string(5, event.edge_type)
     buf += encode_string(6, json.dumps(event.metadata))
+    if getattr(event, "version", None) is not None:
+        buf += encode_int(7, event.version)
     return buf
 
 
@@ -155,6 +160,7 @@ def deserialize_edge_upsert_event(data: bytes) -> dict[str, Any]:
         "target_entity_id": get_str_field(fields, 4),
         "edge_type": get_str_field(fields, 5),
         "metadata": metadata,
+        "version": fields[7][0] if 7 in fields else None,
     }
 
 

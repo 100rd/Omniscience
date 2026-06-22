@@ -18,6 +18,7 @@ message EntityUpsertEvent {
   string name = 5;
   string display_name = 6;
   string metadata_json = 7;
+  optional int64 version = 8;
 }
 
 message EdgeUpsertEvent {
@@ -27,6 +28,7 @@ message EdgeUpsertEvent {
   string target_entity_id = 4;
   string edge_type = 5;
   string metadata_json = 6;
+  optional int64 version = 7;
 }
 
 message DLQMessage {

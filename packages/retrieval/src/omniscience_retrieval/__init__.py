@@ -18,10 +18,6 @@ Prior to v0.2 this package also exposed:
 - ``RetrievalService``: the hybrid pgvector+BM25 retrieval service.
 - ``QueryRewriter``, ``OllamaReranker``, ``NoopReranker``, and the
   ``strategies`` sub-package.
-
-All of the above were removed at the #105 cutover when Neo4j + Qdrant
-became the only supported backends.  See ``CHANGELOG.md`` §0.2.0 for
-upgrade notes.
 """
 
 from .federation import FederatedSearch

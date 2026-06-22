@@ -242,7 +242,7 @@ class TestPostmortemAcceptance:
         assert any("step-step-2-restart-pool-failed" in n for n in names), (
             f"failed-step FollowUp missing; got: {sorted(names)}"
         )
-        # TODO trigger phrase in the alert chunk_text promotes too
+        # Trigger phrase in the alert chunk_text promotes too
         assert any("alert-todo" in n for n in names), (
             f"TODO-phrase FollowUp missing; got: {sorted(names)}"
         )

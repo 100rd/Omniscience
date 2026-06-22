@@ -77,8 +77,8 @@ async def mcp_search(
 ) -> dict[str, Any]:
     """Execute retrieval and return hits with citations.
 
-    As of v0.2 (#105 cutover) the canonical path is the
-    ``GraphRAGComposer`` (Neo4j + Qdrant).  Callers that cannot supply
+    The canonical path is the
+    ``GraphRAGComposer``.  Callers that cannot supply
     a ``workspace_id`` receive a ``RuntimeError`` — workspace scoping
     is a non-negotiable invariant (#117).
 
@@ -87,11 +87,6 @@ async def mcp_search(
     the vector step is unfiltered on time and scoped only by the
     chunk/source ids the graph traversal returned.  Qdrant's own
     ``as_of`` filter lands in #134.
-
-    The legacy ``RetrievalService`` (pgvector + BM25) was removed in
-    v0.2; ``app.state.retrieval_service`` is preserved as an optional
-    escape hatch for operators that wire a custom federation-peer
-    shim, but it is never populated by default.
     """
     normalised_as_of = enforce_utc(as_of)
     composer: GraphRAGComposer | None = getattr(app.state, "graph_rag_composer", None)

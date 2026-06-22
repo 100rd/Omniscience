@@ -4,8 +4,7 @@ Accepts a SearchRequest body, routes through the GraphRAG composer
 (Neo4j + Qdrant, ADR-0005/0006) when the caller's token carries a
 workspace, and returns a SearchResult.  Requires the ``search`` scope.
 
-Tokens without a workspace receive 503 — the legacy pgvector
-``RetrievalService`` was removed at the #105 cutover, and non-workspace
+Tokens without a workspace receive 503 — non-workspace
 retrieval has no supported default backend.
 """
 

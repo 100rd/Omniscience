@@ -227,6 +227,7 @@ class Neo4jGraphStore:
         entities: list[Any],
         edges: list[Any],
         snapshot_at: datetime | None = None,
+        version: int | None = None,
     ) -> None:
         """Persist a batch of entities+edges for one document (idempotent)."""
         workspace_id = self._workspace_from_entities(entities)
@@ -240,6 +241,7 @@ class Neo4jGraphStore:
                 edges,
                 self._bitemporal_enabled,
                 snap_iso,
+                version,
             )
         entities_end_dated, edges_end_dated = counts if counts is not None else (0, 0)
         if entities_end_dated:
@@ -283,9 +285,25 @@ class Neo4jGraphStore:
         edges: list[Any],
         bitemporal_enabled: bool,
         snapshot_at_iso: str | None,
+        version: int | None,
     ) -> tuple[int, int]:
         """Transaction body for :meth:`upsert_graph` (idempotent replace)."""
         now = datetime.now(UTC).isoformat()
+
+        if version is not None:
+            res = await tx.run(
+                "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version",
+                {"workspace_id": str(workspace_id), "source_id": str(source_id)}
+            )
+            record = await res.single()
+            if record is not None and record["version"] is not None and record["version"] >= version:
+                return 0, 0
+
+            await tx.run(
+                "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.updated_at = datetime($now)",
+                {"workspace_id": str(workspace_id), "source_id": str(source_id), "version": version, "now": now}
+            )
+
         entities_end_dated = 0
         edges_end_dated = 0
         if not bitemporal_enabled:
@@ -390,8 +408,24 @@ class Neo4jGraphStore:
             "now": now,
         }
         cypher = self._select_entity_upsert_cypher(params)
+
+        async def _run(tx: Any) -> None:
+            if getattr(entity, "version", None) is not None:
+                res = await tx.run(
+                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version",
+                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id)}
+                )
+                record = await res.single()
+                if record is not None and record["version"] is not None and record["version"] >= entity.version:
+                    return
+                await tx.run(
+                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.updated_at = datetime($now)",
+                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id), "version": entity.version, "now": now}
+                )
+            await tx.run(cypher, params)
+
         async with self._driver.session(database=self._config.database) as session:
-            await session.execute_write(_run_write_stmt, cypher, params)
+            await session.execute_write(_run)
 
     async def upsert_edge(
         self,
@@ -414,8 +448,25 @@ class Neo4jGraphStore:
             "now": now,
         }
         rendered = self._select_edge_upsert_cypher(params, edge_type)
+
+        async def _run(tx: Any) -> None:
+            if getattr(edge, "version", None) is not None and edge.metadata.get("source_id"):
+                source_id = str(edge.metadata["source_id"])
+                res = await tx.run(
+                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version",
+                    {"workspace_id": str(workspace_id), "source_id": source_id}
+                )
+                record = await res.single()
+                if record is not None and record["version"] is not None and record["version"] >= edge.version:
+                    return
+                await tx.run(
+                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.updated_at = datetime($now)",
+                    {"workspace_id": str(workspace_id), "source_id": source_id, "version": edge.version, "now": now}
+                )
+            await tx.run(rendered, params)
+
         async with self._driver.session(database=self._config.database) as session:
-            await session.execute_write(_run_write_stmt, rendered, params)
+            await session.execute_write(_run)
 
     async def upsert_edge_by_name(
         self,

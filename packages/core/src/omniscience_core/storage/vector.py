@@ -1,9 +1,7 @@
 """``VectorStore`` protocol: backend-neutral chunk persistence and search.
 
 This module defines the typed contract that the Qdrant adapter
-(``omniscience_index.stores.qdrant_store``) satisfies.  Prior to v0.2
-the pgvector adapter (``omniscience_retrieval.adapters.pgvector_vector``)
-also satisfied this contract; it was removed at the #105 cutover.
+(``omniscience_index.stores.qdrant_store``) and PostgresOnlyStore satisfy.
 
 Design rules (ADR-0006 + issue #117)
 ------------------------------------
@@ -145,6 +143,7 @@ class VectorStore(Protocol):
         metadata: dict[str, Any],
         chunks: list[ChunkPayload],
         ingestion_run_id: uuid.UUID | None = None,
+        version: int | None = None,
     ) -> UpsertOutcome:
         """Atomically create or update a document and its chunks.
 

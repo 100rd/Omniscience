@@ -9,6 +9,15 @@ Re-exports the public surface from the submodules so callers can use:
     )
 """
 
+from .calibration import (
+    CalibrationPipeline,
+    IncidentLabel,
+    calculate_watermark_weight,
+    collect_labeled_incidents,
+    compute_brier_score,
+    compute_ece,
+    fit_isotonic_regression,
+)
 from .resolution import (
     ALERT_NOT_FOUND_CODE,
     CONFIDENCE_ALERT_ONLY,
@@ -85,7 +94,9 @@ __all__ = [
     "SETTINGS_KEY",
     "WEIGHT_SUM_TOLERANCE",
     "AlertSummary",
+    "CalibrationPipeline",
     "FindSimilarIncidentsResponse",
+    "IncidentLabel",
     "IncidentScoringConfig",
     "IncidentScoringResponse",
     "IncidentScoringUpdateRequest",
@@ -98,10 +109,15 @@ __all__ = [
     "SlackThreadSummary",
     "apply_weights",
     "build_features",
+    "calculate_watermark_weight",
     "classify_neighbours",
+    "collect_labeled_incidents",
+    "compute_brier_score",
     "compute_components",
     "compute_confidence",
+    "compute_ece",
     "discover_candidates",
+    "fit_isotonic_regression",
     "load_workspace_config",
     "pick_responsible_pr",
     "pick_target_resource",

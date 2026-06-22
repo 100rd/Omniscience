@@ -1,9 +1,7 @@
 """``GraphStore`` protocol: backend-neutral entity/edge persistence and traversal.
 
 This module defines the typed contract that the Neo4j adapter
-(``omniscience_index.stores.neo4j_store``) satisfies.  Prior to v0.2
-the pgvector adapter (``omniscience_retrieval.adapters.pgvector_graph``)
-also satisfied this contract; it was removed at the #105 cutover.
+(``omniscience_index.stores.neo4j_store``) and PostgresOnlyStore satisfy.
 
 Design rules (ADR-0005 + issue #117)
 ------------------------------------
@@ -95,6 +93,7 @@ class EntityUpsert:
     display_name: str
     chunk_id: uuid.UUID | None
     metadata: dict[str, Any] = field(default_factory=dict)
+    version: int | None = None
 
 
 @dataclass(slots=True)
@@ -105,6 +104,7 @@ class EdgeUpsert:
     target_entity_id: uuid.UUID
     edge_type: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    version: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -128,6 +128,7 @@ class GraphStore(Protocol):
         entities: list[Any],
         edges: list[Any],
         snapshot_at: datetime | None = None,
+        version: int | None = None,
     ) -> None: ...
 
     async def upsert_entity(

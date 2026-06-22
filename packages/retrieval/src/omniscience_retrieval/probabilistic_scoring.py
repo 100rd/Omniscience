@@ -197,8 +197,8 @@ def calculate_probabilistic_incident_confidence(
         # Check if temporally matched
         is_matched = False
         if alert_time is not None and pr_time is not None and pr_time <= alert_time:
-            # check 2-hour window (7200 seconds)
-            is_matched = (alert_time - pr_time).total_seconds() <= 7200
+            # check 24-hour window (86400 seconds)
+            is_matched = (alert_time - pr_time).total_seconds() <= 86400
 
         base_p = 0.95 if is_matched else 0.65
         confidence = base_p * alert_rel * pr_rel * alert_decay * pr_decay
@@ -220,4 +220,5 @@ def calculate_probabilistic_incident_confidence(
         base_p = 0.15
         confidence = base_p * alert_rel * alert_decay
 
-    return max(0.0, min(1.0, confidence))
+    raw_confidence = max(0.0, min(1.0, confidence))
+    return calibrate_isotonic(raw_confidence)

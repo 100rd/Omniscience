@@ -137,7 +137,7 @@ def _extract_implicit_refs(block_body: str) -> list[str]:
     for ref_m in _PLAIN_REF.finditer(stripped):
         rtype = ref_m.group("rtype")
         rname = ref_m.group("rname")
-        # Exclude common false positives like "var.xxx", "local.xxx", "path.xxx"
+        # Exclude common false positives like "var.foo", "local.foo", "path.module"
         if rtype in ("var", "local", "locals", "path", "self", "each", "count", "terraform"):
             continue
         candidate = f"{rtype}.{rname}"

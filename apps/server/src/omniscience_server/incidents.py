@@ -164,6 +164,7 @@ async def mcp_resolve_incident(
             classified=classified,
             max_depth=clamped_depth,
             config=scoring_config,
+            as_of=normalised_as_of,
         )
         meta = _build_meta(confidence=confidence, config=scoring_config)
         similar_past = await _augment_with_similar_past(

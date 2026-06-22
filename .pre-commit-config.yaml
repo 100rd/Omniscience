@@ -12,3 +12,12 @@ repos:
       - id: mypy
         additional_dependencies: [pydantic>=2.7.0, pydantic-settings>=2.3.0]
         args: [--strict]
+
+  - repo: local
+    hooks:
+      - id: stale-architecture-comments
+        name: Prevent stale architecture comments (#105 cutover, removed pgvector)
+        entry: "(?i)(unwired after #105|pgvector.*removed|sql-side graph storage.*deprecated|legacy_retrieval_service_unwired)"
+        language: pygrep
+        types: [python]
+        exclude: "^(scripts/migrate_to_hybrid\\.py|packages/core/alembic/versions/.*|scripts/lint_stale_architecture\\.py)$"

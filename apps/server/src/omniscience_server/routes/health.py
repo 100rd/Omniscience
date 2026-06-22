@@ -27,7 +27,7 @@ router = APIRouter(tags=["ops"])
 async def _check_postgres() -> CheckStatus:
     """Verify PostgreSQL connectivity.
 
-    TODO(wave-2, issue-#2): Replace with a real asyncpg/SQLAlchemy ping.
+    Currently a placeholder (issue #2) until a real asyncpg/SQLAlchemy ping is added.
     """
     return "unchecked"
 

@@ -6,13 +6,13 @@ Computes config<->state drift via the pure engine
 ``omniscience_parsers.infra.compute_tf_drift`` (which walks the ``tfstate_of``
 graph: state-not-in-config / config-not-in-state / attribute divergence).
 
-Why a stub (and the TODO)
--------------------------
+Why a stub
+----------
 The engine is final and fully tested.  This endpoint is intentionally a thin
 exposure stub: it parses the Terraform config + state documents supplied IN THE
 REQUEST BODY, builds the infra graph in-process, and runs the engine.
 
-TODO(gap-c-wiring): switch to the persisted, Neo4j-backed ``tfstate_of`` graph
+Eventually it should switch to the persisted, Neo4j-backed ``tfstate_of`` graph
 once ``extract_infra_graph`` is wired into ingestion (it is not today).  The
 target shape is: resolve the caller's Terraform resources + tfstate instances
 from the graph store (workspace-scoped, like the other graph endpoints), hand
@@ -53,7 +53,7 @@ _search_dep: Any = Depends(require_scope(Scope.search))
 
 
 class TerraformDriftRequest(BaseModel):
-    """Config + state documents to diff (thin-stub input — see module TODO)."""
+    """Config + state documents to diff (thin-stub input — see module docstring)."""
 
     config_documents: list[str] = Field(
         default_factory=list,
@@ -75,7 +75,7 @@ async def compute_terraform_drift(body: TerraformDriftRequest) -> dict[str, Any]
 
     Fails closed on auth/scope via the ``require_scope`` dependency.  The drift
     classification itself is delegated to the pure engine so the same logic runs
-    here and (eventually) over the persisted graph — see the module TODO.
+    here and (eventually) over the persisted graph — see the module docstring.
     """
     tf_parser = TerraformParser()
     state_parser = TfStateParser()
