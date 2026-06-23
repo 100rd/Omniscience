@@ -261,23 +261,18 @@ def _should_use_graphrag(
 
 @dataclass(frozen=True, slots=True)
 class _AnchorStageResult:
-    """Outcome of the graph anchor stage."""
+    """Internal state passed from anchor stage to vector stage."""
 
-    #: True when the caller supplied an anchor hint.
-    anchor_requested: bool
+    candidate_source_ids: tuple[str, ...]
+    candidate_depths: tuple[int, ...]
+    centralities: dict[str, float]
+    candidate_parked: tuple[bool, ...]
     #: The anchor name passed (empty when ``anchor_requested`` is False).
     anchor_name: str
     #: True when the anchor entity resolved in the graph.
     anchor_hit: bool
-    #: Candidate ``source_id`` values derived from the anchor subgraph.
-    #: Order is stable and bounded by :data:`MAX_ANCHOR_CANDIDATES`.
-    candidate_source_ids: tuple[str, ...]
-    #: Depth of each candidate source (mirrors ``candidate_source_ids``
-    #: positionally).  Depth 0 is reserved for the seed's own source;
-    #: depth >= 1 for related entities.
-    candidate_depths: tuple[int, ...]
-    #: Centralities of each candidate source in the subgraph.
-    candidate_centralities: dict[str, float]
+    #: True when the caller supplied an anchor hint.
+    anchor_requested: bool
     #: Wall-clock duration of this stage in seconds.
     duration_s: float
 
@@ -316,12 +311,14 @@ class GraphRAGComposer:
         legacy_service: _LegacySearchCallable,
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         global_reconciler: Any | None = None,
+        is_entity_parked_fn: Any | None = None,
     ) -> None:
         self._graph_store = graph_store
         self._vector_store = vector_store
         self._legacy_service = legacy_service
         self._session_factory = session_factory
         self._global_reconciler = global_reconciler
+        self._is_entity_parked_fn = is_entity_parked_fn
         self._graphrag_active = _should_use_graphrag(graph_store, vector_store)
 
     @property
@@ -462,14 +459,7 @@ class GraphRAGComposer:
         workspace_id: uuid.UUID,
         as_of: datetime | None = None,
     ) -> _AnchorStageResult:
-        """Resolve the anchor entity (when supplied) and collect candidates.
-
-        ``as_of`` (issue #133) is forwarded to ``GraphStore.traverse``
-        so the anchor subgraph is the one that was valid at T.  When
-        ``None`` the traversal hits the ADR-0008 §5 hot-path; when set
-        it hits the bitemporal-predicate template.  See ADR-0008 §5 for
-        the cost/benefit of each path.
-        """
+        """Resolve the anchor entity (when supplied) and collect candidates."""
         stage_start = time.monotonic()
         anchor_name = _extract_anchor(request)
 
@@ -484,7 +474,8 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
-                candidate_centralities={},
+                centralities={},
+                candidate_parked=(),
                 duration_s=duration,
             )
 
@@ -499,65 +490,51 @@ class GraphRAGComposer:
             all_entity_names = [graph_result.seed.name] + [n.name for n in graph_result.related]
             valid_entity_names = await self._validate_entities(all_entity_names, workspace_id)
 
-            # If the seed entity is not valid/active, it's an anchor miss!
             if graph_result.seed.name not in valid_entity_names:
-                log.warning(
-                    "seed_entity_inactive_or_missing_in_postgres", name=graph_result.seed.name
-                )
-                _ANCHOR_HIT_TOTAL.labels(outcome="miss").inc()
-                duration = time.monotonic() - stage_start
-                _STAGE_DURATION.labels(stage="anchor").observe(duration)
-                _CANDIDATE_SET_SIZE.observe(0)
+                log.warning("graph_rag_traversal_empty", entity=anchor_name, workspace_id=str(workspace_id))
                 return _AnchorStageResult(
                     anchor_requested=True,
                     anchor_name=anchor_name,
                     anchor_hit=False,
                     candidate_source_ids=(),
                     candidate_depths=(),
-                    candidate_centralities={},
-                    duration_s=duration,
+                    centralities={},
+                    candidate_parked=(),
+                    duration_s=time.monotonic() - stage_start,
                 )
 
-            # Otherwise, filter related entities and edges
-            graph_result.related = [
-                n for n in graph_result.related if n.name in valid_entity_names
-            ]
-            graph_result.edges = [
-                e
-                for e in graph_result.edges
-                if e.from_entity in valid_entity_names and e.to_entity in valid_entity_names
-            ]
+            if self._is_entity_parked_fn:
+                graph_result.seed.is_parked = self._is_entity_parked_fn(graph_result.seed.id)
+                for node in graph_result.related:
+                    node.is_parked = self._is_entity_parked_fn(node.id)
+
+            candidates, depths, centralities, parked = _collect_candidates(graph_result)
+            duration = time.monotonic() - stage_start
+            _STAGE_DURATION.labels(stage="anchor").observe(duration)
+            return _AnchorStageResult(
+                anchor_requested=True,
+                anchor_name=anchor_name,
+                anchor_hit=True,
+                candidate_source_ids=candidates,
+                candidate_depths=depths,
+                centralities=centralities,
+                candidate_parked=parked,
+                duration_s=duration,
+            )
         except ValueError:
-            # entity_not_found -> anchor miss (indistinguishable from
-            # cross-workspace by design in GraphStore contracts).
             _ANCHOR_HIT_TOTAL.labels(outcome="miss").inc()
             duration = time.monotonic() - stage_start
             _STAGE_DURATION.labels(stage="anchor").observe(duration)
-            _CANDIDATE_SET_SIZE.observe(0)
             return _AnchorStageResult(
                 anchor_requested=True,
                 anchor_name=anchor_name,
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
-                candidate_centralities={},
+                centralities={},
+                candidate_parked=(),
                 duration_s=duration,
             )
-
-        _ANCHOR_HIT_TOTAL.labels(outcome="hit").inc()
-        candidates, depths, centralities = _collect_candidates(graph_result)
-        duration = time.monotonic() - stage_start
-        _STAGE_DURATION.labels(stage="anchor").observe(duration)
-        _CANDIDATE_SET_SIZE.observe(len(candidates))
-        return _AnchorStageResult(
-            anchor_requested=True,
-            anchor_name=anchor_name,
-            anchor_hit=True,
-            candidate_source_ids=candidates,
-            candidate_depths=depths,
-            candidate_centralities=centralities,
-            duration_s=duration,
-        )
 
     # ------------------------------------------------------------------
     # Stage 2 — vector
@@ -571,40 +548,6 @@ class GraphRAGComposer:
         anchor: _AnchorStageResult,
         as_of: datetime | None = None,
     ) -> SearchResult:
-        """Run the vector search, scoped to anchor candidates when present.
-
-        The ``top_k`` is widened by :data:`CANDIDATE_EXPANSION_FACTOR`
-        so the merge stage has enough headroom to re-order.  The
-        ``sources`` filter is populated only when the anchor produced
-        candidates; otherwise the request is passed through unchanged.
-
-        ``as_of`` (issue #134) is forwarded to
-        :meth:`VectorStore.search` so the bitemporal predicate is
-        applied at the chunk-payload layer; cross-store consistency is
-        therefore mechanical — the candidate subgraph from the graph
-        anchor stage and the chunk filter from the vector stage both
-        reflect the world at ``as_of``.
-
-        Stage 3 (fix/push-sources-and-graphrag-sparse): the vector
-        stage now respects ``request.retrieval_strategy`` end-to-end.
-        :func:`_widen_request` preserves the strategy so the store
-        dispatch routes correctly:
-
-        - ``"hybrid"`` / ``"auto"`` → :meth:`QdrantVectorStore._search_hybrid_rrf`
-          (dense + sparse BM25, merged via RRF).
-          ``QueryStats.text_matches`` is set to the number of sparse hits,
-          giving MCP callers a reliable non-zero signal when keyword tokens
-          match.
-        - ``"keyword"`` → :meth:`QdrantVectorStore._search_sparse` (BM25 only).
-        - ``"structural"`` → :meth:`QdrantVectorStore._search_dense` (dense
-          only; graph-anchor source scoping is already applied via
-          ``request.sources`` by :func:`_widen_request`).
-
-        The ``text_matches`` value returned by the store is preserved
-        through ``_run_merge_stage`` and the ``model_copy`` in
-        :meth:`search`, so ``QueryStats.text_matches`` in the MCP
-        response reflects the real sparse-hit count.
-        """
         stage_start = time.monotonic()
         widened = _widen_request(request, anchor=anchor)
         result = await self._vector_store.search(
@@ -627,37 +570,48 @@ class GraphRAGComposer:
         vector_result: SearchResult,
         anchor: _AnchorStageResult,
     ) -> SearchResult:
-        """Blend graph affinity into the vector score and slice to top-k.
-
-        Deduplicates by ``chunk_id`` (a malformed adapter returning
-        the same chunk twice must not inflate top-k).  Stable order is
-        preserved for hits with equal merged scores.
-        """
         from omniscience_retrieval.probabilistic_scoring import (
             calculate_probabilistic_confidence,
             calculate_probabilistic_impact,
         )
 
         stage_start = time.monotonic()
-        affinity_by_source = _build_affinity_map(anchor)
-        depth_by_source = {
-            src_id: depth
-            for src_id, depth in zip(
-                anchor.candidate_source_ids, anchor.candidate_depths, strict=True
+        
+        # Unpack anchor results for O(1) lookup
+        if anchor.candidate_source_ids:
+            # Map source_id back to depth & parked status
+            anchor_depths = dict(
+                zip(anchor.candidate_source_ids, anchor.candidate_depths, strict=True)
             )
-        }
-        centrality_by_source = anchor.candidate_centralities or {}
+            anchor_parked = dict(
+                zip(anchor.candidate_source_ids, anchor.candidate_parked, strict=True)
+            )
+            graph_affinity = _build_affinity_map(anchor)
+        else:
+            anchor_depths = {}
+            anchor_parked = {}
+            graph_affinity = {}
 
         scored: list[tuple[float, float, float, int, Any]] = []
         seen_chunks: set[uuid.UUID] = set()
+
+        # Needs depth and centrality by source
+        depth_by_source = anchor_depths
+        centrality_by_source = anchor.centralities if anchor.centralities else {}
+
         for idx, hit in enumerate(vector_result.hits):
             if hit.chunk_id in seen_chunks:
                 continue
             seen_chunks.add(hit.chunk_id)
-            affinity = affinity_by_source.get(str(hit.source.id), MIN_AFFINITY)
-            merged_score = _linear_blend(vector_score=hit.score, graph_affinity=affinity)
 
             src_id_str = str(hit.source.id)
+            affinity = graph_affinity.get(src_id_str, 0.0)
+            merged_score = _linear_blend(
+                vector_score=hit.score,
+                graph_affinity=affinity,
+            )
+
+            is_parked = anchor_parked.get(src_id_str, False)
             depth = depth_by_source.get(src_id_str, 3)
             centrality = centrality_by_source.get(src_id_str, 0.0)
 
@@ -667,6 +621,7 @@ class GraphRAGComposer:
                 depth=depth,
                 as_of=request.as_of,
                 score_type="calibrated",
+                is_parked=is_parked,
             )
             impact_val = calculate_probabilistic_impact(
                 source=hit.source.type,
@@ -769,7 +724,7 @@ def _extract_anchor(request: SearchRequest) -> str:
 
 def _collect_candidates(
     graph_result: Any,
-) -> tuple[tuple[str, ...], tuple[int, ...], dict[str, float]]:
+) -> tuple[tuple[str, ...], tuple[int, ...], dict[str, float], tuple[bool, ...]]:
     """Extract candidate source IDs (and their depths) from a traversal.
 
     The seed entity's source counts as a depth-0 candidate; related
@@ -789,6 +744,7 @@ def _collect_candidates(
     seed_source = str(graph_result.seed.source)
     ids: list[str] = [seed_source]
     depths: list[int] = [0]
+    parked: list[bool] = [getattr(graph_result.seed, "is_parked", False)]
     seen: set[str] = {seed_source}
 
     kept_entity_names: set[str] = {graph_result.seed.name}
@@ -802,6 +758,7 @@ def _collect_candidates(
         seen.add(src)
         ids.append(src)
         depths.append(int(node.depth))
+        parked.append(getattr(node, "is_parked", False))
         kept_entity_names.add(node.name)
 
         if len(ids) >= MAX_ANCHOR_CANDIDATES:
@@ -827,7 +784,7 @@ def _collect_candidates(
         centralities.get(seed_src, 0.0), float(degrees.get(graph_result.seed.name, 0))
     )
 
-    return tuple(ids), tuple(depths), centralities
+    return tuple(ids), tuple(depths), centralities, tuple(parked)
 
 
 def _widen_request(

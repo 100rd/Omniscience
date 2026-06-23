@@ -133,18 +133,22 @@ def calculate_probabilistic_confidence(
     as_of: datetime | None = None,
     score_type: str = "calibrated",
     calibration_method: str = "platt",
+    is_parked: bool = False,
 ) -> float:
-    """Calculate probabilistic confidence: P(Confidence) = P_source * P_time * P_topo.
+    """Calculate the probabilistic confidence score for a retrieved chunk.
 
-    P_source: Source reliability
-    P_time: Temporal decay
-    P_topo: e^(-gamma * (depth - 1))
+    Considers source reliability, age (time decay), and graph topology (depth).
+    If is_parked is True, severely penalizes the final confidence score.
+    Returns a score between 0.0 and 1.0.
     """
     p_source = calculate_source_reliability(source)
     p_time = calculate_time_decay(valid_from, as_of)
     p_topo = math.exp(-GAMMA_CONF_DEPTH * max(depth - 1, 0))
 
     raw_confidence = p_source * p_time * p_topo
+    if is_parked:
+        raw_confidence *= 0.1
+
     raw_confidence = max(0.0, min(1.0, raw_confidence))
 
     if score_type == "raw":
@@ -206,14 +210,19 @@ def calculate_probabilistic_incident_confidence(
     """
     alert_source = alert.source if hasattr(alert, "source") else None
     alert_time = alert.valid_from if hasattr(alert, "valid_from") else None
+    alert_is_parked = getattr(alert, "is_parked", False)
 
     alert_rel = calculate_source_reliability(alert_source)
     alert_decay = calculate_time_decay(alert_time, as_of)
+    
+    any_parked = alert_is_parked
 
     if classified.responsible_pr is not None:
         pr_node = classified.responsible_pr
         pr_source = pr_node.source if hasattr(pr_node, "source") else None
         pr_time = pr_node.valid_from if hasattr(pr_node, "valid_from") else None
+        if getattr(pr_node, "is_parked", False):
+            any_parked = True
 
         pr_rel = calculate_source_reliability(pr_source)
         pr_decay = calculate_time_decay(pr_time, as_of)
@@ -232,6 +241,8 @@ def calculate_probabilistic_incident_confidence(
         res_source = res_node.source if hasattr(res_node, "source") else None
         res_time = res_node.valid_from if hasattr(res_node, "valid_from") else None
         res_depth = res_node.depth if hasattr(res_node, "depth") else 1
+        if getattr(res_node, "is_parked", False):
+            any_parked = True
 
         res_rel = calculate_source_reliability(res_source)
         res_decay = calculate_time_decay(res_time, as_of)
@@ -244,11 +255,15 @@ def calculate_probabilistic_incident_confidence(
         base_p = 0.15
         confidence = base_p * alert_rel * alert_decay
 
+    if any_parked:
+        confidence *= 0.1
+
     raw_confidence = max(0.0, min(1.0, confidence))
     calibrated = calibrate_isotonic(
         raw_confidence,
         support_size=support_size,
         min_support=min_support,
     )
-    is_provisional = support_size is not None and support_size < min_support
-    return calibrated, is_provisional
+    
+    # If any entity is parked, we consider the result provisional
+    return calibrated, any_parked or support_size is not None and support_size < min_support

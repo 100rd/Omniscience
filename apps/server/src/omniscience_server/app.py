@@ -260,6 +260,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         legacy_service=federated if federated is not None else _UnwiredLegacyService(),
         session_factory=session_factory,
         global_reconciler=global_reconciler,
+        is_entity_parked_fn=lambda eid: eid in getattr(app.state, "outbox_consumer")._parked_entities if getattr(app.state, "outbox_consumer", None) else False,
     )
     app.state.graph_rag_composer = graph_rag_composer
     log.info(

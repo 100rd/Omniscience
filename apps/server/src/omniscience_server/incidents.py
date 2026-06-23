@@ -157,6 +157,15 @@ async def mcp_resolve_incident(
             else:
                 raise
 
+        outbox_consumer = getattr(app.state, "outbox_consumer", None)
+        if outbox_consumer and hasattr(outbox_consumer, "_parked_entities"):
+            parked = outbox_consumer._parked_entities
+            if seed.id in parked:
+                seed.is_parked = True
+            for node in graph_result.related:
+                if node.id in parked:
+                    node.is_parked = True
+
         classified = _classify_neighbours(graph_result)
         scoring_config = await _load_scoring_config(app, workspace_id)
         confidence, is_provisional = _score_incident(
