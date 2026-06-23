@@ -398,7 +398,7 @@ class TestIncidentDemoEndToEnd:
             workspace_id=uuid.UUID(ws_a["workspace_id"]),
             as_of=anchor_time,
         )
-        score = float(result["confidence_score"])
+        score = float(result["resolution_confidence"])
         assert score >= _DEMO_CONFIDENCE_FLOOR, (
             f"demo path must return confidence >= {_DEMO_CONFIDENCE_FLOOR}; got {score}"
         )

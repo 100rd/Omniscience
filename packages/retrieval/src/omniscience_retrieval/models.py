@@ -184,3 +184,11 @@ class SearchResult(BaseModel):
         default=None,
         description="The minimum applied version among all evidence in this response."
     )
+    degraded_subsystems: list[str] = Field(
+        default_factory=list,
+        description="List of subsystems that are operating in a degraded mode."
+    )
+    snapshot_id: str | None = Field(
+        default=None,
+        description="ID of the graph snapshot used for this response."
+    )

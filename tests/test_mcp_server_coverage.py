@@ -936,7 +936,7 @@ async def test_resolve_incident_happy_path() -> None:
 
     tool_fn = getattr(resolve_incident, "fn", resolve_incident)
     token = _make_token()
-    legacy = {"alert_id": "alert://pd/INC-1", "confidence_score": 0.9}
+    legacy = {"alert_id": "alert://pd/INC-1", "resolution_confidence": 0.9}
     wrapped = {**legacy, "_meta": {}}
 
     with (

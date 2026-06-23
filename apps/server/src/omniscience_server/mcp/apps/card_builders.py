@@ -88,7 +88,7 @@ def build_resolve_incident_card(legacy: dict[str, Any]) -> ResolveIncidentCard:
             f"got {type(alert_block).__name__}"
         )
 
-    confidence_value = float(legacy.get("confidence_score", 0.0))
+    confidence_value = float(legacy.get("resolution_confidence", 0.0))
     meta_block = legacy.get("meta") or {}
     below_threshold = bool(meta_block.get("below_trust_threshold", False))
 
@@ -106,6 +106,8 @@ def build_resolve_incident_card(legacy: dict[str, Any]) -> ResolveIncidentCard:
         summary=summary,
         candidates=candidates[:MAX_CANDIDATES],
         similar_past=similar_past,
+        degraded_subsystems=legacy.get("degraded_subsystems", []),
+        snapshot_id=legacy.get("snapshot_id"),
     )
 
 

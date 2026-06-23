@@ -454,7 +454,7 @@ class TestResolveIncidentCompose:
             "target_resource",
             "responsible_pr",
             "slack_threads",
-            "confidence_score",
+            "resolution_confidence",
             "effective_as_of",
         ):
             assert field in result, f"missing legacy field: {field}"

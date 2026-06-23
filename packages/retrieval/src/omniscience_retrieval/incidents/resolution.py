@@ -164,7 +164,12 @@ class ResolveIncidentResponse(BaseModel):
     target_resource: ResourceSummary | None = None
     responsible_pr: PrSummary | None = None
     slack_threads: list[SlackThreadSummary] = Field(default_factory=list)
-    confidence_score: float = Field(ge=0.0, le=1.0)
+    resolution_confidence: float = Field(ge=0.0, le=1.0)
+    evidence_recency: float = Field(ge=0.0, le=1.0)
+    inferential_confidence: float = Field(ge=0.0, le=1.0)
+    uncalibrated: bool = False
+    degraded_subsystems: list[str] = Field(default_factory=list)
+    snapshot_id: str | None = None
     effective_as_of: datetime
     meta: dict[str, Any] | None = None
     similar_past: list[dict[str, Any]] = Field(
@@ -420,7 +425,12 @@ def build_resolve_response(
     *,
     alert: EntityNodeView,
     classified: ClassifiedNeighbours,
-    confidence: float,
+    resolution_confidence: float,
+    evidence_recency: float,
+    inferential_confidence: float,
+    uncalibrated: bool,
+    degraded_subsystems: list[str] | None = None,
+    snapshot_id: str | None = None,
     as_of: datetime | None,
     effective_as_of: datetime,
     meta: dict[str, Any] | None = None,
@@ -453,7 +463,12 @@ def build_resolve_response(
         target_resource=target_resource,
         responsible_pr=responsible_pr,
         slack_threads=slack_threads,
-        confidence_score=confidence,
+        resolution_confidence=resolution_confidence,
+        evidence_recency=evidence_recency,
+        inferential_confidence=inferential_confidence,
+        uncalibrated=uncalibrated,
+        degraded_subsystems=degraded_subsystems or [],
+        snapshot_id=snapshot_id,
         effective_as_of=effective_as_of,
         meta=meta,
         similar_past=list(similar_past or []),

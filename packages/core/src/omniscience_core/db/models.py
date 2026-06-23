@@ -473,6 +473,7 @@ class Edge(Base):
       ``"inherits"``   — class A inherits from class B
       ``"defines"``    — module A defines entity B
       ``"depends_on"`` — generic dependency (infra resources, services, etc.)
+      ``"candidate-edge"`` — probabilistic relationship between entities via ML clustering
     """
 
     __tablename__ = "edges"

@@ -317,7 +317,7 @@ class TestResolveIncidentHappyPath:
         )
         assert len(result["slack_threads"]) == 1
         assert result["slack_threads"][0]["name"] == _SLACK_THREAD
-        assert result["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
         assert "effective_as_of" in result
 
     async def test_default_max_depth_forwarded(self) -> None:
@@ -416,7 +416,7 @@ class TestEmptyGraph:
         assert result["target_resource"] is None
         assert result["responsible_pr"] is None
         assert result["slack_threads"] == []
-        assert result["confidence_score"] == CONFIDENCE_ALERT_ONLY
+        assert result["resolution_confidence"] == CONFIDENCE_ALERT_ONLY
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +482,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
 
     async def test_pr_outside_window_returns_0_6(self) -> None:
         store = _IncidentGraphStore()
@@ -491,7 +491,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
 
     async def test_pr_with_no_merge_timestamp_returns_0_6(self) -> None:
         """Missing merge timestamp -> no temporal correlation rung."""
@@ -501,7 +501,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
 
     async def test_resource_only_no_pr_returns_0_4(self) -> None:
         """Resource resolved but no PR -> 0.4."""
@@ -516,7 +516,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_RESOURCE_ONLY
+        assert result["resolution_confidence"] == CONFIDENCE_RESOURCE_ONLY
         assert result["target_resource"] is not None
         assert result["responsible_pr"] is None
 
@@ -529,7 +529,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_ALERT_ONLY
+        assert result["resolution_confidence"] == CONFIDENCE_ALERT_ONLY
 
     async def test_pr_merged_after_alert_is_not_temporal_match(self) -> None:
         """A PR merged AFTER the alert fired is not a cause."""
@@ -544,7 +544,7 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
 
 
 # ---------------------------------------------------------------------------
@@ -632,7 +632,7 @@ class TestRestResolveIncident:
         body = resp.json()
         assert body["alert"]["name"] == _ALERT_ID
         assert body["responsible_pr"]["name"] == _PR_URL
-        assert body["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert body["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
 
     async def test_alert_not_found_returns_404(self) -> None:
         app = _make_rest_app()
@@ -787,7 +787,7 @@ class TestRecencyBoundary:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
 
     async def test_one_second_outside_window_is_no_match(self) -> None:
         store = _IncidentGraphStore()
@@ -797,4 +797,4 @@ class TestRecencyBoundary:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["confidence_score"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH

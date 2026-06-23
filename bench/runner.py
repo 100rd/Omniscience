@@ -169,7 +169,7 @@ def _bundle_to_response(bundle: dict[str, Any]) -> MCPResponse:
     for thread in bundle.get("slack_threads", []) or []:
         if isinstance(thread, dict) and "name" in thread:
             ranked.append(str(thread["name"]))
-    confidence = bundle.get("confidence_score", 0.0)
+    confidence = bundle.get("resolution_confidence", 0.0)
     return MCPResponse(retrieved_entities=ranked, confidence=float(confidence))
 
 

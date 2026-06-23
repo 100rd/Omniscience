@@ -90,7 +90,7 @@ def _legacy_full() -> dict[str, Any]:
                 "edge_type": "discusses",
             }
         ],
-        "confidence_score": 0.9,
+        "resolution_confidence": 0.9,
         "effective_as_of": _ALERT_FIRED_AT,
         "meta": None,
     }
@@ -109,7 +109,7 @@ def _legacy_alert_only() -> dict[str, Any]:
         "target_resource": None,
         "responsible_pr": None,
         "slack_threads": [],
-        "confidence_score": 0.1,
+        "resolution_confidence": 0.1,
         "effective_as_of": _ALERT_FIRED_AT,
         "meta": None,
     }
@@ -239,11 +239,11 @@ class TestBuildResolveIncidentCard:
 
     def test_missing_alert_block_raises(self) -> None:
         with pytest.raises(KeyError):
-            build_resolve_incident_card({"confidence_score": 0.1})
+            build_resolve_incident_card({"resolution_confidence": 0.1})
 
     def test_malformed_alert_block_raises_typeerror(self) -> None:
         with pytest.raises(TypeError):
-            build_resolve_incident_card({"alert": "not a dict", "confidence_score": 0.1})
+            build_resolve_incident_card({"alert": "not a dict", "resolution_confidence": 0.1})
 
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ class TestWrapResolveIncidentResponseBackwardsCompat:
     def test_malformed_legacy_falls_back_to_legacy(self) -> None:
         # A legacy dict that fails the card builder must NOT propagate
         # — the user gets the legacy response back, no exception.
-        legacy = {"confidence_score": 0.5}  # missing 'alert' block
+        legacy = {"resolution_confidence": 0.5}  # missing 'alert' block
         ctx = SimpleNamespace(
             session=SimpleNamespace(
                 client_params=SimpleNamespace(

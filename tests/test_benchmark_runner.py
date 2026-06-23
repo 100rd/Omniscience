@@ -249,7 +249,7 @@ class TestBundleToResponse:
                 {"name": "slack://t1"},
                 {"name": "slack://t2"},
             ],
-            "confidence_score": 0.9,
+            "resolution_confidence": 0.9,
         }
         resp = _bundle_to_response(bundle)
         assert resp.retrieved_entities == (

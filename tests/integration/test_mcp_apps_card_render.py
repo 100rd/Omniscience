@@ -282,7 +282,7 @@ class TestMcpAppsCardRender:
         assert response["alert"]["name"] == _ALERT_ID
         assert response["responsible_pr"]["name"] == _PR_URI
         assert response["target_resource"]["name"] == _RESOURCE
-        assert response["confidence_score"] == 0.9
+        assert response["resolution_confidence"] == 0.9
 
     async def test_non_apps_client_receives_legacy_only(self) -> None:
         """Backwards-compat: no capability -> no card."""
@@ -309,7 +309,7 @@ class TestMcpAppsCardRender:
         assert "_meta" not in response
         # Top-level legacy fields untouched.
         assert response["alert"]["name"] == _ALERT_ID
-        assert response["confidence_score"] == 0.9
+        assert response["resolution_confidence"] == 0.9
 
     async def test_card_schema_round_trips_through_json(self) -> None:
         """The card payload must survive a JSON round-trip unchanged."""

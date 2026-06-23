@@ -188,7 +188,12 @@ async def mcp_resolve_incident(
         return _build_response(
             alert=seed,
             classified=classified,
-            confidence=confidence,
+            resolution_confidence=confidence,
+            evidence_recency=1.0,
+            inferential_confidence=1.0,
+            uncalibrated=is_provisional,
+            degraded_subsystems=[],
+            snapshot_id=None,
             as_of=normalised_as_of,
             effective_as_of=resolve_effective_as_of(normalised_as_of),
             meta=meta,
