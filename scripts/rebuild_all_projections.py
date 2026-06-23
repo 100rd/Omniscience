@@ -168,6 +168,7 @@ async def main() -> None:
                     content_hash=doc.content_hash,
                     metadata=doc_metadata,
                     chunks=payloads,
+                    version=doc.doc_version,
                 )
 
                 # Fetch entities
@@ -194,6 +195,7 @@ async def main() -> None:
                         document_id=doc.id,
                         entities=wrapped_entities,
                         edges=wrapped_edges,
+                        version=doc.doc_version,
                     )
 
     # 5. Clean up connections

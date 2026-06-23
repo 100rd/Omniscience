@@ -380,6 +380,8 @@ async def merge_entities(
     workspace_id = get_workspace_id(token)
     if workspace_id is None:
         raise HTTPException(status_code=403, detail="Workspace-scoped token required")
+    if "admin/entities:write" not in token.scopes:
+        raise HTTPException(status_code=403, detail="Scope admin/entities:write required")
 
     success = await graph_store.merge_nodes(
         workspace_id=workspace_id,

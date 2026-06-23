@@ -11,7 +11,7 @@ import uuid
 from typing import Any
 
 import structlog
-from omniscience_core.db.models import Document
+from omniscience_core.db.models import Document, Source
 from omniscience_index.stores.qdrant_filters import QdrantFilterBuilder
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -48,15 +48,19 @@ class GlobalReconciler:
     async def check_convergence(self, workspace_id: uuid.UUID) -> bool:
         """Return True if all stores have reached the Postgres watermark."""
         # 1. Get Postgres watermark (max doc_version per source_id)
-        async with self._session_factory() as session:
-            stmt = (
-                select(Document.source_id, func.max(Document.doc_version))
-                .join(Document.source)
-                .where(Document.source.tenant_id == workspace_id)
-                .group_by(Document.source_id)
-            )
-            result = await session.execute(stmt)
-            pg_watermarks = {str(row[0]): int(row[1] or 0) for row in result.all()}
+        try:
+            async with self._session_factory() as session:
+                stmt = (
+                    select(Document.source_id, func.max(Document.doc_version))
+                    .join(Source, Document.source_id == Source.id)
+                    .where(Source.tenant_id == workspace_id)
+                    .group_by(Document.source_id)
+                )
+                result = await session.execute(stmt)
+                pg_watermarks = {str(row[0]): int(row[1] or 0) for row in result.all()}
+        except Exception as e:
+            log.warning("global_reconciler_pg_error", error=str(e))
+            return False
 
         if not pg_watermarks:
             return True

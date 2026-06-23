@@ -177,9 +177,9 @@ class QdrantFilterBuilder:
             # must_not/not-matching semantics.
             must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_TOMBSTONED_AT)))
         if self.current_only_flag:
-            pass
+            must.append(qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)))
         if self.as_of is not None:
-            pass
+            must.extend(_as_of_must_clauses(self.as_of))
 
         for meta_key, meta_value in self.metadata_filters:
             must.append(
