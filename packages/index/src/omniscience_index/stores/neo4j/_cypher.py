@@ -877,6 +877,72 @@ DETACH DELETE stub
 RETURN count(DISTINCT stub) AS resolved
 """
 
+
+# ---------------------------------------------------------------------------
+# AP1 — Per-entity conditional-apply Cyphers (consilium-v9, ADR-0012 §AP1)
+#
+# Both variants MERGE on the stable identity key (workspace_id, id) and then
+# apply a CASE-based CAS guard.  The guard writes only when:
+#   - $forced is True  (admin forced-replay bypass), OR
+#   - $incoming_version > coalesce(n.version, -1)  (strict monotonic advance)
+#
+# When version=None the store skips these Cyphers entirely (legacy/test path).
+# The written n.version is read by get_entity_versions() which feeds the AP3
+# min-watermark and the AP2 drift detector — must be monotonic.
+#
+# Returns: id (str), applied (bool)
+# ---------------------------------------------------------------------------
+
+_UPSERT_ENTITY_CAS_CYPHER: Final[str] = f"""
+MERGE (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $id}})
+WITH n,
+     CASE WHEN $forced THEN TRUE
+          ELSE $incoming_version > coalesce(n.version, -1)
+     END AS should_write
+FOREACH (_ IN CASE WHEN should_write THEN [1] ELSE [] END |
+    SET n.source_id    = $source_id,
+        n.kind         = $entity_type,
+        n.name         = $name,
+        n.display_name = $display_name,
+        n.chunk_id     = $chunk_id,
+        n.cluster      = $cluster,
+        n.metadata     = $metadata,
+        n.content_hash = $content_hash,
+        n.is_stub      = false,
+        n.version      = $incoming_version,
+        n.updated_at   = $now
+)
+RETURN n.id AS id, should_write AS applied
+"""
+
+_UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER: Final[str] = f"""
+// AP1 CAS + bitemporal triple (ADR-0008 §2 + ADR-0012 §AP1).
+// MERGE ensures the identity node exists; the CAS predicate guards all writes.
+MERGE (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $id}})
+WITH n,
+     CASE WHEN $forced THEN TRUE
+          ELSE $incoming_version > coalesce(n.version, -1)
+     END AS should_write
+FOREACH (_ IN CASE WHEN should_write THEN [1] ELSE [] END |
+    SET n.source_id                         = $source_id,
+        n.kind                              = $entity_type,
+        n.name                              = $name,
+        n.display_name                      = $display_name,
+        n.chunk_id                          = $chunk_id,
+        n.cluster                           = $cluster,
+        n.metadata                          = $metadata,
+        n.content_hash                      = $content_hash,
+        n.is_stub                           = false,
+        n.version                           = $incoming_version,
+        n.updated_at                        = $now,
+        n.valid_from                        = datetime($now),
+        n.valid_to                          = NULL,
+        n.recorded_at                       = datetime($now),
+        n.{_ENTITY_STATE_FINGERPRINT_PROP}  = $state_fingerprint
+)
+RETURN n.id AS id, should_write AS applied
+"""
+
 # ---------------------------------------------------------------------------
 # Import-time regression guards
 # ---------------------------------------------------------------------------
@@ -950,3 +1016,7 @@ _ensure_workspace_predicate(
 )
 _ensure_workspace_predicate(_COUNT_HOT_ENTITY_STATES, "_COUNT_HOT_ENTITY_STATES")
 _ensure_workspace_predicate(_COUNT_WARM_ENTITY_SNAPSHOTS, "_COUNT_WARM_ENTITY_SNAPSHOTS")
+_ensure_workspace_predicate(_UPSERT_ENTITY_CAS_CYPHER, "_UPSERT_ENTITY_CAS_CYPHER")
+_ensure_workspace_predicate(
+    _UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER, "_UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER"
+)

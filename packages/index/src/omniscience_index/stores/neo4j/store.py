@@ -63,7 +63,9 @@ from omniscience_index.stores.neo4j._cypher import (
     _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE,
     _UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE,
     _UPSERT_EDGE_CYPHER_TEMPLATE,
+    _UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER,
     _UPSERT_ENTITY_BITEMPORAL_CYPHER,
+    _UPSERT_ENTITY_CAS_CYPHER,
     _UPSERT_ENTITY_CYPHER,
     _WORKSPACE_PARAM,
     _WRITE_WORKSPACE_PARAM,
@@ -451,7 +453,14 @@ class Neo4jGraphStore:
         cypher = self._select_entity_upsert_cypher(params)
 
         async def _run(tx: Any) -> None:
-            if getattr(entity, "version", None) is not None:
+            entity_version = getattr(entity, "version", None)
+            forced_replay = getattr(entity, "forced_replay", False)
+            if entity_version is not None:
+                # ----------------------------------------------------------------
+                # Source-level checkpoint fast-path (coarse guard).
+                # Skip if the source checkpoint is already at or beyond this version
+                # (unless epoch supersedes or forced_replay bypasses).
+                # ----------------------------------------------------------------
                 res = await tx.run(
                     (
                         "MATCH (c:StoreCheckpoint"
@@ -466,15 +475,14 @@ class Neo4jGraphStore:
                 existing_epoch = record["epoch"] if record is not None else None
 
                 should_skip = False
-                if existing_version is not None and existing_version >= entity.version:
+                if existing_version is not None and existing_version >= entity_version:
                     should_skip = True
 
                 ep = getattr(entity, "epoch", None)
                 if ep is not None and existing_epoch is not None and ep > existing_epoch:
                     should_skip = False
 
-                fr = getattr(entity, "forced_replay", False)
-                if fr:
+                if forced_replay:
                     should_skip = False
 
                 if should_skip:
@@ -489,11 +497,33 @@ class Neo4jGraphStore:
                     {
                         "workspace_id": str(workspace_id),
                         "source_id": str(entity.source_id),
-                        "version": entity.version,
+                        "version": entity_version,
                         "epoch": ep,
                         "now": now,
                     },
                 )
+
+                # ----------------------------------------------------------------
+                # Per-entity CAS Cypher (AP1 — authoritative fine-grained guard).
+                # Runs AFTER the checkpoint is advanced so a concurrent writer
+                # that races past the source checkpoint still hits this guard.
+                # $forced=True lets an admin forced-replay overwrite a higher node
+                # version (matches the source-level bypass above).
+                # ----------------------------------------------------------------
+                cas_cypher = (
+                    _UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER
+                    if self._bitemporal_enabled
+                    else _UPSERT_ENTITY_CAS_CYPHER
+                )
+                cas_params = dict(params)
+                cas_params["incoming_version"] = entity_version
+                cas_params["forced"] = forced_replay
+                if self._bitemporal_enabled and "state_fingerprint" not in cas_params:
+                    cas_params["state_fingerprint"] = _entity_state_fingerprint(cas_params)
+                await tx.run(cas_cypher, cas_params)
+                return
+
+            # version=None → unconditional legacy/test path (no CAS guard).
             await tx.run(cypher, params)
 
         async with self._driver.session(database=self._config.database) as session:
