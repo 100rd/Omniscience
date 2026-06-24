@@ -20,6 +20,20 @@ Design rules (ADR-0005 + issue #117)
    ``GraphEdgeView`` carry only primitive/uuid fields so a Neo4j or
    Qdrant adapter can populate them without re-importing SQLAlchemy
    models.
+
+AP1 — single-writer invariant (migration 0013)
+----------------------------------------------
+
+* ``delete_tombstoned_graph`` replaces the old ``delete_tombstoned`` name
+  (which clashed with ``VectorStore.delete_tombstoned``).
+* ``upsert_graph`` now requires ``workspace_id`` (keyword-only).
+* ``upsert_edge_by_name`` uses ``source_entity_id`` / ``metadata`` to match
+  both Neo4j and PostgresOnlyStore implementations.
+* ``list_entities`` protocol is truth — ``kind`` is required, ``limit``
+  / ``offset`` are NOT in the protocol (move them to adapter internals
+  if needed).
+* ``get_entity_versions`` added for per-entity anti-entropy (AP2
+  closed-loop reconciliation, ``reconcile_worker.py``).
 """
 
 from __future__ import annotations
@@ -133,6 +147,7 @@ class GraphStore(Protocol):
         document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        workspace_id: uuid.UUID,
         snapshot_at: datetime | None = None,
         version: int | None = None,
         epoch: int | None = None,
@@ -162,10 +177,24 @@ class GraphStore(Protocol):
         workspace_id: uuid.UUID,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Create an edge to a target identified by name (creates a stub if missing)."""
+        """Create an edge from ``source_entity_id`` to a target identified by
+        name (creates a stub target node if the target does not yet exist).
+
+        ``metadata`` is stored as relationship properties in addition to the
+        mandatory ``workspace_id``.
+        """
         ...
 
-    async def delete_tombstoned(self) -> int: ...
+    async def delete_tombstoned_graph(self) -> int:
+        """Remove tombstoned entity nodes from the graph store.
+
+        Renamed from ``delete_tombstoned`` (AP1) to avoid collision with
+        ``VectorStore.delete_tombstoned`` which carries a different signature
+        (``older_than: timedelta``).
+
+        Returns the number of nodes deleted.
+        """
+        ...
 
     async def resolve_pending_stubs(
         self,
@@ -329,6 +358,20 @@ class GraphStore(Protocol):
         merged_node_id: uuid.UUID,
     ) -> bool:
         """Split/unmerge a previously merged node back to its original identity."""
+        ...
+
+    async def get_entity_versions(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, int]:
+        """Return a map of entity_id → version for all entities in the workspace.
+
+        Used by the reconcile worker (AP2) to detect per-entity version drift
+        between Postgres (source of truth) and graph/vector projections.  Only
+        returns entities currently visible in this store — entities absent from
+        the returned dict are treated as having version 0 (need upsert).
+        """
         ...
 
 

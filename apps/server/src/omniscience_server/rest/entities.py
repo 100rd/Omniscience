@@ -25,6 +25,15 @@ The handler reads ``request.app.state.graph_store`` — a
 ``omniscience_server.app.create_app``).  The protocol-level
 ``find_related`` call is semantically identical to the pre-#103
 ``GraphQueryService.get_related`` call it replaces.
+
+AP1 — single-writer invariant
+------------------------------
+
+``merge_entities`` and ``unmerge_entity`` now write an :class:`OutboxEvent`
+row to Postgres instead of calling the graph store directly.  The outbox
+worker picks it up and routes it through the canonical ``entity.merge`` /
+``entity.unmerge`` NATS subjects consumed by :class:`OutboxConsumerWorker`.
+This ensures all Neo4j writes flow through the single outbox writer path.
 """
 
 from __future__ import annotations
@@ -39,9 +48,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from omniscience_core.auth.middleware import get_current_token, require_scope
 from omniscience_core.auth.scopes import Scope
 from omniscience_core.auth.workspace import get_workspace_id
-from omniscience_core.db.models import ApiToken
+from omniscience_core.db.models import ApiToken, OutboxEvent
+from omniscience_core.queue.messages import EntityMergeEvent
 from omniscience_core.storage import EntityNodeView, GraphResultView, GraphStore
 from pydantic import BaseModel
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from omniscience_server.as_of import (
     DEGRADED_PRE_HISTORY,
@@ -374,23 +385,48 @@ async def merge_entities(
     request: Request,
     token: ApiToken = _current_token_dep,
 ) -> dict[str, Any]:
-    graph_store: GraphStore | None = getattr(request.app.state, "graph_store", None)
-    if graph_store is None:
-        raise HTTPException(status_code=503, detail="Graph store not available")
+    """Queue a merge of source node into target node via the outbox.
+
+    AP1 — writes an ``entity.merge`` OutboxEvent instead of writing to
+    Neo4j directly.  The response is immediate (``queued: true``); the
+    graph is updated within one outbox worker tick (~1 s default).
+
+    Requires scope: ``admin/entities:write``
+    """
     workspace_id = get_workspace_id(token)
     if workspace_id is None:
         raise HTTPException(status_code=403, detail="Workspace-scoped token required")
     if "admin/entities:write" not in token.scopes:
         raise HTTPException(status_code=403, detail="Scope admin/entities:write required")
 
-    success = await graph_store.merge_nodes(
-        workspace_id=workspace_id,
-        source_id=req.source_id,
-        target_id=req.target_id,
+    factory: async_sessionmaker[AsyncSession] | None = getattr(
+        request.app.state, "db_session_factory", None
     )
-    if not success:
-        raise HTTPException(status_code=400, detail="Merge failed. Ensure both nodes exist.")
-    return {"success": True, "message": "Nodes merged successfully"}
+    if factory is None:
+        raise HTTPException(status_code=503, detail="db_session_factory not wired")
+
+    merge_payload = EntityMergeEvent(
+        workspace_id=str(workspace_id),
+        source_id=str(req.source_id),
+        target_id=str(req.target_id),
+        merged_node_id=None,
+    )
+    async with factory() as session, session.begin():
+        session.add(
+            OutboxEvent(
+                id=uuid.uuid4(),
+                event_type="entity.merge",
+                entity_id=req.source_id,
+                payload=merge_payload.model_dump(),
+            )
+        )
+    log.info(
+        "merge_entities_queued",
+        workspace_id=str(workspace_id),
+        source_id=str(req.source_id),
+        target_id=str(req.target_id),
+    )
+    return {"success": True, "message": "Merge queued successfully", "queued": True}
 
 
 @router.post(
@@ -403,22 +439,50 @@ async def unmerge_entity(
     request: Request,
     token: ApiToken = _current_token_dep,
 ) -> dict[str, Any]:
-    graph_store: GraphStore | None = getattr(request.app.state, "graph_store", None)
-    if graph_store is None:
-        raise HTTPException(status_code=503, detail="Graph store not available")
+    """Queue an unmerge/split of a previously merged node via the outbox.
+
+    AP1 — writes an ``entity.unmerge`` OutboxEvent instead of writing to
+    Neo4j directly.  The response is immediate (``queued: true``); the
+    graph is updated within one outbox worker tick (~1 s default).
+
+    AP6 — requires ``admin/entities:write`` scope (parity with merge).
+
+    Requires scope: ``admin/entities:write``
+    """
     workspace_id = get_workspace_id(token)
     if workspace_id is None:
         raise HTTPException(status_code=403, detail="Workspace-scoped token required")
+    # AP6: admin scope check (matches merge_entities)
+    if "admin/entities:write" not in token.scopes:
+        raise HTTPException(status_code=403, detail="Scope admin/entities:write required")
 
-    success = await graph_store.unmerge_node(
-        workspace_id=workspace_id,
-        merged_node_id=req.merged_node_id,
+    factory: async_sessionmaker[AsyncSession] | None = getattr(
+        request.app.state, "db_session_factory", None
     )
-    if not success:
-        raise HTTPException(
-            status_code=400, detail="Unmerge failed. Ensure node was previously merged."
+    if factory is None:
+        raise HTTPException(status_code=503, detail="db_session_factory not wired")
+
+    unmerge_payload = EntityMergeEvent(
+        workspace_id=str(workspace_id),
+        source_id=None,
+        target_id=None,
+        merged_node_id=str(req.merged_node_id),
+    )
+    async with factory() as session, session.begin():
+        session.add(
+            OutboxEvent(
+                id=uuid.uuid4(),
+                event_type="entity.unmerge",
+                entity_id=req.merged_node_id,
+                payload=unmerge_payload.model_dump(),
+            )
         )
-    return {"success": True, "message": "Node unmerged successfully"}
+    log.info(
+        "unmerge_entity_queued",
+        workspace_id=str(workspace_id),
+        merged_node_id=str(req.merged_node_id),
+    )
+    return {"success": True, "message": "Unmerge queued successfully", "queued": True}
 
 
 __all__ = ["router"]

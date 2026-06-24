@@ -4,6 +4,20 @@
 Wipes Neo4j and Qdrant, then rebuilds them from active Postgres records.
 Usage:
     python scripts/rebuild_all_projections.py --yes
+
+WARNING — SANCTIONED DR EXCEPTION (ADR-0015)
+=============================================
+This script writes directly to Neo4j and Qdrant, bypassing the outbox
+single-writer invariant (AP1, consilium-v8).  This is permitted ONLY when:
+
+  1. Both Neo4j and Qdrant have been (or will be) completely wiped.
+  2. No other writer process is running during the rebuild.
+  3. Postgres is the source of truth and is known-good.
+
+After the rebuild completes, trigger a reconcile scan to verify projections:
+    POST /admin/reconcile/trigger
+
+See docs/decisions/0015-rebuild-direct-write-exception.md for rationale.
 """
 
 import asyncio

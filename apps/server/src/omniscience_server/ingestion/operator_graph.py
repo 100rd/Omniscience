@@ -286,6 +286,7 @@ async def route_operator_event_to_graph(
     graph_store: Any,
     event: OperatorEvent,
     document_id: uuid.UUID | None = None,
+    session_factory: Any | None = None,
 ) -> tuple[int, int]:
     """Map ``event`` and persist it via ``GraphStore.upsert_graph``.
 
@@ -295,14 +296,84 @@ async def route_operator_event_to_graph(
     tombstone path, not here — this routes created/updated events into the
     graph; a ``deleted`` action still upserts the terminal state so the graph
     reflects the last-known shape (end-dating is the adapter's job).
+
+    AP1 — single-writer invariant
+    ------------------------------
+    When session_factory is provided, each entity and edge is emitted as an
+    entity.upsert / edge.upsert OutboxEvent row rather than calling
+    the graph store directly.  The outbox worker then fans them out through the
+    canonical NATS subjects.  Pass session_factory=None (or omit it) only
+    when NATS / Postgres are unavailable — this falls back to the pre-AP1 direct
+    write and logs a deprecation warning.
     """
     entities, edges = operator_event_to_graph(event)
     doc_id = document_id if document_id is not None else entities[0].id
+
+    if session_factory is not None:
+        from omniscience_core.db.models import OutboxEvent
+        from omniscience_core.queue.messages import EdgeUpsertEvent, EntityUpsertEvent
+
+        async with session_factory() as session, session.begin():
+            for ent in entities:
+                entity_evt = EntityUpsertEvent(
+                    id=str(ent.id),
+                    source_id=str(ent.source_id),
+                    workspace_id=str(event.workspace_id),
+                    entity_type=ent.entity_type,
+                    name=ent.name,
+                    display_name=ent.display_name,
+                    metadata=ent.metadata,
+                    version=None,
+                    is_backfill=False,
+                )
+                session.add(
+                    OutboxEvent(
+                        id=uuid.uuid4(),
+                        event_type="entity.upsert",
+                        entity_id=ent.id,
+                        payload=entity_evt.model_dump(),
+                    )
+                )
+            for edge in edges:
+                # Name-edges (stub targets) are resolved by the graph adapter;
+                # we emit them as edge.upsert with target_entity_id=None sentinel.
+                target_id_str = (
+                    str(edge.target_entity_id) if edge.target_entity_id is not None else ""
+                )
+                edge_evt = EdgeUpsertEvent(
+                    id=str(uuid.uuid4()),
+                    source_entity_id=str(edge.source_entity_id),
+                    target_entity_id=target_id_str,
+                    workspace_id=str(event.workspace_id),
+                    edge_type=edge.edge_type,
+                    metadata=edge.metadata,
+                    version=None,
+                    is_backfill=False,
+                )
+                session.add(
+                    OutboxEvent(
+                        id=uuid.uuid4(),
+                        event_type="edge.upsert",
+                        entity_id=edge.source_entity_id,
+                        payload=edge_evt.model_dump(),
+                    )
+                )
+        return len(entities), len(edges)
+
+    # Fallback: direct write (legacy / no session factory).
+    import structlog as _structlog
+
+    _structlog.get_logger(__name__).warning(
+        "operator_graph_direct_write_fallback",
+        reason="no_session_factory",
+        source_id=str(event.source_id),
+    )
     await graph_store.upsert_graph(
         source_id=event.source_id,
         document_id=doc_id,
         entities=entities,
         edges=edges,
+        workspace_id=event.workspace_id,
     )
     return len(entities), len(edges)
 

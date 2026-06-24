@@ -167,7 +167,7 @@ async def test_outbox_consumer_worker_updates_neo4j_and_qdrant() -> None:
     embedding_provider = AsyncMock(spec=EmbeddingProvider)
     embedding_provider.model_name = "test-model"
     embedding_provider.provider_name = "test-provider"
-    embedding_provider.embed_query = AsyncMock(return_value=[0.1, 0.2, 0.3])
+    embedding_provider.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
 
     consumer_worker = OutboxConsumerWorker(
         nats_conn=nats_conn,

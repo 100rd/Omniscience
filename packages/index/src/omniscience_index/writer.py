@@ -271,6 +271,7 @@ class IndexWriter:
                 document_id=document_id,
                 entities=entities,
                 edges=edges,
+                workspace_id=workspace_id,
                 snapshot_at=snapshot_at,
                 version=version,
                 epoch=epoch,
