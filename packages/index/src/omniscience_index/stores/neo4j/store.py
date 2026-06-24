@@ -1472,3 +1472,81 @@ class Neo4jGraphStore:
             if raw_id is not None and raw_hash is not None:
                 result[uuid.UUID(str(raw_id))] = str(raw_hash)
         return result
+
+    async def get_edge_versions(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[tuple[uuid.UUID, uuid.UUID, str], int]:
+        """Return {(source_entity_id, target_entity_id, edge_type): version} for all edges.
+
+        AP2 — edge drift detection: edges in Neo4j store their version on the
+        relationship property ``version`` (set by the upsert Cyphers).  Edges
+        that pre-date AP2 have no ``version`` property and are omitted; they
+        are not considered drifted unless their Postgres row also has a
+        non-null version.
+
+        Edges live exclusively in Neo4j; Qdrant has no edge representation
+        (chunks are per-document, not per-edge).  ``qdrant_store`` does not
+        implement ``get_edge_versions`` — the reconcile worker uses this
+        Neo4j-only method for edge drift detection.
+        """
+        cypher = (
+            "MATCH (a:Entity {workspace_id: $workspace_id})"
+            "-[r]->(b:Entity {workspace_id: $workspace_id}) "
+            "WHERE r.workspace_id = $workspace_id AND r.version IS NOT NULL "
+            "RETURN a.id AS source_id, b.id AS target_id,"
+            " type(r) AS edge_type, r.version AS version"
+        )
+        params = {"workspace_id": str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        result: dict[tuple[uuid.UUID, uuid.UUID, str], int] = {}
+        for row in rows:
+            raw_src = row.get("source_id")
+            raw_tgt = row.get("target_id")
+            raw_etype = row.get("edge_type")
+            raw_ver = row.get("version")
+            if (
+                raw_src is not None
+                and raw_tgt is not None
+                and raw_etype is not None
+                and raw_ver is not None
+            ):
+                key = (uuid.UUID(str(raw_src)), uuid.UUID(str(raw_tgt)), str(raw_etype))
+                result[key] = int(raw_ver)
+        return result
+
+    async def end_date_source_orphans(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        source_id: str,
+        now_iso: str,
+    ) -> int:
+        """Actively end-date all open Entity nodes for a tombstoned/absent source.
+
+        AP2 — active Neo4j tombstone heal: instead of only logging the orphan,
+        the reconcile worker calls this method to set ``valid_to = now`` on all
+        still-open entities (and their open HAD_STATE / relationships) that
+        belong to the given source_id.  This is the sanctioned end-dating path
+        (ADR-0009 / ADR-0008 §3); it uses the same ``_END_DATE_BY_SOURCE_CYPHER``
+        that the ingest snapshot-replace path uses.
+
+        Returns the count of entities end-dated (0 when already healed).
+        Idempotent: a second call is a no-op because all matching nodes already
+        have ``valid_to IS NOT NULL``.
+        """
+        params = {
+            _WRITE_WORKSPACE_PARAM: str(workspace_id),
+            "source_id": source_id,
+            "now": now_iso,
+            "batch_entity_ids": [],  # empty → end-date ALL entities for this source
+        }
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_write(
+                _run_write_returning, _END_DATE_BY_SOURCE_CYPHER, params
+            )
+        if not rows:
+            return 0
+        return int(rows[0].get("entities_end_dated", 0) or 0)

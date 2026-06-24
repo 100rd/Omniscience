@@ -30,6 +30,13 @@ RECONCILE_TICK_SECONDS_DEFAULT: Final[int] = 3600
 #: spike first.  Remaining orphans are cleaned up on the next tick.
 RECONCILE_ORPHAN_DELETE_LIMIT: Final[int] = 200
 
+#: Maximum number of entities re-emitted per reconcile tick (AP2 bounded
+#: re-emit).  A cursor advances monotonically within each worker instance
+#: so that large workspaces do not produce an unbounded single-transaction
+#: flood of OutboxEvents.  Remainder is processed on the next tick.
+#: Overridable via ``REEMIT_TICK_CAP`` environment variable.
+REEMIT_TICK_CAP_DEFAULT: Final[int] = 1000
+
 # ---------------------------------------------------------------------------
 # Drift type labels (Prometheus counter label values)
 # ---------------------------------------------------------------------------
@@ -44,9 +51,13 @@ DRIFT_PG_MISSING_QDRANT: Final[str] = "pg_missing_qdrant"
 DRIFT_QDRANT_ORPHAN: Final[str] = "qdrant_orphan"
 
 #: Entity nodes in Neo4j reference a source_id that has no active Postgres
-#: document.  Neo4j cleanup is deferred to the retention worker
-#: (end-dating / ADR-0009); this worker only records the metric.
+#: document.  Neo4j orphans are now actively healed (end-dated) by the
+#: reconcile worker in addition to emitting the metric.
 DRIFT_NEO4J_ORPHAN: Final[str] = "neo4j_orphan"
+
+#: An edge in Neo4j has a different version than the Postgres SoT row.
+#: The reconcile worker re-emits an ``edge.upsert`` OutboxEvent to repair.
+DRIFT_EDGE: Final[str] = "edge_drift"
 
 # ---------------------------------------------------------------------------
 # Store labels (reuse from retention for consistency)
@@ -58,11 +69,13 @@ STORE_LABEL_POSTGRES: Final[str] = "postgres"
 
 
 __all__ = [
+    "DRIFT_EDGE",
     "DRIFT_NEO4J_ORPHAN",
     "DRIFT_PG_MISSING_QDRANT",
     "DRIFT_QDRANT_ORPHAN",
     "RECONCILE_ORPHAN_DELETE_LIMIT",
     "RECONCILE_TICK_SECONDS_DEFAULT",
+    "REEMIT_TICK_CAP_DEFAULT",
     "STORE_LABEL_NEO4J",
     "STORE_LABEL_POSTGRES",
     "STORE_LABEL_QDRANT",
