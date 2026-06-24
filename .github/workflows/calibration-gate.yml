@@ -1,0 +1,202 @@
+name: Calibration Gate (AP4)
+
+# Enforces the AP4 contract: the Brier score and ECE of the fitted isotonic
+# calibrator must stay below published thresholds on the committed labeled
+# fixture set.  Fails the build if either threshold is breached.
+#
+# Thresholds (documented here and in tests/test_calibration_pipeline.py):
+#   Brier score <= 0.20  (random classifier = 0.25; threshold gives headroom)
+#   ECE         <= 0.10  (well-calibrated models typically < 0.05)
+#
+# Rationale:
+#   - Brier 0.20 is conservative: a perfectly calibrated model with 50% base
+#     rate has Brier ~0.25; a model that routes low/high confidence correctly
+#     achieves 0.10-0.15.  0.20 gives room for distribution shift without
+#     being a rubber stamp.
+#   - ECE 0.10 is the conventional "acceptable" threshold in the calibration
+#     literature (Guo et al. 2017).
+#
+# Fixture: tests/fixtures/calibration_labeled.json
+#   100 labeled incidents (50 low-conf ~0.15-0.35, 50 high-conf ~0.65-0.90).
+#   Committed at repo creation; update when representative labeled data
+#   is available from production.
+#
+# Output artifact: calibration-reliability-diagram-{run_id}.json
+#   Bin-wise predicted-vs-observed data for reliability diagram inspection.
+#   Retained 30 days.  Not required for gate pass; purely diagnostic.
+#
+# Do NOT merge this job with the DR-drill workflow (separate concern).
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/retrieval/src/omniscience_retrieval/incidents/calibration.py"
+      - "packages/retrieval/src/omniscience_retrieval/incidents/calibration_store.py"
+      - "packages/retrieval/src/omniscience_retrieval/probabilistic_scoring.py"
+      - "tests/fixtures/calibration_labeled.json"
+      - "tests/test_calibration_pipeline.py"
+      - ".github/workflows/calibration-gate.yml"
+      - "pyproject.toml"
+      - "uv.lock"
+  push:
+    branches: [main]
+    paths:
+      - "packages/retrieval/src/omniscience_retrieval/incidents/calibration.py"
+      - "packages/retrieval/src/omniscience_retrieval/incidents/calibration_store.py"
+      - "packages/retrieval/src/omniscience_retrieval/probabilistic_scoring.py"
+      - "tests/fixtures/calibration_labeled.json"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  calibration-gate:
+    name: Brier / ECE gate on labeled fixture
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run calibration eval + gate
+        id: gate
+        run: |
+          uv run python - <<'PYEOF'
+          """
+          Calibration gate script (AP4).
+
+          Loads the committed labeled fixture, runs the CalibrationPipeline,
+          computes Brier + ECE on out-of-fold predictions, emits a reliability
+          diagram JSON artifact, and exits non-zero when either threshold is
+          breached.
+
+          Thresholds:
+            BRIER_THRESHOLD = 0.20
+            ECE_THRESHOLD   = 0.10
+          """
+          from __future__ import annotations
+
+          import json
+          import sys
+          from pathlib import Path
+
+          from omniscience_retrieval.incidents.calibration import CalibrationPipeline
+          from omniscience_retrieval.incidents.calibration_store import (
+              compute_reliability_diagram,
+              save_calibration_artifact,
+          )
+
+          BRIER_THRESHOLD: float = 0.20
+          ECE_THRESHOLD: float = 0.10
+          FIXTURE_PATH = Path("tests/fixtures/calibration_labeled.json")
+          ARTIFACT_DIR = Path("calibration_output")
+
+          # ------------------------------------------------------------------
+          # Load fixture
+          # ------------------------------------------------------------------
+          raw_data = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+          print(f"Loaded {len(raw_data)} labeled incidents from {FIXTURE_PATH}")
+
+          # ------------------------------------------------------------------
+          # Run pipeline
+          # ------------------------------------------------------------------
+          pipeline = CalibrationPipeline(min_samples=50, k_folds=5)
+          result = pipeline.run(raw_data)
+
+          brier: float = float(result["brier_score"])
+          ece: float = float(result["ece"])
+          mode: str = str(result["mode"])
+          num_samples: int = int(result["num_samples"])
+          thresholds: list[float] = list(result["isotonic_thresholds"])  # type: ignore[arg-type]
+          values: list[float] = list(result["isotonic_values"])  # type: ignore[arg-type]
+
+          print(f"Mode:        {mode}")
+          print(f"Samples:     {num_samples}")
+          print(f"Brier score: {brier:.4f}  (threshold <= {BRIER_THRESHOLD})")
+          print(f"ECE:         {ece:.4f}  (threshold <= {ECE_THRESHOLD})")
+          print(f"Brier CI:    {result['brier_ci']}")
+          print(f"ECE CI:      {result['ece_ci']}")
+
+          # ------------------------------------------------------------------
+          # Reliability diagram artifact
+          # ------------------------------------------------------------------
+          predictions = [float(r["predicted_confidence"]) for r in raw_data]  # type: ignore[index]
+          labels = [int(r["true_label"]) for r in raw_data]  # type: ignore[index]
+          diagram = compute_reliability_diagram(predictions, labels, num_bins=10)
+          ARTIFACT_DIR.mkdir(parents=True, exist_ok=True)
+          diagram_path = ARTIFACT_DIR / "reliability_diagram.json"
+          diagram_path.write_text(
+              json.dumps(
+                  {
+                      "brier_score": brier,
+                      "ece": ece,
+                      "num_samples": num_samples,
+                      "bins": diagram,
+                  },
+                  indent=2,
+              ),
+              encoding="utf-8",
+          )
+          print(f"Reliability diagram written to {diagram_path}")
+
+          # ------------------------------------------------------------------
+          # Persist the fitted artifact so downstream jobs / containers can
+          # load it without re-fitting.
+          # ------------------------------------------------------------------
+          if mode == "calibrated":
+              artifact_path = save_calibration_artifact(
+                  pipeline_result=result,
+                  artifact_dir=ARTIFACT_DIR,
+              )
+              print(f"Fitted artifact saved to {artifact_path}")
+
+          # ------------------------------------------------------------------
+          # Gate assertions — MUST come last; non-zero exit fails the build.
+          # ------------------------------------------------------------------
+          failed = False
+          if brier > BRIER_THRESHOLD:
+              print(
+                  f"GATE FAILED: Brier score {brier:.4f} > threshold {BRIER_THRESHOLD}",
+                  file=sys.stderr,
+              )
+              failed = True
+          if ece > ECE_THRESHOLD:
+              print(
+                  f"GATE FAILED: ECE {ece:.4f} > threshold {ECE_THRESHOLD}",
+                  file=sys.stderr,
+              )
+              failed = True
+          if failed:
+              sys.exit(1)
+
+          print("GATE PASSED: Brier and ECE within thresholds.")
+          PYEOF
+
+      - name: Upload reliability diagram artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-reliability-diagram-${{ github.run_id }}
+          path: calibration_output/
+          retention-days: 30
+
+      # Run the calibration pipeline unit tests as a second validation layer.
+      # These exercise the Brier/ECE assertion paths (good + bad fixture).
+      - name: Unit tests — calibration pipeline + gate logic
+        run: |
+          uv run pytest \
+            tests/test_calibration_pipeline.py \
+            -v --no-cov -q
