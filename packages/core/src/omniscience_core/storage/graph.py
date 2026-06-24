@@ -112,6 +112,8 @@ class EntityUpsert:
     version: int | None = None
     epoch: int | None = None
     forced_replay: bool = False
+    # AP2 — per-entity content hash for cross-store anti-entropy.
+    content_hash: str | None = None
 
 
 @dataclass(slots=True)
@@ -371,6 +373,22 @@ class GraphStore(Protocol):
         between Postgres (source of truth) and graph/vector projections.  Only
         returns entities currently visible in this store — entities absent from
         the returned dict are treated as having version 0 (need upsert).
+        """
+        ...
+
+    async def get_entity_content_hashes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, str]:
+        """Return a map of entity_id → content_hash for entities that have been hashed.
+
+        AP2 — per-entity anti-entropy: used by the reconcile worker to detect
+        same-version content drift (e.g. a projection whose content_hash differs
+        from Postgres ``Entity.content_hash``).  Entities without a stored hash
+        (written before AP2) are omitted from the result.  The reconcile worker
+        skips hash comparison for omitted entities and falls back to version-only
+        drift detection.
         """
         ...
 

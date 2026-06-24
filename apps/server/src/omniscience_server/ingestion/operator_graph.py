@@ -325,6 +325,7 @@ async def route_operator_event_to_graph(
                     metadata=ent.metadata,
                     version=None,
                     is_backfill=False,
+                    content_hash=None,
                 )
                 session.add(
                     OutboxEvent(

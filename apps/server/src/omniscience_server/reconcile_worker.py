@@ -61,6 +61,7 @@ Usage in ``app.py`` lifespan::
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -70,8 +71,10 @@ import structlog
 from omniscience_core.config import Settings
 from omniscience_core.db.models import (
     Document,
+    Entity,
     IngestionRun,
     IngestionRunStatus,
+    OutboxEvent,
     Source,
     Workspace,
 )
@@ -91,6 +94,19 @@ from omniscience_server.reconcile_constants import (
     DRIFT_QDRANT_ORPHAN,
     RECONCILE_ORPHAN_DELETE_LIMIT,
     RECONCILE_TICK_SECONDS_DEFAULT,
+)
+
+# ---------------------------------------------------------------------------
+# AP2 feature flags
+# ---------------------------------------------------------------------------
+
+#: When true, emit a durable ``source.orphan_detected`` OutboxEvent for each
+#: Neo4j orphan source detected by the reconcile worker.  Retention /
+#: end-dating of the orphaned nodes is still deferred to the retention worker
+#: (ADR-0009); this flag only controls the diagnostic event emission.
+#: Set via environment variable ``ENABLE_NEO4J_ORPHAN_REEMIT=true``.
+ENABLE_NEO4J_ORPHAN_REEMIT: bool = (
+    os.environ.get("ENABLE_NEO4J_ORPHAN_REEMIT", "false").lower() == "true"
 )
 
 log = structlog.get_logger(__name__)
@@ -258,7 +274,7 @@ class ReconcileWorker:
             workspace_id=workspace_id,
             pg_source_ids=pg_source_ids,
         )
-        
+
         await self._check_entity_drift(workspace_id=workspace_id)
 
         return WorkspaceReconcileReport(
@@ -270,30 +286,59 @@ class ReconcileWorker:
         )
 
     async def _check_entity_drift(self, *, workspace_id: uuid.UUID) -> None:
-        """Check for missing or out-of-date entities across stores."""
-        from omniscience_core.db.models import Entity, Source, OutboxEvent
-        
+        """Check for missing or out-of-date entities across stores.
+
+        AP2 closed-loop: emits corrective ``entity.upsert`` OutboxEvents for any
+        entity that is either:
+
+        1. **Version drift**: Qdrant or Neo4j version < Postgres version.
+        2. **Hash drift** (same version, corrupted content): Qdrant or Neo4j
+           ``content_hash`` != Postgres ``Entity.content_hash`` (skipped when
+           Postgres ``content_hash`` is NULL — legacy entity not yet hashed).
+        """
         async with self._session_factory() as session:
             stmt = select(Entity).join(Source).where(Source.tenant_id == workspace_id)
             result = await session.execute(stmt)
-            pg_entities = {e.id: e for e in result.scalars().all()}
-            
+            pg_entities: dict[uuid.UUID, Entity] = {e.id: e for e in result.scalars().all()}
+
         qdrant_versions = await self._vector_store.get_entity_versions(workspace_id=workspace_id)
         neo4j_versions = await self._graph_store.get_entity_versions(workspace_id=workspace_id)
-        
-        to_backfill = []
+        qdrant_hashes = await self._vector_store.get_entity_content_hashes(
+            workspace_id=workspace_id
+        )
+        neo4j_hashes = await self._graph_store.get_entity_content_hashes(workspace_id=workspace_id)
+
+        to_backfill: list[Entity] = []
         for ent_id, ent in pg_entities.items():
             q_v = qdrant_versions.get(ent_id, 0)
             n_v = neo4j_versions.get(ent_id, 0)
-            
-            if q_v < ent.version or n_v < ent.version:
+
+            version_drift = q_v < ent.version or n_v < ent.version
+
+            # Hash drift: only when Postgres has a content_hash (post-AP2 writes).
+            hash_drift = False
+            if ent.content_hash is not None:
+                q_h = qdrant_hashes.get(ent_id)
+                n_h = neo4j_hashes.get(ent_id)
+                # A mismatch (or missing hash in a projection that has the version)
+                # means the projection was corrupted or partially written.
+                if (q_h is not None and q_h != ent.content_hash) or (
+                    n_h is not None and n_h != ent.content_hash
+                ):
+                    hash_drift = True
+
+            if version_drift or hash_drift:
                 to_backfill.append(ent)
-                
+
         if to_backfill:
-            log.warning("reconcile_entity_drift_detected", count=len(to_backfill), workspace_id=str(workspace_id))
+            log.warning(
+                "reconcile_entity_drift_detected",
+                count=len(to_backfill),
+                workspace_id=str(workspace_id),
+            )
             async with self._session_factory() as session, session.begin():
                 for ent in to_backfill:
-                    event_payload = {
+                    event_payload: dict[str, object] = {
                         "workspace_id": str(workspace_id),
                         "id": str(ent.id),
                         "source_id": str(ent.source_id),
@@ -303,16 +348,15 @@ class ReconcileWorker:
                         "metadata": ent.entity_metadata,
                         "version": ent.version,
                         "is_backfill": True,
+                        "content_hash": ent.content_hash,
                     }
-                    session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
-                
-                # To clear parked status from OutboxConsumerWorker, we would normally use app.state,
-                # but since we're re-publishing an OutboxEvent with a HIGHER version, we need to ensure
-                # that if the outbox consumer parked it previously, it un-parks it.
-                # However, since parked_entities is a memory set, the consumer handles parsing.
-                # Since we cannot easily clear it without IPC, restarting or exposing an endpoint is needed.
-                # For now, we assume the Reconciler just initiates backfill by pushing OutboxEvents.
-                pass
+                    session.add(
+                        OutboxEvent(
+                            event_type="entity.upsert",
+                            entity_id=ent.id,
+                            payload=event_payload,
+                        )
+                    )
 
     # ------------------------------------------------------------------
     # Drift check A: PG document with no Qdrant chunks
@@ -334,6 +378,11 @@ class ReconcileWorker:
         qdrant_source_ids = {uuid.UUID(k) for k in qdrant_source_map if qdrant_source_map[k] > 0}
 
         missing = sorted(pg_source_ids - qdrant_source_ids)
+        if missing:
+            await self._reemit_entities_for_missing_sources(
+                workspace_id=workspace_id,
+                missing_source_ids=missing,
+            )
         for src_id in missing:
             RECONCILE_DRIFT_TOTAL.labels(drift_type=DRIFT_PG_MISSING_QDRANT).inc()
             log.warning(
@@ -469,6 +518,11 @@ class ReconcileWorker:
                 source_id=src_str,
                 note="deferred_to_retention_worker",
             )
+            if ENABLE_NEO4J_ORPHAN_REEMIT:
+                await self._emit_orphan_detected_event(
+                    workspace_id=workspace_id,
+                    source_id=src_str,
+                )
         return orphan_sources
 
     # ------------------------------------------------------------------
@@ -539,6 +593,96 @@ class ReconcileWorker:
             "reconcile_ingestion_run_marked_partial",
             source_id=str(source_id),
             run_id=str(run_id),
+        )
+
+    async def _reemit_entities_for_missing_sources(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        missing_source_ids: list[uuid.UUID],
+    ) -> None:
+        """Re-emit entity.upsert OutboxEvents for all entities in missing sources.
+
+        AP2 closed-loop: when a source has PG entities but no Qdrant chunks
+        the reconcile worker was previously detect-only.  This method closes
+        the loop by emitting a backfill ``entity.upsert`` OutboxEvent for
+        every entity that belongs to one of the missing source_ids.
+
+        Idempotent: emitting a duplicate OutboxEvent is harmless because the
+        version guard in the store adapters prevents stale overwrites.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(Entity)
+                .join(Source)
+                .where(
+                    Entity.source_id.in_(missing_source_ids),
+                    Source.tenant_id == workspace_id,
+                )
+            )
+            result = await session.execute(stmt)
+            entities = result.scalars().all()
+
+        if not entities:
+            return
+
+        log.info(
+            "reconcile_pg_missing_qdrant_reemit",
+            count=len(entities),
+            workspace_id=str(workspace_id),
+        )
+        async with self._session_factory() as session, session.begin():
+            for ent in entities:
+                event_payload: dict[str, object] = {
+                    "workspace_id": str(workspace_id),
+                    "id": str(ent.id),
+                    "source_id": str(ent.source_id),
+                    "entity_type": ent.entity_type,
+                    "name": ent.name,
+                    "display_name": ent.display_name,
+                    "metadata": ent.entity_metadata,
+                    "version": ent.version,
+                    "is_backfill": True,
+                    "content_hash": ent.content_hash,
+                }
+                session.add(
+                    OutboxEvent(
+                        event_type="entity.upsert",
+                        entity_id=ent.id,
+                        payload=event_payload,
+                    )
+                )
+
+    async def _emit_orphan_detected_event(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+        source_id: str,
+    ) -> None:
+        """Emit a durable ``source.orphan_detected`` OutboxEvent.
+
+        AP2 — Neo4j orphan loop (behind ``ENABLE_NEO4J_ORPHAN_REEMIT``):
+        the event is recorded in the outbox so the retention worker can
+        pick it up for end-dating.  Actual end-dating is deferred to the
+        retention worker (ADR-0009); this event is the diagnostic signal.
+
+        ``source_id`` is a string because it comes from the Neo4j source
+        histogram which stores keys as strings.
+        """
+        async with self._session_factory() as session, session.begin():
+            session.add(
+                OutboxEvent(
+                    event_type="source.orphan_detected",
+                    payload={
+                        "workspace_id": str(workspace_id),
+                        "source_id": source_id,
+                    },
+                )
+            )
+        log.info(
+            "reconcile_neo4j_orphan_event_emitted",
+            workspace_id=str(workspace_id),
+            source_id=source_id,
         )
 
 

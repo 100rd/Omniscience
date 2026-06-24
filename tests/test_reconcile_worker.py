@@ -507,9 +507,10 @@ async def test_multiple_workspaces_separate_reports() -> None:
     assert _WS in ws_ids
     assert ws2 in ws_ids
 
+
 @pytest.mark.asyncio
 async def test_check_entity_drift_creates_outbox_events() -> None:
-    from omniscience_core.db.models import Entity, Source, OutboxEvent
+    from omniscience_core.db.models import Entity, OutboxEvent
     from omniscience_server.reconcile_worker import ReconcileWorker
 
     ws_id = uuid.uuid4()
@@ -527,6 +528,7 @@ async def test_check_entity_drift_creates_outbox_events() -> None:
     ent_1.display_name = "Auth Service"
     ent_1.entity_metadata = {}
     ent_1.version = 5
+    ent_1.content_hash = None
 
     ent_2 = MagicMock(spec=Entity)
     ent_2.id = ent_id_2
@@ -536,6 +538,7 @@ async def test_check_entity_drift_creates_outbox_events() -> None:
     ent_2.display_name = "DB Service"
     ent_2.entity_metadata = {}
     ent_2.version = 2
+    ent_2.content_hash = None
 
     # Mock DB
     result_mock = MagicMock()
@@ -543,7 +546,7 @@ async def test_check_entity_drift_creates_outbox_events() -> None:
 
     session = AsyncMock()
     session.execute = AsyncMock(return_value=result_mock)
-    
+
     tx = AsyncMock()
     tx.__aenter__ = AsyncMock(return_value=None)
     tx.__aexit__ = AsyncMock(return_value=False)
@@ -558,9 +561,11 @@ async def test_check_entity_drift_creates_outbox_events() -> None:
     # Mock stores
     vs = _make_vector_store()
     vs.get_entity_versions = AsyncMock(return_value={ent_id_1: 4, ent_id_2: 2})
-    
+    vs.get_entity_content_hashes = AsyncMock(return_value={})
+
     gs = _make_graph_store()
     gs.get_entity_versions = AsyncMock(return_value={ent_id_1: 5, ent_id_2: 0})
+    gs.get_entity_content_hashes = AsyncMock(return_value={})
 
     worker = ReconcileWorker(
         session_factory=factory,
@@ -573,7 +578,7 @@ async def test_check_entity_drift_creates_outbox_events() -> None:
 
     # Both entities should be backfilled (ent_1 due to qdrant, ent_2 due to neo4j)
     assert session.add.call_count == 2
-    
+
     # Verify the payloads
     args1, _ = session.add.call_args_list[0]
     event1 = args1[0]
@@ -590,3 +595,309 @@ async def test_check_entity_drift_creates_outbox_events() -> None:
     assert event2.payload["id"] == str(ent_id_2)
     assert event2.payload["is_backfill"] is True
     assert event2.payload["version"] == 2
+
+
+# ---------------------------------------------------------------------------
+# AP2 — content-hash drift detection
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_check_entity_drift_detects_hash_mismatch() -> None:
+    """Same version but corrupted content_hash in Neo4j triggers backfill."""
+    from omniscience_core.db.models import Entity, OutboxEvent
+    from omniscience_server.reconcile_worker import ReconcileWorker
+
+    ws_id = uuid.uuid4()
+    src_id = uuid.uuid4()
+    ent_id = uuid.uuid4()
+
+    correct_hash = "aabbcc" * 10 + "aabbccdd"  # 64-char hex
+    wrong_hash = "deadbeef" * 8  # same length, different value
+
+    ent = MagicMock(spec=Entity)
+    ent.id = ent_id
+    ent.source_id = src_id
+    ent.entity_type = "service"
+    ent.name = "svc.alpha"
+    ent.display_name = "Alpha"
+    ent.entity_metadata = {}
+    ent.version = 3
+    ent.content_hash = correct_hash
+
+    result_mock = MagicMock()
+    result_mock.scalars().all.return_value = [ent]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    session.begin = MagicMock(return_value=tx)
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+
+    vs = _make_vector_store()
+    # Version matches — no version drift
+    vs.get_entity_versions = AsyncMock(return_value={ent_id: 3})
+    # Qdrant has correct hash
+    vs.get_entity_content_hashes = AsyncMock(return_value={ent_id: correct_hash})
+
+    gs = _make_graph_store()
+    # Version matches
+    gs.get_entity_versions = AsyncMock(return_value={ent_id: 3})
+    # Neo4j has WRONG hash — simulate corruption
+    gs.get_entity_content_hashes = AsyncMock(return_value={ent_id: wrong_hash})
+
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=_make_settings(),
+    )
+
+    await worker._check_entity_drift(workspace_id=ws_id)
+
+    # Should emit a backfill event for the hash-drifted entity
+    assert session.add.call_count == 1
+    event = session.add.call_args_list[0][0][0]
+    assert isinstance(event, OutboxEvent)
+    assert event.payload["id"] == str(ent_id)
+    assert event.payload["is_backfill"] is True
+    assert event.payload["content_hash"] == correct_hash
+
+
+@pytest.mark.asyncio
+async def test_check_entity_drift_skips_hash_when_pg_hash_is_none() -> None:
+    """When Entity.content_hash is None (pre-AP2 row), hash comparison is skipped."""
+    from omniscience_core.db.models import Entity
+    from omniscience_server.reconcile_worker import ReconcileWorker
+
+    ws_id = uuid.uuid4()
+    src_id = uuid.uuid4()
+    ent_id = uuid.uuid4()
+
+    ent = MagicMock(spec=Entity)
+    ent.id = ent_id
+    ent.source_id = src_id
+    ent.entity_type = "service"
+    ent.name = "svc.legacy"
+    ent.display_name = "Legacy"
+    ent.entity_metadata = {}
+    ent.version = 1
+    ent.content_hash = None  # pre-AP2: no hash
+
+    result_mock = MagicMock()
+    result_mock.scalars().all.return_value = [ent]
+
+    session = AsyncMock()
+    session.execute = AsyncMock(return_value=result_mock)
+    tx = AsyncMock()
+    tx.__aenter__ = AsyncMock(return_value=None)
+    tx.__aexit__ = AsyncMock(return_value=False)
+    session.begin = MagicMock(return_value=tx)
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+
+    vs = _make_vector_store()
+    vs.get_entity_versions = AsyncMock(return_value={ent_id: 1})
+    vs.get_entity_content_hashes = AsyncMock(return_value={ent_id: "some_hash"})  # different!
+
+    gs = _make_graph_store()
+    gs.get_entity_versions = AsyncMock(return_value={ent_id: 1})
+    gs.get_entity_content_hashes = AsyncMock(return_value={ent_id: "other_hash"})  # different!
+
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=_make_settings(),
+    )
+
+    await worker._check_entity_drift(workspace_id=ws_id)
+
+    # No backfill because pg_hash is None — hash comparison is skipped
+    assert session.add.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_check_pg_missing_qdrant_reemits_entities() -> None:
+    """AP2 closed-loop: _reemit_entities_for_missing_sources emits entity.upsert OutboxEvents."""
+    from omniscience_core.db.models import Entity, OutboxEvent
+    from omniscience_server.reconcile_worker import ReconcileWorker
+
+    ws_id = uuid.uuid4()
+    src_missing = uuid.uuid4()
+    ent_id = uuid.uuid4()
+
+    test_hash = "cc" * 32
+
+    # Entity belonging to the missing source
+    ent = MagicMock(spec=Entity)
+    ent.id = ent_id
+    ent.source_id = src_missing
+    ent.entity_type = "service"
+    ent.name = "svc.missing"
+    ent.display_name = "Missing"
+    ent.entity_metadata = {"foo": "bar"}
+    ent.version = 2
+    ent.content_hash = test_hash
+
+    # Session 1 (SELECT entities): returns [ent]
+    entity_result = MagicMock()
+    entity_result.scalars().all.return_value = [ent]
+
+    session_read = AsyncMock()
+    session_read.execute = AsyncMock(return_value=entity_result)
+    cm_read = AsyncMock()
+    cm_read.__aenter__ = AsyncMock(return_value=session_read)
+    cm_read.__aexit__ = AsyncMock(return_value=False)
+
+    # Session 2 (INSERT OutboxEvents)
+    session_write = AsyncMock()
+    session_write.add = MagicMock()
+    tx_write = AsyncMock()
+    tx_write.__aenter__ = AsyncMock(return_value=None)
+    tx_write.__aexit__ = AsyncMock(return_value=False)
+    session_write.begin = MagicMock(return_value=tx_write)
+    cm_write = AsyncMock()
+    cm_write.__aenter__ = AsyncMock(return_value=session_write)
+    cm_write.__aexit__ = AsyncMock(return_value=False)
+
+    # factory alternates: first call → read session, second call → write session
+    factory = MagicMock(side_effect=[cm_read, cm_write])
+
+    vs = _make_vector_store()
+    gs = _make_graph_store()
+
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=_make_settings(),
+    )
+
+    await worker._reemit_entities_for_missing_sources(
+        workspace_id=ws_id,
+        missing_source_ids=[src_missing],
+    )
+
+    # Should have added an OutboxEvent for the missing entity
+    assert session_write.add.call_count == 1
+    event = session_write.add.call_args_list[0][0][0]
+    assert isinstance(event, OutboxEvent)
+    assert event.event_type == "entity.upsert"
+    assert event.payload["id"] == str(ent_id)
+    assert event.payload["is_backfill"] is True
+    assert event.payload["content_hash"] == test_hash
+
+
+# ---------------------------------------------------------------------------
+# AP2 — entity_content_hash stability (unit test for the hash util)
+# ---------------------------------------------------------------------------
+
+
+def test_entity_content_hash_is_stable() -> None:
+    """entity_content_hash returns the same value when called twice with same inputs."""
+    from omniscience_core.audit.fingerprint import entity_content_hash
+
+    h1 = entity_content_hash(
+        entity_type="service",
+        name="auth-service",
+        display_name="Auth",
+        metadata={"env": "prod", "version": 42},
+    )
+    h2 = entity_content_hash(
+        entity_type="service",
+        name="auth-service",
+        display_name="Auth",
+        metadata={"env": "prod", "version": 42},
+    )
+    assert h1 == h2
+    assert len(h1) == 64  # BLAKE2b-256 = 32 bytes = 64 hex chars
+
+
+def test_entity_content_hash_changes_on_field_change() -> None:
+    """entity_content_hash changes when any content field changes."""
+    from omniscience_core.audit.fingerprint import entity_content_hash
+
+    base = entity_content_hash(
+        entity_type="service",
+        name="auth-service",
+        display_name="Auth",
+        metadata={"env": "prod"},
+    )
+
+    # Changing entity_type
+    h_type = entity_content_hash(
+        entity_type="function",  # different
+        name="auth-service",
+        display_name="Auth",
+        metadata={"env": "prod"},
+    )
+    assert h_type != base
+
+    # Changing name
+    h_name = entity_content_hash(
+        entity_type="service",
+        name="auth-service-v2",  # different
+        display_name="Auth",
+        metadata={"env": "prod"},
+    )
+    assert h_name != base
+
+    # Changing metadata
+    h_meta = entity_content_hash(
+        entity_type="service",
+        name="auth-service",
+        display_name="Auth",
+        metadata={"env": "staging"},  # different
+    )
+    assert h_meta != base
+
+
+def test_entity_content_hash_dict_order_independent() -> None:
+    """entity_content_hash is independent of metadata dict insertion order."""
+    from omniscience_core.audit.fingerprint import entity_content_hash
+
+    h1 = entity_content_hash(
+        entity_type="service",
+        name="svc",
+        display_name="Svc",
+        metadata={"a": 1, "b": 2, "c": 3},
+    )
+    h2 = entity_content_hash(
+        entity_type="service",
+        name="svc",
+        display_name="Svc",
+        metadata={"c": 3, "a": 1, "b": 2},  # different order
+    )
+    assert h1 == h2
+
+
+def test_entity_content_hash_round_trip() -> None:
+    """Round-trip: hash computed at ingestion equals hash recomputed from event payload."""
+    from omniscience_core.audit.fingerprint import entity_content_hash
+
+    # Simulate ingestion path (postgres write)
+    ingestion_hash = entity_content_hash(
+        entity_type="terraform_resource",
+        name="aws_s3_bucket.my_bucket",
+        display_name="my_bucket",
+        metadata={"region": "us-east-1", "versioned": True},
+    )
+
+    # Simulate event payload forwarded via outbox (same fields)
+    event_hash = entity_content_hash(
+        entity_type="terraform_resource",
+        name="aws_s3_bucket.my_bucket",
+        display_name="my_bucket",
+        metadata={"region": "us-east-1", "versioned": True},
+    )
+
+    # Both must be identical — critical AP2 determinism guarantee
+    assert ingestion_hash == event_hash

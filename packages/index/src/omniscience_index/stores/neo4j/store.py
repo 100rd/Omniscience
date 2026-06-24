@@ -433,6 +433,10 @@ class Neo4jGraphStore:
             # metadata so list_entities matches by cluster via index seek.
             "cluster": _cluster_from_metadata(metadata),
             "metadata": metadata,
+            # AP2 — per-entity anti-entropy hash projected to Neo4j node property.
+            "content_hash": (
+                str(entity.content_hash) if entity.content_hash is not None else None
+            ),
             "now": now,
         }
         cypher = self._select_entity_upsert_cypher(params)
@@ -1368,7 +1372,7 @@ class Neo4jGraphStore:
         graph and must be re-upserted.
         """
         cypher = (
-            "MATCH (e:Entity {workspace_id: }) "
+            "MATCH (e:Entity {workspace_id: $workspace_id}) "
             "WHERE e.version IS NOT NULL "
             "RETURN e.id AS entity_id, e.version AS version"
         )
@@ -1381,4 +1385,33 @@ class Neo4jGraphStore:
             raw_ver = row.get("version")
             if raw_id is not None and raw_ver is not None:
                 result[uuid.UUID(str(raw_id))] = int(raw_ver)
+        return result
+
+    async def get_entity_content_hashes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, str]:
+        """Return {entity_id: content_hash} for all entities with a hash in this workspace.
+
+        AP2 — per-entity anti-entropy: used by the reconcile worker to detect
+        same-version content drift (e.g. a graph node whose content_hash was
+        corrupted or manually edited).  Entities with no ``content_hash``
+        property are omitted; the reconcile worker treats them as "not yet
+        hashed" and skips hash comparison for those rows.
+        """
+        cypher = (
+            "MATCH (e:Entity {workspace_id: $workspace_id}) "
+            "WHERE e.content_hash IS NOT NULL "
+            "RETURN e.id AS entity_id, e.content_hash AS content_hash"
+        )
+        params = {"workspace_id": str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        result: dict[uuid.UUID, str] = {}
+        for row in rows:
+            raw_id = row.get("entity_id")
+            raw_hash = row.get("content_hash")
+            if raw_id is not None and raw_hash is not None:
+                result[uuid.UUID(str(raw_id))] = str(raw_hash)
         return result

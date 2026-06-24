@@ -432,6 +432,11 @@ class Entity(Base):
         "metadata", JSONB, nullable=False, default=dict
     )
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    # AP2 — per-entity anti-entropy: stable BLAKE2b-256 hash of content fields
+    # (entity_type, name, display_name, metadata).  Provenance fields are
+    # excluded.  NULL until the first post-migration write.  See
+    # audit.fingerprint.entity_content_hash.
+    content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -454,6 +459,7 @@ class Entity(Base):
     __table_args__ = (
         Index("ix_entities_source_type", "source_id", "entity_type"),
         Index("ix_entities_name", "name"),
+        Index("ix_entities_content_hash", "content_hash"),
     )
 
 

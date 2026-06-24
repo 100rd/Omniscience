@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import time
 import uuid
 from typing import Any, cast
 
 import structlog
+from omniscience_core.audit.fingerprint import entity_content_hash
 from omniscience_core.db.models import Edge, Entity, Source
 from omniscience_core.queue import NatsConnection, QueueConsumer, QueueProducer
 from omniscience_core.queue.messages import (
@@ -210,6 +210,7 @@ class OutboxConsumerWorker:
                                     metadata=entity.entity_metadata,
                                     version=entity.version,
                                     is_backfill=True,
+                                    content_hash=entity.content_hash,
                                 )
                                 await producer.publish("outbox.entity.upsert", event)
                                 log.info("unpark_backfill_entity", entity_id=str(entity.id))
@@ -320,14 +321,27 @@ class OutboxConsumerWorker:
                             "chunker_strategy": "entity_outbox",
                         },
                     )
-                    content_hash = hashlib.sha256(text.encode()).hexdigest()
+                    # AP2: use the canonical BLAKE2b-256 entity hash forwarded
+                    # from Postgres Entity.content_hash so all three stores
+                    # store the SAME value and the reconcile worker can compare
+                    # them directly.  Fall back to entity_content_hash() if the
+                    # event pre-dates AP2 (content_hash field is None).
+                    if event.content_hash is not None:
+                        qdrant_content_hash = event.content_hash
+                    else:
+                        qdrant_content_hash = entity_content_hash(
+                            entity_type=event.entity_type,
+                            name=event.name,
+                            display_name=event.display_name,
+                            metadata=event.metadata,
+                        )
 
                     await self._vector_store.upsert_chunks(
                         source_id=uuid.UUID(event.source_id),
                         external_id=f"entity:{event.id}",
                         uri=f"entity://{event.entity_type}/{event.name}",
                         title=event.display_name,
-                        content_hash=content_hash,
+                        content_hash=qdrant_content_hash,
                         metadata={"workspace_id": str(workspace_id)},
                         chunks=[chunk],
                         version=event.version,

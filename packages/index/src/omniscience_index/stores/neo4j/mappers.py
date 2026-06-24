@@ -384,6 +384,7 @@ def _entity_to_params(
         raise ValueError("entity_missing_id")
     chunk_id = getattr(ext_ent, "chunk_id", None)
     metadata = _coerce_metadata(getattr(ext_ent, "metadata", None))
+    content_hash = getattr(ext_ent, "content_hash", None)
     return {
         _WRITE_WORKSPACE_PARAM: str(workspace_id),
         "id": str(entity_id),
@@ -396,6 +397,10 @@ def _entity_to_params(
         # ``list_entities`` can match by cluster without a substring scan.
         "cluster": _cluster_from_metadata(metadata),
         "metadata": metadata,
+        # AP2 — per-entity anti-entropy hash.  None for legacy entities that
+        # were written before AP2; the reconcile worker skips hash comparison
+        # when this value is None.
+        "content_hash": str(content_hash) if content_hash is not None else None,
         "now": now,
     }
 
