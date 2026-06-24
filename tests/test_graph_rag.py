@@ -278,7 +278,7 @@ class TestCollectCandidates:
     def test_seed_counts_as_depth_zero(self) -> None:
         seed_src = uuid.uuid4()
         result = _make_graph_result(seed_source=seed_src, related=[])
-        ids, depths, _ = _collect_candidates(result)
+        ids, depths, _, _ = _collect_candidates(result)
         assert ids == (str(seed_src),)
         assert depths == (0,)
 
@@ -289,7 +289,7 @@ class TestCollectCandidates:
             seed_source=seed_src,
             related=[(other, 1), (other, 2), (seed_src, 1)],
         )
-        ids, _, _ = _collect_candidates(result)
+        ids, _, _, _ = _collect_candidates(result)
         # seed + 1 unique related (second is duplicate of first, third duplicates seed)
         assert len(ids) == 2
         assert ids[0] == str(seed_src)
@@ -299,7 +299,7 @@ class TestCollectCandidates:
         seed_src = uuid.uuid4()
         related = [(uuid.uuid4(), 1) for _ in range(MAX_ANCHOR_CANDIDATES + 10)]
         result = _make_graph_result(seed_source=seed_src, related=related)
-        ids, _, _ = _collect_candidates(result)
+        ids, _, _, _ = _collect_candidates(result)
         assert len(ids) == MAX_ANCHOR_CANDIDATES
 
     def test_prioritizes_by_degree_centrality(self) -> None:
@@ -1142,7 +1142,7 @@ class TestReadTimePostgresValidation:
     async def test_validate_entities_active_and_matching(self, force_graphrag: None) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
-        # We mock the DB results: seed-entity is active, rel-0 is inactive (not returned by execute)
+        # We mock DB results: seed-entity is active, rel-0 is inactive (not returned by execute)
         session = AsyncMock()
         session.__aenter__.return_value = session
         execute_mock = MagicMock()

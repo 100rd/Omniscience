@@ -66,7 +66,7 @@ async def test_qdrant_crash_healed_by_outbox_and_reconciler() -> None:
     consumer._entity_consumer = AsyncMock()
     consumer._entity_consumer.__aiter__ = lambda self: fake_entity_iter()
 
-    # STEP 1: Consumer processes message, hits the Qdrant crash, fails max_retries, and parks entity
+    # STEP 1: Consumer processes message, hits Qdrant crash, fails max_retries, parks entity
     await consumer._consume_entities()
 
     assert uuid.UUID(ent_id) in consumer._parked_entities

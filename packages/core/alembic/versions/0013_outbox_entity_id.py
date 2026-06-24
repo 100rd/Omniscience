@@ -1,7 +1,7 @@
 """Add entity_id partition key to outbox_events.
 
-Revision ID: 0013
-Revises: 0012
+Revision ID: 0013_outbox_entity_id
+Revises: 0013_add_entity_version
 Create Date: 2026-06-24 00:00:00.000000
 
 AP1 — single-writer invariant: adds a nullable ``entity_id`` UUID column
@@ -25,8 +25,8 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 # Revision identifiers
-revision: str = "0013"
-down_revision: str | None = "0012"
+revision: str = "0013_outbox_entity_id"
+down_revision: str | None = "0013_add_entity_version"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

@@ -91,7 +91,7 @@ class OutboxWorker:
             log.debug("outbox_polling_found_events", count=len(events))
 
             base_time = time.time_ns()
-            for i, event in enumerate(events):
+            for _i, event in enumerate(events):
                 try:
                     subject: str
                     payload: EntityUpsertEvent | EdgeUpsertEvent | EntityMergeEvent
@@ -124,4 +124,4 @@ class OutboxWorker:
                         error=str(exc),
                     )
                     # We don't mark as processed so it will be retried on next tick
-            _ = base_time + i * _NS_PER_TICK  # keep base_time/i in scope for future tracing
+            _ = base_time  # kept for future tracing (i removed as unused)

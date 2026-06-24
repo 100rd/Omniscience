@@ -154,6 +154,7 @@ def test_calculate_probabilistic_incident_confidence() -> None:
     assert not is_prov
     assert pytest.approx(res, abs=1e-5) == expected
 
+
 def test_temporal_hold_out() -> None:
     now = datetime.now(UTC)
     # Test that watermark age correctly calculates hold out
@@ -167,11 +168,12 @@ def test_temporal_hold_out() -> None:
     age_future = calculate_watermark_age(future, now)
     assert age_future == 0.0
 
+
 def test_cold_start_fallback() -> None:
     score = 0.5
     # with min_support=30, support_size=15
     alpha = 15 / 30
-    iso_val = calibrate_isotonic(score, support_size=100) # no fallback
+    iso_val = calibrate_isotonic(score, support_size=100)  # no fallback
     platt_val = calibrate_platt(score)
     expected = alpha * iso_val + (1.0 - alpha) * platt_val
 

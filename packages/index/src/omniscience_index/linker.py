@@ -137,7 +137,8 @@ class EntityLinker:
         from omniscience_core.db.models import OutboxEvent
         from omniscience_core.queue.messages import EdgeUpsertEvent
 
-        assert self._session_factory is not None  # guarded by caller
+        if self._session_factory is None:  # guarded by caller
+            raise RuntimeError("session_factory must be set before emitting outbox events")
 
         edge_event = EdgeUpsertEvent(
             id=str(uuid.uuid4()),

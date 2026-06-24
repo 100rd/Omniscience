@@ -1,7 +1,7 @@
 """Add content_hash to entities for per-entity anti-entropy (AP2).
 
 Revision ID: 0014
-Revises: 0013
+Revises: 0013_outbox_entity_id
 Create Date: 2026-06-24 00:00:00.000000
 
 AP2 — closed-loop reconciliation: adds a nullable ``content_hash`` TEXT column
@@ -35,7 +35,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0014"
-down_revision: str | None = "0013"
+down_revision: str | None = "0013_outbox_entity_id"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

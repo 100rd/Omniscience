@@ -33,6 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -278,9 +279,6 @@ class IngestionRun(Base):
     chunks: Mapped[list[Chunk]] = relationship("Chunk", back_populates="ingestion_run")
 
     __table_args__ = (Index("ix_ingestion_runs_source_id", "source_id"),)
-
-
-from sqlalchemy.types import UserDefinedType
 
 
 class SqlVector(UserDefinedType[Any]):

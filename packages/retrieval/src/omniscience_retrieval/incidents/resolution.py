@@ -95,8 +95,12 @@ class AlertSummary(BaseModel):
     source: str | None = None
     chunk_text: str | None = None
     valid_from: datetime | None = None
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class ResourceSummary(BaseModel):
@@ -109,8 +113,12 @@ class ResourceSummary(BaseModel):
         default=None,
         description="The edge_type by which the alert reached this resource.",
     )
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class PrSummary(BaseModel):
@@ -128,8 +136,12 @@ class PrSummary(BaseModel):
             "(GitHub PR #150).  Calibrated extraction lands in #155."
         ),
     )
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class SlackThreadSummary(BaseModel):
@@ -140,8 +152,12 @@ class SlackThreadSummary(BaseModel):
     source: str | None = None
     chunk_text: str | None = None
     edge_type: str | None = None
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class ResolveIncidentResponse(BaseModel):
@@ -182,7 +198,7 @@ class ResolveIncidentResponse(BaseModel):
     )
     min_applied_version: int | None = Field(
         default=None,
-        description="The minimum applied version among all evidence in this response."
+        description="The minimum applied version among all evidence in this response.",
     )
 
 
@@ -421,6 +437,7 @@ def _compute_staleness(node: EntityNodeView | None, now: datetime) -> float | No
         return None
     return max(0.0, (now - node.recorded_at).total_seconds())
 
+
 def build_resolve_response(
     *,
     alert: EntityNodeView,
@@ -450,12 +467,16 @@ def build_resolve_response(
     responsible_pr = _summarise_pr(classified.responsible_pr, effective_as_of)
     slack_threads = [_summarise_thread(t, effective_as_of) for t in classified.slack_threads]
 
-    versions = [v for v in [
-        alert_summary.applied_version,
-        target_resource.applied_version if target_resource else None,
-        responsible_pr.applied_version if responsible_pr else None,
-        *[t.applied_version for t in slack_threads]
-    ] if v is not None]
+    versions = [
+        v
+        for v in [
+            alert_summary.applied_version,
+            target_resource.applied_version if target_resource else None,
+            responsible_pr.applied_version if responsible_pr else None,
+            *[t.applied_version for t in slack_threads],
+        ]
+        if v is not None
+    ]
     min_applied_version = min(versions) if versions else None
 
     return ResolveIncidentResponse(

@@ -7,7 +7,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from omniscience_core.audit.fingerprint import entity_content_hash
 from omniscience_core.db.models import Chunk, Document, Edge, Entity, Source
@@ -754,6 +754,7 @@ class PostgresOnlyStore:
             )
             doc_res = await session.execute(doc_stmt)
             doc = doc_res.scalar_one_or_none()
+            action: Literal["created", "updated"]
             if doc is None:
                 doc = Document(
                     id=uuid.uuid4(),

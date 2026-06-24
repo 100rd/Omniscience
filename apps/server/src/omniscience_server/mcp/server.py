@@ -139,19 +139,23 @@ _fastapi_app: FastAPI | None = None
 #: Global budget in characters for limited MCP tools (approx 20,000 tokens).
 MCP_GLOBAL_BUDGET_CHARS = 80000
 
+
 def _apply_mcp_budget(result: dict[str, Any]) -> dict[str, Any]:
     """Ensure the JSON serialized size of the result does not exceed the global MCP budget.
     If it exceeds, truncate and add a truncation warning."""
     import json
+
     s = json.dumps(result)
     if len(s) <= MCP_GLOBAL_BUDGET_CHARS:
         return result
     return {
         "error": "budget_exceeded",
-        "message": "The tool output exceeded the global MCP character budget. Please refine your query or use depth limits.",
-        "truncated": True
+        "message": (
+            "The tool output exceeded the global MCP character budget."
+            " Please refine your query or use depth limits."
+        ),
+        "truncated": True,
     }
-
 
 
 def set_fastapi_app(app: FastAPI) -> None:
@@ -329,20 +333,22 @@ async def search(
     workspace_id = get_workspace_id(token) if token is not None else None
     parsed_as_of = _parse_as_of(as_of)
 
-    return _apply_mcp_budget(await mcp_search(
-        app=_get_app(),
-        query=query,
-        top_k=top_k,
-        sources=sources,
-        types=types,
-        max_age_seconds=max_age_seconds,
-        filters=filters,
-        include_tombstoned=include_tombstoned,
-        retrieval_strategy=retrieval_strategy,
-        workspace_id=workspace_id,
-        as_of=parsed_as_of,
-        cursor=cursor,
-    ))
+    return _apply_mcp_budget(
+        await mcp_search(
+            app=_get_app(),
+            query=query,
+            top_k=top_k,
+            sources=sources,
+            types=types,
+            max_age_seconds=max_age_seconds,
+            filters=filters,
+            include_tombstoned=include_tombstoned,
+            retrieval_strategy=retrieval_strategy,
+            workspace_id=workspace_id,
+            as_of=parsed_as_of,
+            cursor=cursor,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -579,9 +585,9 @@ async def source_stats(
 
     workspace_id = get_workspace_id(token) if token is not None else None
     try:
-        return _apply_mcp_budget(await mcp_source_stats(
-            app=_get_app(), source_id=source_id, workspace_id=workspace_id
-        ))
+        return _apply_mcp_budget(
+            await mcp_source_stats(app=_get_app(), source_id=source_id, workspace_id=workspace_id)
+        )
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("source_not_found:"):
@@ -687,20 +693,22 @@ async def incident_timeline(
     fail-closed, no existence leak for cross-workspace alert ids
     (issue #117 / ADR-0005).
     """
-    return _apply_mcp_budget(await incident_timeline_tool(
-        app=_get_app(),
-        ctx=ctx,
-        resolve_token=_resolve_token,
-        require_scope=_require_scope,
-        parse_as_of=_parse_as_of,
-        record_invocation=_record_tool_invocation,
-        alert_id=alert_id,
-        from_ts=from_ts,
-        to_ts=to_ts,
-        entity_types=entity_types,
-        as_of=as_of,
-        max_depth=max_depth,
-    ))
+    return _apply_mcp_budget(
+        await incident_timeline_tool(
+            app=_get_app(),
+            ctx=ctx,
+            resolve_token=_resolve_token,
+            require_scope=_require_scope,
+            parse_as_of=_parse_as_of,
+            record_invocation=_record_tool_invocation,
+            alert_id=alert_id,
+            from_ts=from_ts,
+            to_ts=to_ts,
+            entity_types=entity_types,
+            as_of=as_of,
+            max_depth=max_depth,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -758,14 +766,16 @@ async def blast_radius(
     parsed_as_of = _parse_as_of(as_of)
     clamped_depth = max(BLAST_MIN_MAX_DEPTH, min(max_depth, BLAST_MAX_MAX_DEPTH))
     try:
-        return _apply_mcp_budget(await mcp_blast_radius(
-            app=_get_app(),
-            entity_id=entity_id,
-            workspace_id=workspace_id,
-            action_type=typed_action,
-            as_of=parsed_as_of,
-            max_depth=clamped_depth,
-        ))
+        return _apply_mcp_budget(
+            await mcp_blast_radius(
+                app=_get_app(),
+                entity_id=entity_id,
+                workspace_id=workspace_id,
+                action_type=typed_action,
+                as_of=parsed_as_of,
+                max_depth=clamped_depth,
+            )
+        )
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith(f"{INVALID_ENTITY_ID_CODE}:"):

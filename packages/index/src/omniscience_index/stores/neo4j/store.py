@@ -300,7 +300,11 @@ class Neo4jGraphStore:
 
         if version is not None:
             res = await tx.run(
-                "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
+                (
+                    "MATCH (c:StoreCheckpoint"
+                    " {workspace_id: $workspace_id, source_id: $source_id})"
+                    " RETURN c.version AS version, c.epoch AS epoch"
+                ),
                 {"workspace_id": str(workspace_id), "source_id": str(source_id)},
             )
             record = await res.single()
@@ -322,7 +326,12 @@ class Neo4jGraphStore:
                 return 0, 0
 
             await tx.run(
-                "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
+                (
+                    "MERGE (c:StoreCheckpoint"
+                    " {workspace_id: $workspace_id, source_id: $source_id})"
+                    " SET c.version = $version, c.epoch = $epoch,"
+                    " c.updated_at = datetime($now)"
+                ),
                 {
                     "workspace_id": str(workspace_id),
                     "source_id": str(source_id),
@@ -444,7 +453,11 @@ class Neo4jGraphStore:
         async def _run(tx: Any) -> None:
             if getattr(entity, "version", None) is not None:
                 res = await tx.run(
-                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
+                    (
+                        "MATCH (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " RETURN c.version AS version, c.epoch AS epoch"
+                    ),
                     {"workspace_id": str(workspace_id), "source_id": str(entity.source_id)},
                 )
                 record = await res.single()
@@ -467,7 +480,12 @@ class Neo4jGraphStore:
                 if should_skip:
                     return
                 await tx.run(
-                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
+                    (
+                        "MERGE (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " SET c.version = $version, c.epoch = $epoch,"
+                        " c.updated_at = datetime($now)"
+                    ),
                     {
                         "workspace_id": str(workspace_id),
                         "source_id": str(entity.source_id),
@@ -507,7 +525,11 @@ class Neo4jGraphStore:
             if getattr(edge, "version", None) is not None and edge.metadata.get("source_id"):
                 source_id = str(edge.metadata["source_id"])
                 res = await tx.run(
-                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
+                    (
+                        "MATCH (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " RETURN c.version AS version, c.epoch AS epoch"
+                    ),
                     {"workspace_id": str(workspace_id), "source_id": source_id},
                 )
                 record = await res.single()
@@ -530,7 +552,12 @@ class Neo4jGraphStore:
                 if should_skip:
                     return
                 await tx.run(
-                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
+                    (
+                        "MERGE (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " SET c.version = $version, c.epoch = $epoch,"
+                        " c.updated_at = datetime($now)"
+                    ),
                     {
                         "workspace_id": str(workspace_id),
                         "source_id": source_id,
@@ -1179,8 +1206,8 @@ class Neo4jGraphStore:
 
                 inc_cypher = """
                 MATCH (x)-[r]->(a:`Entity` {workspace_id: $workspace_id, id: $source_id})
-                WHERE r.workspace_id = $workspace_id 
-                  AND type(r) <> 'MERGED_INTO' 
+                WHERE r.workspace_id = $workspace_id
+                  AND type(r) <> 'MERGED_INTO'
                   AND type(r) <> 'HAD_STATE'
                 RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, x.id AS other_id
                 """
@@ -1189,8 +1216,8 @@ class Neo4jGraphStore:
 
                 out_cypher = """
                 MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})-[r]->(y)
-                WHERE r.workspace_id = $workspace_id 
-                  AND type(r) <> 'MERGED_INTO' 
+                WHERE r.workspace_id = $workspace_id
+                  AND type(r) <> 'MERGED_INTO'
                   AND type(r) <> 'HAD_STATE'
                 RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, y.id AS other_id
                 """
@@ -1241,8 +1268,8 @@ class Neo4jGraphStore:
 
                 del_cypher = """
                 MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})-[r]-()
-                WHERE r.workspace_id = $workspace_id 
-                  AND type(r) <> 'MERGED_INTO' 
+                WHERE r.workspace_id = $workspace_id
+                  AND type(r) <> 'MERGED_INTO'
                   AND type(r) <> 'HAD_STATE'
                 DELETE r
                 """

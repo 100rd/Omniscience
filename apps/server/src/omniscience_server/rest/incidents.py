@@ -161,6 +161,7 @@ async def resolve_incident(
 
 class IncidentFeedback(BaseModel):
     """User feedback on an incident resolution."""
+
     predicted_confidence: float = Field(ge=0.0, le=1.0)
     true_label: int = Field(description="1 if correct, 0 if incorrect", ge=0, le=1)
 

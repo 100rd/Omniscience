@@ -34,6 +34,7 @@ drift fails here.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import socket
 import uuid
@@ -43,9 +44,8 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pytest
-from hypothesis import given, settings, strategies as st
-import asyncio
-
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from omniscience_core.storage.contract import StoreContract
 from omniscience_core.storage.graph import EdgeUpsert, EntityUpsert
 
@@ -141,42 +141,42 @@ def _full_store_factory() -> Callable[[], AsyncIterator[StoreContract]]:
             return res
 
     async def _factory() -> AsyncIterator[StoreContract]:
-        with Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j:
-            with QdrantContainer(image="qdrant/qdrant:v1.12.4") as qdrant:
-                config = Neo4jStoreConfig(
-                    uri=neo4j.get_connection_url(),
-                    username="neo4j",
-                    password="contract_test_password",
-                    database="neo4j",
-                    max_connection_pool_size=5,
-                    connection_acquisition_timeout_seconds=30.0,
-                    max_transaction_retry_time_seconds=15.0,
-                    default_max_depth=3,
-                )
-                graph_store = Neo4jGraphStore(config=config)
+        with (
+            Neo4jContainer("neo4j:5.19-community", password="contract_test_password") as neo4j,
+            QdrantContainer(image="qdrant/qdrant:v1.12.4") as qdrant,
+        ):
+            config = Neo4jStoreConfig(
+                uri=neo4j.get_connection_url(),
+                username="neo4j",
+                password="contract_test_password",
+                database="neo4j",
+                max_connection_pool_size=5,
+                connection_acquisition_timeout_seconds=30.0,
+                max_transaction_retry_time_seconds=15.0,
+                default_max_depth=3,
+            )
+            graph_store = Neo4jGraphStore(config=config)
 
-                parsed_qdrant_url = urlparse(qdrant.get_url())
-                vconfig = QdrantConfig(
-                    host=parsed_qdrant_url.hostname or "localhost",
-                    http_port=parsed_qdrant_url.port or 6333,
-                    grpc_port=int(qdrant.get_exposed_port(6334)),
-                    api_key=None,
-                    prefer_grpc=False,
-                )
-                vector_store = QdrantVectorStore(
-                    config=vconfig, embedding_provider=DummyProvider()
-                )
+            parsed_qdrant_url = urlparse(qdrant.get_url())
+            vconfig = QdrantConfig(
+                host=parsed_qdrant_url.hostname or "localhost",
+                http_port=parsed_qdrant_url.port or 6333,
+                grpc_port=int(qdrant.get_exposed_port(6334)),
+                api_key=None,
+                prefer_grpc=False,
+            )
+            vector_store = QdrantVectorStore(config=vconfig, embedding_provider=DummyProvider())
 
-                await graph_store.connect()
-                await vector_store.connect()
-                store = FullStore(vector_store, graph_store)
+            await graph_store.connect()
+            await vector_store.connect()
+            store = FullStore(vector_store, graph_store)
 
-                try:
-                    await _seed_store_with_fixture(store)
-                    yield store
-                finally:
-                    await graph_store.close()
-                    await vector_store.close()
+            try:
+                await _seed_store_with_fixture(store)
+                yield store
+            finally:
+                await graph_store.close()
+                await vector_store.close()
 
     return _factory
 
@@ -197,10 +197,10 @@ def _postgres_factory() -> Callable[[], AsyncIterator[StoreContract]]:
             engine = create_async_engine(driver_url)
             session_factory = async_sessionmaker(engine, expire_on_commit=False)
 
-            from sqlalchemy import text
+            from sqlalchemy import text as sa_text
 
             async with engine.begin() as conn:
-                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+                await conn.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector"))
                 await conn.run_sync(Base.metadata.create_all)
 
             class DummyProvider:
@@ -573,7 +573,9 @@ async def test_delete_by_document_tombstones_chunks(store: StoreContract) -> Non
 @settings(max_examples=10, deadline=None)
 @given(
     entity_names=st.lists(
-        st.text(alphabet=st.characters(blacklist_categories=("Cs", "Cc")), min_size=1, max_size=20),
+        st.text(
+            alphabet=st.characters(blacklist_categories=("Cs", "Cc")), min_size=1, max_size=20
+        ),
         min_size=2,
         max_size=10,
     )
@@ -606,16 +608,21 @@ async def test_concurrent_upsert_property(store: StoreContract, entity_names: li
         assert ent is not None
         assert ent.name == name
 
+
 @settings(max_examples=5, deadline=None)
 @given(
     display_names=st.lists(
-        st.text(alphabet=st.characters(blacklist_categories=("Cs", "Cc")), min_size=1, max_size=20),
+        st.text(
+            alphabet=st.characters(blacklist_categories=("Cs", "Cc")), min_size=1, max_size=20
+        ),
         min_size=2,
         max_size=5,
     )
 )
 @pytest.mark.asyncio
-async def test_concurrent_same_entity_upsert_property(store: StoreContract, display_names: list[str]) -> None:
+async def test_concurrent_same_entity_upsert_property(
+    store: StoreContract, display_names: list[str]
+) -> None:
     ws = _WORKSPACE_A
     entities = await store.get_all_entities(workspace_id=ws)
     source_id = uuid.UUID(entities[0].source) if entities else uuid.uuid4()
@@ -638,12 +645,12 @@ async def test_concurrent_same_entity_upsert_property(store: StoreContract, disp
         for dname in display_names
     ]
 
-    results = await asyncio.gather(*upserts, return_exceptions=True)
-    # Ensure no exceptions leaked out to break the test, except if they are DB-level constraint errors
-    # Wait for completion, then check that exactly 1 or 0 entities exist (no duplicates).
+    await asyncio.gather(*upserts, return_exceptions=True)
+    # Ensure no exceptions leaked; check that at most 1 entity exists (no duplicates).
     all_ents = await store.get_all_entities(workspace_id=ws)
     matching = [e for e in all_ents if e.name == ent_name]
     assert len(matching) <= 1, "Concurrent upsert of the same entity resulted in duplicates"
+
 
 @pytest.mark.asyncio
 async def test_upsert_graph_partial_failure_atomicity(store: StoreContract) -> None:
@@ -673,19 +680,20 @@ async def test_upsert_graph_partial_failure_atomicity(store: StoreContract) -> N
         chunk_id=None,
     )
 
-    try:
+    import contextlib
+
+    with contextlib.suppress(Exception):
         await store.upsert_graph(
             source_id=source_id,
             document_id=uuid.uuid4(),
             entities=[valid_ent, invalid_ent],
             edges=[],
         )
-    except Exception:
-        pass
 
     # Check that valid_ent was NOT inserted, ensuring atomicity
     ent = await store.get_entity(entity_name=valid_ent.name, workspace_id=ws)
     assert ent is None, "Partial failure leaked into the database (atomicity broken)"
+
 
 @settings(max_examples=5, deadline=None)
 @given(
@@ -695,7 +703,9 @@ async def test_upsert_graph_partial_failure_atomicity(store: StoreContract) -> N
     )
 )
 @pytest.mark.asyncio
-async def test_upsert_boundary_versions_property(store: StoreContract, version: int | None) -> None:
+async def test_upsert_boundary_versions_property(
+    store: StoreContract, version: int | None
+) -> None:
     ws = _WORKSPACE_A
     entities = await store.get_all_entities(workspace_id=ws)
     source_id = uuid.UUID(entities[0].source) if entities else uuid.uuid4()
@@ -716,12 +726,11 @@ async def test_upsert_boundary_versions_property(store: StoreContract, version: 
             ),
             workspace_id=ws,
         )
-        
+
         ent = await store.get_entity(entity_name=ent_name, workspace_id=ws)
         assert ent is not None
         assert ent.name == ent_name
-    except Exception as e:
-        # We accept failures on extreme values if the underlying DB rejects them 
-        # (e.g. Postgres BIGINT limits). 
-        # But we verify it doesn't crash the Python process or leave invalid state.
+    except Exception:  # noqa: S110 - we intentionally accept DB-level rejections on extreme values
+        # Accept failures on extreme values if the underlying DB rejects them
+        # (e.g. Postgres BIGINT limits). We verify no crash, no invalid state.
         pass
