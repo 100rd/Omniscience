@@ -42,6 +42,10 @@ class SearchRequest(BaseModel):
             "this time per ADR-0008 §5. Naive datetimes are rejected."
         ),
     )
+    cursor: str | None = Field(
+        default=None,
+        description="Opaque pagination cursor to resume a prior search."
+    )
 
     @field_validator("as_of", mode="after")
     @classmethod
@@ -191,4 +195,8 @@ class SearchResult(BaseModel):
     snapshot_id: str | None = Field(
         default=None,
         description="ID of the graph snapshot used for this response."
+    )
+    next_cursor: str | None = Field(
+        default=None,
+        description="Opaque pagination cursor to fetch the next page of results."
     )

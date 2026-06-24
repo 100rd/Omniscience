@@ -14,7 +14,7 @@ def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
     driver_mock.session.return_value = session_mock
     config = MagicMock()
     config.uri = "bolt://mock"
-    store = Neo4jGraphStore(config=config, client_name="test")
+    store = Neo4jGraphStore(config=config)
     store._driver = driver_mock
     return store, tx_mock
 

@@ -136,6 +136,23 @@ mcp_server: FastMCP[None] = FastMCP("omniscience")
 # FastAPI app reference — set via set_fastapi_app() before first request
 _fastapi_app: FastAPI | None = None
 
+#: Global budget in characters for limited MCP tools (approx 20,000 tokens).
+MCP_GLOBAL_BUDGET_CHARS = 80000
+
+def _apply_mcp_budget(result: dict[str, Any]) -> dict[str, Any]:
+    """Ensure the JSON serialized size of the result does not exceed the global MCP budget.
+    If it exceeds, truncate and add a truncation warning."""
+    import json
+    s = json.dumps(result)
+    if len(s) <= MCP_GLOBAL_BUDGET_CHARS:
+        return result
+    return {
+        "error": "budget_exceeded",
+        "message": "The tool output exceeded the global MCP character budget. Please refine your query or use depth limits.",
+        "truncated": True
+    }
+
+
 
 def set_fastapi_app(app: FastAPI) -> None:
     """Store a reference to the FastAPI app for use in tool handlers."""
@@ -292,6 +309,7 @@ async def search(
     include_tombstoned: bool = False,
     retrieval_strategy: str = "hybrid",
     as_of: str | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Search tool — requires scope 'search'.
 
@@ -311,7 +329,7 @@ async def search(
     workspace_id = get_workspace_id(token) if token is not None else None
     parsed_as_of = _parse_as_of(as_of)
 
-    return await mcp_search(
+    return _apply_mcp_budget(await mcp_search(
         app=_get_app(),
         query=query,
         top_k=top_k,
@@ -323,7 +341,8 @@ async def search(
         retrieval_strategy=retrieval_strategy,
         workspace_id=workspace_id,
         as_of=parsed_as_of,
-    )
+        cursor=cursor,
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +556,7 @@ async def list_sources(
     _record_tool_invocation(tool_name="list_sources", token=token)
 
     workspace_id = get_workspace_id(token) if token is not None else None
-    return await mcp_list_sources(app=_get_app(), workspace_id=workspace_id)
+    return _apply_mcp_budget(await mcp_list_sources(app=_get_app(), workspace_id=workspace_id))
 
 
 # ---------------------------------------------------------------------------
@@ -560,9 +579,9 @@ async def source_stats(
 
     workspace_id = get_workspace_id(token) if token is not None else None
     try:
-        return await mcp_source_stats(
+        return _apply_mcp_budget(await mcp_source_stats(
             app=_get_app(), source_id=source_id, workspace_id=workspace_id
-        )
+        ))
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("source_not_found:"):
@@ -633,7 +652,7 @@ async def resolve_incident(
     # advertised the ``omniscience/apps`` experimental capability, attach
     # the rendered card under ``_meta``; otherwise the legacy response
     # passes through byte-for-byte (backwards-compat invariant).
-    return wrap_resolve_incident_response(legacy_response, ctx=ctx)
+    return _apply_mcp_budget(wrap_resolve_incident_response(legacy_response, ctx=ctx))
 
 
 # ---------------------------------------------------------------------------
@@ -668,7 +687,7 @@ async def incident_timeline(
     fail-closed, no existence leak for cross-workspace alert ids
     (issue #117 / ADR-0005).
     """
-    return await incident_timeline_tool(
+    return _apply_mcp_budget(await incident_timeline_tool(
         app=_get_app(),
         ctx=ctx,
         resolve_token=_resolve_token,
@@ -681,7 +700,7 @@ async def incident_timeline(
         entity_types=entity_types,
         as_of=as_of,
         max_depth=max_depth,
-    )
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -739,14 +758,14 @@ async def blast_radius(
     parsed_as_of = _parse_as_of(as_of)
     clamped_depth = max(BLAST_MIN_MAX_DEPTH, min(max_depth, BLAST_MAX_MAX_DEPTH))
     try:
-        return await mcp_blast_radius(
+        return _apply_mcp_budget(await mcp_blast_radius(
             app=_get_app(),
             entity_id=entity_id,
             workspace_id=workspace_id,
             action_type=typed_action,
             as_of=parsed_as_of,
             max_depth=clamped_depth,
-        )
+        ))
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith(f"{INVALID_ENTITY_ID_CODE}:"):

@@ -136,6 +136,11 @@ ANCHOR_FILTER_KEY: str = "graphrag_anchor"
 #: response is not interpreted as "deleted" or "unauthorised".
 DEGRADED_PRE_HISTORY: str = "as_of_before_recorded_history"
 
+#: Global budget in characters for the composed GraphRAG result.
+#: Acts as a proxy for ~6000 tokens to avoid blowing up the LLM context.
+#: Tails of the graph (lower scored hits) are cut off when this budget is reached.
+GRAPHRAG_BUDGET_CHARS: int = 24000
+
 
 # ---------------------------------------------------------------------------
 # Prometheus metrics — omniscience_graphrag_* namespace
@@ -636,18 +641,45 @@ class GraphRAGComposer:
         # Sort: descending by score, tie-break by original index (stable).
         scored.sort(key=lambda row: (-row[0], row[4]))
 
+        start_idx = 0
+        if request.cursor:
+            try:
+                start_idx = int(request.cursor)
+            except ValueError:
+                pass
+
+        top_hits = []
+        char_budget = 0
         top_k = request.top_k
-        top_hits = [
-            hit.model_copy(
-                update={"score": score, "confidence": conf, "score_type": stype, "impact": imp}
+        next_cursor = None
+
+        for score, conf, stype, imp, _, hit in scored[start_idx:]:
+            if len(top_hits) >= top_k:
+                next_cursor = str(start_idx + len(top_hits))
+                break
+            
+            hit_chars = len(hit.text)
+            if char_budget + hit_chars > GRAPHRAG_BUDGET_CHARS and len(top_hits) > 0:
+                next_cursor = str(start_idx + len(top_hits))
+                break
+                
+            char_budget += hit_chars
+            top_hits.append(
+                hit.model_copy(
+                    update={"score": score, "confidence": conf, "score_type": stype, "impact": imp}
+                )
             )
-            for score, conf, stype, imp, _, hit in scored[:top_k]
-        ]
+
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="merge").observe(duration)
         versions = [h.applied_version for h in top_hits if getattr(h, "applied_version", None) is not None]
         min_applied_version = min(versions) if versions else None
-        return SearchResult(hits=top_hits, query_stats=vector_result.query_stats, min_applied_version=min_applied_version)
+        return SearchResult(
+            hits=top_hits,
+            query_stats=vector_result.query_stats,
+            min_applied_version=min_applied_version,
+            next_cursor=next_cursor
+        )
 
     async def _validate_entities(
         self,

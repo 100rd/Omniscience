@@ -74,6 +74,7 @@ async def mcp_search(
     retrieval_strategy: str = "hybrid",
     workspace_id: uuid.UUID | None = None,
     as_of: datetime | None = None,
+    cursor: str | None = None,
 ) -> dict[str, Any]:
     """Execute retrieval and return hits with citations.
 
@@ -100,6 +101,7 @@ async def mcp_search(
         include_tombstoned=include_tombstoned,
         retrieval_strategy=retrieval_strategy,  # type: ignore[arg-type]
         as_of=normalised_as_of,
+        cursor=cursor,
     )
     with record_request_duration(surface="mcp", tool="search", as_of=normalised_as_of) as patcher:
         if composer is not None and workspace_id is not None:
