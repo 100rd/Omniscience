@@ -177,7 +177,7 @@ class Neo4jGraphStore:
             max_transaction_retry_time=(config.max_transaction_retry_time_seconds),
         )
         self._bootstrapped: bool = False
-        self._bitemporal_enabled: bool = False
+        self._bitemporal_enabled: bool = config.bitemporal_enabled
 
     async def connect(self) -> None:
         """Verify connectivity and run the idempotent schema bootstrap."""

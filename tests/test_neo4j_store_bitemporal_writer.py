@@ -85,7 +85,12 @@ def _make_config(*, bitemporal_enabled: bool) -> Neo4jStoreConfig:
 
 
 def _make_store_with_mock_driver(*, bitemporal_enabled: bool) -> tuple[Neo4jGraphStore, MagicMock]:
-    """Build a store whose async driver is mocked in place."""
+    """Build a store whose async driver is mocked in place.
+
+    execute_write now receives a single closure (not cypher+params).
+    We execute the closure against a mock transaction so tests can inspect
+    tx_mock.run.call_args to verify the cypher and params chosen.
+    """
     config = _make_config(bitemporal_enabled=bitemporal_enabled)
 
     driver_mock = MagicMock()
@@ -94,8 +99,17 @@ def _make_store_with_mock_driver(*, bitemporal_enabled: bool) -> tuple[Neo4jGrap
 
     session_ctx = MagicMock()
     session_mock = MagicMock()
+
+    # Build a mock transaction that records run() calls
+    tx_mock = MagicMock()
+    tx_mock.run = AsyncMock()
+
+    async def _fake_execute_write(fn, *args, **kwargs):
+        """Call the closure with the mock tx so we can inspect tx.run calls."""
+        await fn(tx_mock, *args, **kwargs)
+
     session_mock.execute_read = AsyncMock(return_value=[])
-    session_mock.execute_write = AsyncMock(return_value=None)
+    session_mock.execute_write = AsyncMock(side_effect=_fake_execute_write)
     session_ctx.__aenter__ = AsyncMock(return_value=session_mock)
     session_ctx.__aexit__ = AsyncMock(return_value=None)
     driver_mock.session = MagicMock(return_value=session_ctx)
@@ -107,6 +121,7 @@ def _make_store_with_mock_driver(*, bitemporal_enabled: bool) -> tuple[Neo4jGrap
         store = Neo4jGraphStore(config=config)
 
     driver_mock._session_mock = session_mock
+    driver_mock._tx_mock = tx_mock
     return store, driver_mock
 
 
@@ -291,9 +306,9 @@ async def test_disabled_flag_uses_legacy_entity_cypher_verbatim() -> None:
 
     await store.upsert_entity(entity=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert cypher == _UPSERT_ENTITY_CYPHER
     assert "state_fingerprint" not in params, (
         "Disabled flag must not pollute params with bitemporal-only keys."
@@ -317,9 +332,9 @@ async def test_enabled_flag_uses_bitemporal_entity_cypher() -> None:
 
     await store.upsert_entity(entity=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert cypher == _UPSERT_ENTITY_BITEMPORAL_CYPHER
     assert "state_fingerprint" in params
     # The fingerprint is a SHA-256 hex digest — 64 chars.
@@ -337,9 +352,9 @@ async def test_disabled_flag_uses_legacy_edge_cypher() -> None:
 
     await store.upsert_edge(edge=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     expected = _UPSERT_EDGE_CYPHER_TEMPLATE.replace("{edge_type}", "CALLS")
     assert cypher == expected
     assert "state_fingerprint" not in params
@@ -358,9 +373,9 @@ async def test_enabled_flag_uses_bitemporal_edge_cypher() -> None:
 
     await store.upsert_edge(edge=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     expected = _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE.replace("{edge_type}", "CALLS")
     assert cypher == expected
     assert "state_fingerprint" in params
@@ -406,9 +421,9 @@ async def test_bitemporal_upsert_entity_passes_workspace_id() -> None:
 
     await store.upsert_entity(entity=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert "workspace_id" in cypher
     assert params["workspace_id"] == str(_WORKSPACE_A)
 
@@ -424,9 +439,9 @@ async def test_bitemporal_upsert_edge_passes_workspace_id() -> None:
 
     await store.upsert_edge(edge=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert "workspace_id" in cypher
     assert params["workspace_id"] == str(_WORKSPACE_A)
 
@@ -748,23 +763,85 @@ async def test_atomicity_on_simulated_mid_tx_failure_no_half_versioned_state() -
         # been queued.  The neo4j driver's `execute_write` retries on
         # transient errors but PROPAGATES on user-raised exceptions and
         # rolls back the transaction.  We force a rollback by making the
-        # write throw.
-        original_run_write = neo4j_store._run_write_stmt
+        # closure raise immediately after the managed tx.run() call completes.
+        #
+        # upsert_entity uses an inner closure that calls tx.run() directly
+        # (not _run_write_stmt), so we intercept by patching the session
+        # factory on the driver to return a wrapped session whose execute_write
+        # delegates to the real neo4j session but re-raises after the closure
+        # returns, simulating an application-level error that aborts the tx.
+        real_session_fn = store._driver.session
 
-        async def _explode(tx: Any, cypher: str, params: dict[str, Any]) -> None:
-            await original_run_write(tx, cypher, params)
-            raise RuntimeError("simulated_mid_tx_failure")
+        class _BoomTx:
+            """Proxy that delegates tx.run() to the real tx, then marks itself dirty."""
 
-        with patch("omniscience_index.stores.neo4j.store._run_write_stmt", _explode):
-            ent_v2 = EntityUpsert(
-                id=ent_v1.id,
-                source_id=ent_v1.source_id,
-                entity_type=ent_v1.entity_type,
-                name=ent_v1.name,
-                display_name=ent_v1.display_name,
-                chunk_id=ent_v1.chunk_id,
-                metadata={"version": "v2"},
-            )
+            def __init__(self, real_tx: Any) -> None:
+                self._real = real_tx
+                self.ran = False
+
+            async def run(self, *args: Any, **kwargs: Any) -> Any:
+                result = await self._real.run(*args, **kwargs)
+                self.ran = True
+                return result
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._real, name)
+
+        class _BoomSession:
+            """Context-manager wrapper that intercepts execute_write."""
+
+            def __init__(self, real_session_ctx: Any) -> None:
+                self._ctx = real_session_ctx
+                self._session: Any = None
+
+            async def __aenter__(self) -> _BoomSession:
+                self._session = await self._ctx.__aenter__()
+                return self
+
+            async def __aexit__(self, *args: Any) -> Any:
+                return await self._ctx.__aexit__(*args)
+
+            async def execute_write(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
+                boom_tx_holder: list[_BoomTx] = []
+
+                async def _wrapped(real_tx: Any) -> None:
+                    bt = _BoomTx(real_tx)
+                    boom_tx_holder.append(bt)
+                    await fn(bt, *args, **kwargs)
+
+                # Run the closure against the real neo4j session.
+                # If the closure itself raises, execute_write handles rollback.
+                # We then raise AFTER execute_write would have committed, which
+                # simulates an application-level abort without actually letting
+                # neo4j commit first.  To guarantee rollback we raise inside the
+                # closure wrapper instead.
+                async def _boom_wrapped(real_tx: Any) -> None:
+                    bt = _BoomTx(real_tx)
+                    boom_tx_holder.append(bt)
+                    await fn(bt, *args, **kwargs)
+                    # Raise after fn completes (all tx.run() calls queued)
+                    # but before execute_write commits the managed transaction.
+                    raise RuntimeError("simulated_mid_tx_failure")
+
+                return await self._session.execute_write(_boom_wrapped)
+
+            def __getattr__(self, name: str) -> Any:
+                return getattr(self._session, name)
+
+        def _boom_session_factory(*args: Any, **kwargs: Any) -> _BoomSession:
+            return _BoomSession(real_session_fn(*args, **kwargs))
+
+        ent_v2 = EntityUpsert(
+            id=ent_v1.id,
+            source_id=ent_v1.source_id,
+            entity_type=ent_v1.entity_type,
+            name=ent_v1.name,
+            display_name=ent_v1.display_name,
+            chunk_id=ent_v1.chunk_id,
+            metadata={"version": "v2"},
+        )
+        with patch.object(store, "_driver") as mock_driver:
+            mock_driver.session = _boom_session_factory
             with pytest.raises(RuntimeError, match="simulated_mid_tx_failure"):
                 await store.upsert_entity(entity=ent_v2, workspace_id=_WORKSPACE_A)
 

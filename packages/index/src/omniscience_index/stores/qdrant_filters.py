@@ -416,6 +416,9 @@ def build_end_date_chunks_filter(
             key=PAYLOAD_SOURCE_ID,
             match=qm.MatchValue(value=str(source_id)),
         ),
+        # Only end-date points whose valid_to is still NULL (open rows).
+        # Points already end-dated are skipped — idempotency invariant.
+        qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)),
     ]
 
     must_not: list[_MustClause] = []

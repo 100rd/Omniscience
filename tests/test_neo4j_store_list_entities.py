@@ -60,8 +60,15 @@ def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
     driver_mock.close = AsyncMock(return_value=None)
     session_ctx = MagicMock()
     session_mock = MagicMock()
+
+    tx_mock = MagicMock()
+    tx_mock.run = AsyncMock()
+
+    async def _fake_execute_write(fn, *args, **kwargs):
+        return await fn(tx_mock, *args, **kwargs)
+
     session_mock.execute_read = AsyncMock(return_value=[])
-    session_mock.execute_write = AsyncMock(return_value=None)
+    session_mock.execute_write = AsyncMock(side_effect=_fake_execute_write)
     session_ctx.__aenter__ = AsyncMock(return_value=session_mock)
     session_ctx.__aexit__ = AsyncMock(return_value=None)
     driver_mock.session = MagicMock(return_value=session_ctx)
@@ -71,6 +78,7 @@ def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
     ):
         store = Neo4jGraphStore(config=config)
     driver_mock._session_mock = session_mock
+    driver_mock._tx_mock = tx_mock
     return store, driver_mock
 
 
@@ -113,9 +121,9 @@ async def test_upsert_entity_promotes_cluster_to_first_class_param() -> None:
 
     await store.upsert_entity(entity=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert params["cluster"] == "prod-eks-1"
     assert "n.cluster = $cluster" in cypher
 

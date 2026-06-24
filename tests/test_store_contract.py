@@ -44,7 +44,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import pytest
-from hypothesis import given, settings
+from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 from omniscience_core.storage.contract import StoreContract
 from omniscience_core.storage.graph import EdgeUpsert, EntityUpsert
@@ -157,10 +157,9 @@ def _full_store_factory() -> Callable[[], AsyncIterator[StoreContract]]:
             )
             graph_store = Neo4jGraphStore(config=config)
 
-            parsed_qdrant_url = urlparse(qdrant.get_url())
             vconfig = QdrantConfig(
-                host=parsed_qdrant_url.hostname or "localhost",
-                http_port=parsed_qdrant_url.port or 6333,
+                host=qdrant.get_container_host_ip(),
+                http_port=int(qdrant.get_exposed_port(6333)),
                 grpc_port=int(qdrant.get_exposed_port(6334)),
                 api_key=None,
                 prefer_grpc=False,
@@ -570,7 +569,9 @@ async def test_delete_by_document_tombstones_chunks(store: StoreContract) -> Non
     assert len(res.hits) == 0
 
 
-@settings(max_examples=10, deadline=None)
+@settings(
+    max_examples=10, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
 @given(
     entity_names=st.lists(
         st.text(
@@ -609,7 +610,9 @@ async def test_concurrent_upsert_property(store: StoreContract, entity_names: li
         assert ent.name == name
 
 
-@settings(max_examples=5, deadline=None)
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
 @given(
     display_names=st.lists(
         st.text(
@@ -695,7 +698,9 @@ async def test_upsert_graph_partial_failure_atomicity(store: StoreContract) -> N
     assert ent is None, "Partial failure leaked into the database (atomicity broken)"
 
 
-@settings(max_examples=5, deadline=None)
+@settings(
+    max_examples=5, deadline=None, suppress_health_check=[HealthCheck.function_scoped_fixture]
+)
 @given(
     version=st.one_of(
         st.none(),

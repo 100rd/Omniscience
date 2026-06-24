@@ -73,9 +73,8 @@ def _make_config() -> Neo4jStoreConfig:
 def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
     """Build a store whose async driver is mocked in place.
 
-    Returns (store, mock_driver).  The mock driver exposes
-    ``session(...).execute_read`` / ``.execute_write`` as AsyncMocks so
-    unit tests can inspect what the adapter would send to Neo4j.
+    Returns (store, mock_driver).  execute_write executes its closure with
+    a mock transaction so tests can inspect tx_mock.run call_args.
     """
     config = _make_config()
 
@@ -85,8 +84,15 @@ def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
 
     session_ctx = MagicMock()
     session_mock = MagicMock()
+
+    tx_mock = MagicMock()
+    tx_mock.run = AsyncMock()
+
+    async def _fake_execute_write(fn, *args, **kwargs):
+        return await fn(tx_mock, *args, **kwargs)
+
     session_mock.execute_read = AsyncMock(return_value=[])
-    session_mock.execute_write = AsyncMock(return_value=None)
+    session_mock.execute_write = AsyncMock(side_effect=_fake_execute_write)
     session_ctx.__aenter__ = AsyncMock(return_value=session_mock)
     session_ctx.__aexit__ = AsyncMock(return_value=None)
     driver_mock.session = MagicMock(return_value=session_ctx)
@@ -99,6 +105,7 @@ def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
 
     # Expose the session-level mock for assertions.
     driver_mock._session_mock = session_mock
+    driver_mock._tx_mock = tx_mock
     return store, driver_mock
 
 
@@ -409,9 +416,9 @@ async def test_upsert_entity_passes_workspace_id() -> None:
 
     await store.upsert_entity(entity=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert "workspace_id" in cypher
     assert params["workspace_id"] == str(_WORKSPACE_A)
     assert params["id"] == str(payload.id)
@@ -428,9 +435,9 @@ async def test_upsert_edge_passes_workspace_id() -> None:
 
     await store.upsert_edge(edge=payload, workspace_id=_WORKSPACE_A)
 
-    args, _ = driver_mock._session_mock.execute_write.call_args
-    cypher = args[1]
-    params = args[2]
+    run_call = driver_mock._tx_mock.run.call_args_list[-1]
+    cypher = run_call.args[0]
+    params = run_call.args[1]
     assert "workspace_id" in cypher
     assert params["workspace_id"] == str(_WORKSPACE_A)
 

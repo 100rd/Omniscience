@@ -82,6 +82,7 @@ async def test_qdrant_crash_healed_by_outbox_and_reconciler() -> None:
     ent_mock.display_name = "Test"
     ent_mock.entity_metadata = {}
     ent_mock.version = 5
+    ent_mock.content_hash = None  # Explicit None to prevent MagicMock truthy string
 
     result_mock = MagicMock()
     result_mock.scalars().all.return_value = [ent_mock]

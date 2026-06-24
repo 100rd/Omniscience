@@ -292,11 +292,16 @@ class TestDLQMessage:
 class TestEnsureStreams:
     @pytest.mark.asyncio
     async def test_creates_both_streams(self) -> None:
-        """ensure_streams() must call add_stream for each defined stream."""
+        """ensure_streams() must call add_stream for each defined stream.
+
+        AP1 added OUTBOX_STREAM (outbox.*) alongside INGEST_CHANGES and
+        INGEST_DLQ, so the total is 3.  The test name "both" is kept for
+        history but the assertion reflects the current stream count.
+        """
         js = _make_js_mock()
         await ensure_streams(js)
 
-        assert js.add_stream.await_count == 2
+        assert js.add_stream.await_count == 3
 
     @pytest.mark.asyncio
     async def test_stream_names_correct(self) -> None:

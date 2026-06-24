@@ -609,10 +609,13 @@ class QdrantVectorStore:
         action: Literal["created", "updated"] = "updated" if existing else "created"
         now = datetime.now(UTC)
         if existing is not None:
-            await self._qc.delete(
-                collection_name=self._collection_name,
-                points_selector=qm.PointIdsList(points=list(existing.chunk_point_ids)),
-                wait=True,
+            # Stage 1 (bitemporal end-dating): end-date old points instead of
+            # hard-deleting them so that as_of queries before this update
+            # still return the previous chunk version.
+            await self._end_date_points(
+                point_ids=list(existing.chunk_point_ids),
+                workspace_id=workspace_id,
+                valid_to=now,
             )
         points = [
             self._chunk_to_point(
@@ -898,9 +901,11 @@ class QdrantVectorStore:
         )
         if before == 0:
             return 0
-        await self._qc.delete(
+        valid_to_iso = (snapshot_at or datetime.now(UTC)).isoformat()
+        await self._qc.set_payload(
             collection_name=self._collection_name,
-            points_selector=qm.FilterSelector(filter=flt),
+            payload={PAYLOAD_VALID_TO: valid_to_iso},
+            points=qm.FilterSelector(filter=flt),
             wait=True,
         )
         return before

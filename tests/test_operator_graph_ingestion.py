@@ -128,15 +128,26 @@ def _make_index_writer() -> MagicMock:
     return writer
 
 
-def _make_session_factory(source: Any) -> MagicMock:
+def _make_session_factory(source: Any) -> tuple[MagicMock, list[Any]]:
+    """Returns (factory, added_events) so tests can inspect outbox events."""
     inner_session = AsyncMock()
     scalar_result = MagicMock()
     scalar_result.scalar_one_or_none = MagicMock(return_value=source)
     inner_session.execute = AsyncMock(return_value=scalar_result)
+
+    added_events: list[Any] = []
+    inner_session.add = MagicMock(side_effect=lambda x: added_events.append(x))
+
+    # session.begin() must return an async context manager, not a coroutine
+    begin_ctx = MagicMock()
+    begin_ctx.__aenter__ = AsyncMock(return_value=None)
+    begin_ctx.__aexit__ = AsyncMock(return_value=False)
+    inner_session.begin = MagicMock(return_value=begin_ctx)
+
     factory_cm = MagicMock()
     factory_cm.__aenter__ = AsyncMock(return_value=inner_session)
     factory_cm.__aexit__ = AsyncMock(return_value=False)
-    return MagicMock(return_value=factory_cm)
+    return MagicMock(return_value=factory_cm), added_events
 
 
 def _make_source(tenant_id: uuid.UUID) -> Any:
@@ -163,6 +174,7 @@ class _RecordingGraphStore:
         entities: list[Any],
         edges: list[Any],
         snapshot_at: Any = None,
+        workspace_id: uuid.UUID | None = None,
     ) -> None:
         self.calls.append(
             {
@@ -178,17 +190,22 @@ def _make_worker(
     *,
     source: Any,
     graph_store: Any | None,
-) -> IngestionWorker:
+    session_factory: Any = None,
+) -> tuple[IngestionWorker, list[Any]]:
     registry: ConnectorRegistry = MagicMock(spec=ConnectorRegistry)
     registry.get = MagicMock(return_value=_make_connector())
+    sf, added_events = _make_session_factory(source)
+    if session_factory is not None:
+        sf = session_factory
+        added_events = []
     return IngestionWorker(
         queue_consumer=MagicMock(),
         connector_registry=registry,
         embedding_provider=_make_embedding_provider(),
         index_writer=_make_index_writer(),
-        session_factory=_make_session_factory(source),
+        session_factory=sf,
         graph_store=graph_store,
-    )
+    ), added_events
 
 
 # ---------------------------------------------------------------------------
@@ -198,32 +215,36 @@ def _make_worker(
 
 @pytest.mark.asyncio
 async def test_operator_event_routes_to_graph_bridge() -> None:
-    """An operator event with metadata upserts into the Neo4j graph."""
+    """An operator event with metadata publishes outbox events for entity + edge.
+
+    AP1 changed the bridge to publish via NATS outbox rather than direct write.
+    We verify the outbox events carry the correct entity/edge metadata.
+    """
     tenant = uuid.uuid4()
     store = _RecordingGraphStore()
-    worker = _make_worker(source=_make_source(tenant), graph_store=store)
+    worker, added_events = _make_worker(source=_make_source(tenant), graph_store=store)
 
     event = _operator_event(name="gold")
     result = await worker.process_document(event)
 
     # Vector pipeline still owns the canonical outcome.
     assert result.action == "created"
-    # The bridge fired exactly once with the mapped entity + edge.
-    assert len(store.calls) == 1
-    call = store.calls[0]
-    assert call["source_id"] == event.source_id
-    assert len(call["entities"]) == 1
-    assert call["entities"][0].entity_type == "StorageClass"
-    assert {e.edge_type for e in call["edges"]} == {RELATION_IN_CLUSTER}
-    # document_id defaults to the derived entity id.
-    assert call["document_id"] == call["entities"][0].id
+    # AP1: bridge publishes via outbox (entity + edge events).
+    # EntityUpsertEvent + EdgeUpsertEvent for the StorageClass + RELATION_IN_CLUSTER.
+    entity_events = [e for e in added_events if getattr(e, "event_type", None) == "entity.upsert"]
+    edge_events = [e for e in added_events if getattr(e, "event_type", None) == "edge.upsert"]
+    assert len(entity_events) == 1
+    assert len(edge_events) >= 1
+    payload = entity_events[0].payload
+    assert payload["entity_type"] == "StorageClass"
+    assert str(event.source_id) == payload["source_id"]
 
 
 @pytest.mark.asyncio
 async def test_non_operator_event_never_touches_graph_bridge() -> None:
     """A git event runs the vector pipeline but never the graph bridge."""
     store = _RecordingGraphStore()
-    worker = _make_worker(source=_make_source(uuid.uuid4()), graph_store=store)
+    worker, _ = _make_worker(source=_make_source(uuid.uuid4()), graph_store=store)
 
     result = await worker.process_document(_git_event())
 
@@ -235,7 +256,7 @@ async def test_non_operator_event_never_touches_graph_bridge() -> None:
 async def test_operator_event_without_metadata_is_not_routed() -> None:
     """An operator event lacking the rich payload is not mappable -> no routing."""
     store = _RecordingGraphStore()
-    worker = _make_worker(source=_make_source(uuid.uuid4()), graph_store=store)
+    worker, _ = _make_worker(source=_make_source(uuid.uuid4()), graph_store=store)
 
     result = await worker.process_document(_operator_event(with_payload=False))
 
@@ -246,7 +267,7 @@ async def test_operator_event_without_metadata_is_not_routed() -> None:
 @pytest.mark.asyncio
 async def test_no_graph_store_configured_skips_routing() -> None:
     """A worker without a graph_store never attempts to route operator events."""
-    worker = _make_worker(source=_make_source(uuid.uuid4()), graph_store=None)
+    worker, _ = _make_worker(source=_make_source(uuid.uuid4()), graph_store=None)
 
     # Must not raise even though it's a full operator payload.
     result = await worker.process_document(_operator_event())
@@ -257,7 +278,7 @@ async def test_no_graph_store_configured_skips_routing() -> None:
 async def test_deleted_operator_event_is_not_routed() -> None:
     """Deletes are owned by the tombstone path, not the graph bridge."""
     store = _RecordingGraphStore()
-    worker = _make_worker(source=_make_source(uuid.uuid4()), graph_store=store)
+    worker, _ = _make_worker(source=_make_source(uuid.uuid4()), graph_store=store)
 
     result = await worker.process_document(_operator_event(action="deleted"))
 
@@ -267,27 +288,47 @@ async def test_deleted_operator_event_is_not_routed() -> None:
 
 @pytest.mark.asyncio
 async def test_graph_bridge_failure_surfaces_as_error() -> None:
-    """If the graph upsert raises, the worker returns action='error' so the
-    broker redelivers (idempotent upsert makes redelivery safe)."""
+    """If the outbox session write raises, the worker returns action='error' so the
+    broker redelivers (idempotent upsert makes redelivery safe).
+
+    AP1 changed the bridge to publish via NATS outbox; errors now surface from
+    the session layer, not directly from graph_store.upsert_graph.
+    """
     tenant = uuid.uuid4()
+    store = _RecordingGraphStore()
 
-    class _FailingStore:
-        async def upsert_graph(self, **kwargs: Any) -> None:
-            raise RuntimeError("neo4j down")
+    # Build a session factory whose add() raises to simulate a DB failure
+    inner_session = AsyncMock()
+    inner_session.add = MagicMock(side_effect=RuntimeError("session write failed"))
+    scalar_result = MagicMock()
+    source = _make_source(tenant)
+    scalar_result.scalar_one_or_none = MagicMock(return_value=source)
+    inner_session.execute = AsyncMock(return_value=scalar_result)
+    begin_ctx = MagicMock()
+    begin_ctx.__aenter__ = AsyncMock(return_value=None)
+    begin_ctx.__aexit__ = AsyncMock(return_value=False)
+    inner_session.begin = MagicMock(return_value=begin_ctx)
+    factory_cm = MagicMock()
+    factory_cm.__aenter__ = AsyncMock(return_value=inner_session)
+    factory_cm.__aexit__ = AsyncMock(return_value=False)
+    failing_factory = MagicMock(return_value=factory_cm)
 
-    worker = _make_worker(source=_make_source(tenant), graph_store=_FailingStore())
+    worker, _ = _make_worker(source=source, graph_store=store, session_factory=failing_factory)
     result = await worker.process_document(_operator_event())
 
     assert result.action == "error"
-    assert "neo4j" in (result.error or "")
 
 
 @pytest.mark.asyncio
 async def test_operator_routing_runs_after_vector_pipeline() -> None:
-    """The graph bridge runs only after the vector pipeline succeeds."""
+    """The graph bridge runs only after the vector pipeline succeeds.
+
+    AP1: bridge publishes via outbox, not direct graph write.  We verify
+    the vector stage fires first and that outbox events are published.
+    """
     tenant = uuid.uuid4()
     store = _RecordingGraphStore()
-    worker = _make_worker(source=_make_source(tenant), graph_store=store)
+    worker, added_events = _make_worker(source=_make_source(tenant), graph_store=store)
 
     order: list[str] = []
 
@@ -303,15 +344,12 @@ async def test_operator_routing_runs_after_vector_pipeline() -> None:
             duration_ms=1.0,
         )
 
-    orig_upsert = store.upsert_graph
-
-    async def _tracking_upsert(**kwargs: Any) -> None:
-        order.append("graph")
-        await orig_upsert(**kwargs)
-
-    store.upsert_graph = _tracking_upsert  # type: ignore[method-assign]
-
     with patch(real_run_ref, new=AsyncMock(side_effect=_run_ref)):
         await worker.process_document(_operator_event())
 
-    assert order == ["vector", "graph"]
+    # Vector pipeline ran first.
+    assert "vector" in order
+    assert order[0] == "vector"
+    # AP1: outbox events published (not direct graph write).
+    entity_events = [e for e in added_events if getattr(e, "event_type", None) == "entity.upsert"]
+    assert len(entity_events) >= 1

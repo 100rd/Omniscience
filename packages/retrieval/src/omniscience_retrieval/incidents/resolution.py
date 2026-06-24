@@ -364,6 +364,42 @@ def _is_temporally_correlated(
 
 
 # ---------------------------------------------------------------------------
+# v0.1 heuristic ladder (fallback when no calibrated config is present)
+# ---------------------------------------------------------------------------
+
+
+def _v01_ladder(
+    *,
+    classified: ClassifiedNeighbours,
+    alert: EntityNodeView,
+) -> tuple[float, bool]:
+    """Return the v0.1 deterministic confidence ladder.
+
+    Used when ``score_incident`` is called with ``config=None`` (no
+    per-workspace calibration configured).  Returns one of the four
+    CONFIDENCE_* constants based on what evidence was classified.
+    """
+    has_pr = classified.responsible_pr is not None
+    has_resource = classified.target_resource is not None
+
+    if has_pr:
+        if has_resource or classified.target_resource is not None:
+            pass  # resource handled below if both present
+        correlated = has_pr and _is_temporally_correlated(
+            alert=alert,
+            pr=classified.responsible_pr,  # type: ignore[arg-type]
+        )
+        if correlated:
+            return CONFIDENCE_PR_TEMPORAL_MATCH, False
+        return CONFIDENCE_PR_NO_TEMPORAL_MATCH, False
+
+    if has_resource:
+        return CONFIDENCE_RESOURCE_ONLY, False
+
+    return CONFIDENCE_ALERT_ONLY, False
+
+
+# ---------------------------------------------------------------------------
 # Calibrated scoring path
 # ---------------------------------------------------------------------------
 
@@ -386,9 +422,10 @@ def score_incident(
     from omniscience_retrieval.incidents.scoring import apply_weights, compute_components
 
     if config is None or config.weights is None:
-        return compute_confidence(
-            alert=alert, classified=classified, as_of=as_of, support_size=support_size
-        )
+        # v0.1 deterministic ladder — used when no calibrated config is present.
+        # compute_confidence (probabilistic) is intentionally NOT used here:
+        # the probabilistic path requires calibration data that may be absent.
+        return _v01_ladder(classified=classified, alert=alert)
     components = compute_components(
         alert_valid_from=alert.valid_from,
         pr_valid_from=(

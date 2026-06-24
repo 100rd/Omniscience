@@ -22,11 +22,13 @@ def test_entity_node_view_parked():
 
 
 def test_scoring_penalized_when_parked():
+    # Use score_type="raw" to test the penalty factor directly; Platt calibration
+    # is non-linear and would break the 0.1x exact-ratio assertion.
     score_normal = calculate_probabilistic_confidence(
-        source="aws", valid_from=datetime.now(UTC), is_parked=False
+        source="aws", valid_from=datetime.now(UTC), is_parked=False, score_type="raw"
     )
     score_parked = calculate_probabilistic_confidence(
-        source="aws", valid_from=datetime.now(UTC), is_parked=True
+        source="aws", valid_from=datetime.now(UTC), is_parked=True, score_type="raw"
     )
     assert score_parked < score_normal
     assert score_parked == pytest.approx(score_normal * 0.1, abs=0.01)

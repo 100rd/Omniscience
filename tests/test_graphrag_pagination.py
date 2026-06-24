@@ -76,7 +76,7 @@ def _no_anchor() -> _AnchorStageResult:
         anchor_hit=False,
         candidate_source_ids=(),
         candidate_depths=(),
-        centralities={},
+        candidate_centralities={},
         candidate_parked=(),
         duration_s=0.0,
     )

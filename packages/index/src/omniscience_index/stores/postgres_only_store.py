@@ -22,7 +22,7 @@ from omniscience_core.storage.vector import (
     ChunkPayload,
     UpsertOutcome,
 )
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import Float, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -360,7 +360,10 @@ class PostgresOnlyStore:
                 .where(Entity.name == entity_name, Source.tenant_id == workspace_id)
             )
             res = await session.execute(stmt)
-            ent = res.scalar_one_or_none()
+            # Use scalars().first() instead of scalar_one_or_none() to handle
+            # the case where concurrent upserts created duplicate name rows (no
+            # unique constraint on name+workspace in entities table).
+            ent = res.scalars().first()
             if ent is None:
                 return None
 
@@ -413,7 +416,9 @@ class PostgresOnlyStore:
                 .where(Entity.name == entity_name, Source.tenant_id == workspace_id)
             )
             res = await session.execute(stmt)
-            seed_ent = res.scalar_one_or_none()
+            # Use scalars().first() to handle potential duplicate rows from
+            # concurrent upserts (no unique constraint on name+workspace).
+            seed_ent = res.scalars().first()
             if seed_ent is None:
                 raise ValueError(f"entity_not_found:{entity_name}")
 
@@ -799,7 +804,7 @@ class PostgresOnlyStore:
                 if chunk_payload.get("embedding"):
                     emb_str = "[" + ",".join(map(str, chunk_payload["embedding"])) + "]"
                     await session.execute(
-                        text("UPDATE chunks SET embedding = :emb::vector WHERE id = :cid"),
+                        text("UPDATE chunks SET embedding = CAST(:emb AS vector) WHERE id = :cid"),
                         {"emb": emb_str, "cid": chunk.id},
                     )
 
@@ -871,7 +876,7 @@ class PostgresOnlyStore:
                     Chunk,
                     Document,
                     Source,
-                    Chunk.embedding.op("<=>")(query_vector).label("distance"),
+                    Chunk.embedding.op("<=>", return_type=Float)(query_vector).label("distance"),
                 )
                 .join(Document, Chunk.document_id == Document.id)
                 .join(Source, Document.source_id == Source.id)
@@ -914,7 +919,7 @@ class PostgresOnlyStore:
                         source=SourceInfo(
                             id=src.id,
                             name=src.name,
-                            type=src.source_type,
+                            type=src.type,
                         ),
                         citation=Citation(
                             uri=doc.uri,

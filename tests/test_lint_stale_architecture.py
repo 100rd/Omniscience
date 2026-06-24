@@ -148,10 +148,7 @@ def my_func(a, b):
 '''
     errors = check_docstrings_ast(content, Path("app.py"))
     assert len(errors) == 1
-    assert (
-        "doc-drift: Docstring for 'my_func' documents args not in signature: c"
-        in errors[0][1]
-    )
+    assert "doc-drift: Docstring for 'my_func' documents args not in signature: c" in errors[0][1]
 
 
 def test_check_docstrings_ast_no_drift():

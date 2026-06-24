@@ -270,8 +270,7 @@ class _AnchorStageResult:
 
     candidate_source_ids: tuple[str, ...]
     candidate_depths: tuple[int, ...]
-    centralities: dict[str, float]
-    candidate_parked: tuple[bool, ...]
+    candidate_centralities: dict[str, float]
     #: The anchor name passed (empty when ``anchor_requested`` is False).
     anchor_name: str
     #: True when the anchor entity resolved in the graph.
@@ -280,6 +279,8 @@ class _AnchorStageResult:
     anchor_requested: bool
     #: Wall-clock duration of this stage in seconds.
     duration_s: float
+    #: Parked flags parallel to candidate_source_ids (default empty for legacy callers).
+    candidate_parked: tuple[bool, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -417,6 +418,7 @@ class GraphRAGComposer:
             request=request,
             vector_result=vector_result,
             anchor=anchor,
+            as_of=effective,
         )
 
         valid_hits = await self._validate_hits(merged.hits, workspace_id)
@@ -496,7 +498,7 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
-                centralities={},
+                candidate_centralities={},
                 candidate_parked=(),
                 duration_s=duration,
             )
@@ -522,10 +524,16 @@ class GraphRAGComposer:
                     anchor_hit=False,
                     candidate_source_ids=(),
                     candidate_depths=(),
-                    centralities={},
+                    candidate_centralities={},
                     candidate_parked=(),
                     duration_s=time.monotonic() - stage_start,
                 )
+
+            # Filter out related entities that are not in the validated set
+            # (e.g. from tombstoned documents or inactive sources).
+            graph_result.related = [
+                n for n in graph_result.related if n.name in valid_entity_names
+            ]
 
             if self._is_entity_parked_fn:
                 graph_result.seed.is_parked = self._is_entity_parked_fn(graph_result.seed.id)
@@ -534,6 +542,7 @@ class GraphRAGComposer:
 
             candidates, depths, centralities, parked = _collect_candidates(graph_result)
             duration = time.monotonic() - stage_start
+            _ANCHOR_HIT_TOTAL.labels(outcome="hit").inc()
             _STAGE_DURATION.labels(stage="anchor").observe(duration)
             return _AnchorStageResult(
                 anchor_requested=True,
@@ -541,7 +550,7 @@ class GraphRAGComposer:
                 anchor_hit=True,
                 candidate_source_ids=candidates,
                 candidate_depths=depths,
-                centralities=centralities,
+                candidate_centralities=centralities,
                 candidate_parked=parked,
                 duration_s=duration,
             )
@@ -555,7 +564,7 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
-                centralities={},
+                candidate_centralities={},
                 candidate_parked=(),
                 duration_s=duration,
             )
@@ -593,6 +602,7 @@ class GraphRAGComposer:
         request: SearchRequest,
         vector_result: SearchResult,
         anchor: _AnchorStageResult,
+        as_of: datetime | None = None,
     ) -> SearchResult:
         from omniscience_retrieval.probabilistic_scoring import (
             calculate_probabilistic_confidence,
@@ -622,7 +632,9 @@ class GraphRAGComposer:
 
         # Needs depth and centrality by source
         depth_by_source = anchor_depths
-        centrality_by_source = anchor.centralities if anchor.centralities else {}
+        centrality_by_source = (
+            anchor.candidate_centralities if anchor.candidate_centralities else {}
+        )
 
         for idx, hit in enumerate(vector_result.hits):
             if hit.chunk_id in seen_chunks:
@@ -644,7 +656,7 @@ class GraphRAGComposer:
                 source=hit.source.type,
                 valid_from=hit.citation.indexed_at,
                 depth=depth,
-                as_of=request.as_of,
+                as_of=as_of,
                 score_type="calibrated",
                 is_parked=is_parked,
             )
@@ -653,7 +665,7 @@ class GraphRAGComposer:
                 valid_from=hit.citation.indexed_at,
                 depth=depth,
                 centrality=centrality,
-                as_of=request.as_of,
+                as_of=as_of,
             )
 
             scored.append((merged_score, confidence_val, "calibrated", impact_val, idx, hit))
