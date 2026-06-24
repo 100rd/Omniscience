@@ -636,9 +636,10 @@ class TestConfidenceScoreHeuristic:
         assert result_after["confidence_band"] in _VALID_BANDS
         # PR after alert should produce same or lower band than PR before.
         band_order = {"low": 0, "medium": 1, "high": 2}
-        assert band_order[result_after["confidence_band"]] <= band_order[
-            result_before["confidence_band"]
-        ]
+        assert (
+            band_order[result_after["confidence_band"]]
+            <= band_order[result_before["confidence_band"]]
+        )
 
 
 # ---------------------------------------------------------------------------

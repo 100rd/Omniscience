@@ -229,9 +229,7 @@ def test_fitted_artifact_path_returns_decimal_confidence(tmp_path: Path) -> None
     assert 0.0 <= result["resolution_confidence"] <= 1.0, (
         f"resolution_confidence must be in [0,1]; got {result['resolution_confidence']}"
     )
-    assert result["confidence_band"] is None, (
-        "confidence_band must be None when calibrated=True"
-    )
+    assert result["confidence_band"] is None, "confidence_band must be None when calibrated=True"
 
 
 # ---------------------------------------------------------------------------
