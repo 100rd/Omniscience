@@ -329,30 +329,71 @@ class QdrantVectorStore:
         *,
         workspace_id: uuid.UUID,
     ) -> dict[uuid.UUID, int]:
-        """Return a mapping of entity ID to its version for all entities in the workspace."""
-        from qdrant_client import models as qm
-        from omniscience_index.stores.qdrant_filters import QdrantFilterBuilder
+        """Return {entity_id: version} for all entity chunks in the workspace.
 
-        flt = QdrantFilterBuilder(workspace_id=workspace_id).build()
+        AP2 — per-entity anti-entropy: entity chunks are stored with
+        ``external_id = "entity:<uuid>"`` so we filter by that prefix and
+        read the ``doc_version`` payload field (set by ``upsert_chunks``).
+        """
+        flt = (
+            QdrantFilterBuilder(workspace_id=workspace_id)
+            .with_chunker_strategy("entity_outbox")
+            .build()
+        )
         try:
-            records, _ = await self._qc.scroll(
-                collection_name=self.collection_name,
-                scroll_filter=flt,
-                limit=100_000,
-                with_payload=["version"],
-                with_vectors=False,
-            )
-            result = {}
+            records = await self._scroll_all(flt=flt, with_payload=True)
+            result: dict[uuid.UUID, int] = {}
             for r in records:
-                if str(r.id).startswith("entity:"):
-                    try:
-                        ent_id = uuid.UUID(str(r.id).replace("entity:", ""))
-                        result[ent_id] = int(r.payload.get("version", 0))
-                    except ValueError:
-                        pass
+                payload = r.payload or {}
+                ext_id = payload.get(PAYLOAD_EXTERNAL_ID, "")
+                if not str(ext_id).startswith("entity:"):
+                    continue
+                try:
+                    ent_id = uuid.UUID(str(ext_id).removeprefix("entity:"))
+                except ValueError:
+                    continue
+                doc_ver = payload.get(PAYLOAD_DOC_VERSION)
+                if doc_ver is not None:
+                    result[ent_id] = int(doc_ver)
             return result
         except Exception as e:
             raise RuntimeError(f"Qdrant get_entity_versions failed: {e}") from e
+
+    async def get_entity_content_hashes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, str]:
+        """Return {entity_id: content_hash} for all entity chunks with a hash in the workspace.
+
+        AP2 — per-entity anti-entropy: reads the ``content_hash`` payload field
+        from entity-strategy chunks.  Chunks that pre-date AP2 (no content_hash
+        in payload) are omitted; the reconcile worker treats them as "not yet
+        hashed" and skips hash comparison for those entities.
+        """
+        flt = (
+            QdrantFilterBuilder(workspace_id=workspace_id)
+            .with_chunker_strategy("entity_outbox")
+            .build()
+        )
+        try:
+            records = await self._scroll_all(flt=flt, with_payload=True)
+            result: dict[uuid.UUID, str] = {}
+            for r in records:
+                payload = r.payload or {}
+                ext_id = payload.get(PAYLOAD_EXTERNAL_ID, "")
+                if not str(ext_id).startswith("entity:"):
+                    continue
+                try:
+                    ent_id = uuid.UUID(str(ext_id).removeprefix("entity:"))
+                except ValueError:
+                    continue
+                ch = payload.get(PAYLOAD_CONTENT_HASH)
+                if ch is not None:
+                    result[ent_id] = str(ch)
+            return result
+        except Exception as e:
+            raise RuntimeError(f"Qdrant get_entity_content_hashes failed: {e}") from e
 
     @property
     def collection_name(self) -> str:
@@ -486,21 +527,19 @@ class QdrantVectorStore:
         if version is not None:
             checkpoint_id = str(uuid.uuid5(uuid.NAMESPACE_OID, f"checkpoint_{source_id}"))
             points = await self._qc.retrieve(
-                collection_name=self._collection_name,
-                ids=[checkpoint_id],
-                with_payload=True
+                collection_name=self._collection_name, ids=[checkpoint_id], with_payload=True
             )
             if points and points[0].payload:
                 existing_version = points[0].payload.get("version")
                 existing_epoch = points[0].payload.get("epoch")
-                
+
                 should_skip = False
                 if existing_version is not None and existing_version >= version:
                     should_skip = True
-                    
+
                 if epoch is not None and existing_epoch is not None and epoch > existing_epoch:
                     should_skip = False
-                    
+
                 if forced_replay:
                     should_skip = False
 
@@ -570,10 +609,13 @@ class QdrantVectorStore:
         action: Literal["created", "updated"] = "updated" if existing else "created"
         now = datetime.now(UTC)
         if existing is not None:
-            await self._qc.delete(
-                collection_name=self._collection_name,
-                points_selector=qm.PointIdsList(points=list(existing.chunk_point_ids)),
-                wait=True,
+            # Stage 1 (bitemporal end-dating): end-date old points instead of
+            # hard-deleting them so that as_of queries before this update
+            # still return the previous chunk version.
+            await self._end_date_points(
+                point_ids=list(existing.chunk_point_ids),
+                workspace_id=workspace_id,
+                valid_to=now,
             )
         points = [
             self._chunk_to_point(
@@ -602,8 +644,8 @@ class QdrantVectorStore:
                         "source_id": str(source_id),
                         "version": version,
                         "epoch": epoch,
-                        "workspace_id": str(workspace_id)
-                    }
+                        "workspace_id": str(workspace_id),
+                    },
                 )
             )
         if points:
@@ -859,9 +901,11 @@ class QdrantVectorStore:
         )
         if before == 0:
             return 0
-        await self._qc.delete(
+        valid_to_iso = (snapshot_at or datetime.now(UTC)).isoformat()
+        await self._qc.set_payload(
             collection_name=self._collection_name,
-            points_selector=qm.FilterSelector(filter=flt),
+            payload={PAYLOAD_VALID_TO: valid_to_iso},
+            points=qm.FilterSelector(filter=flt),
             wait=True,
         )
         return before
@@ -1801,6 +1845,8 @@ def _build_search_result(
     Stage 3: ``text_matches`` is now populated with the real sparse-hit
     count so ``QueryStats`` carries a meaningful value.
     """
+    from datetime import UTC, datetime
+
     from omniscience_retrieval.models import (
         ChunkLineage,
         Citation,
@@ -1809,7 +1855,6 @@ def _build_search_result(
         SearchResult,
         SourceInfo,
     )
-    from datetime import datetime, UTC
 
     hits: list[SearchHit] = []
     for sp in scored[:top_k]:
@@ -1840,10 +1885,17 @@ def _build_search_result(
                 ),
                 metadata=_safe_dict(payload.get(PAYLOAD_METADATA)),
                 applied_version=int(payload.get(PAYLOAD_DOC_VERSION, 0)),
-                staleness=max(0.0, (datetime.now(UTC) - _parse_datetime(payload.get(PAYLOAD_RECORDED_AT))).total_seconds()) if payload.get(PAYLOAD_RECORDED_AT) else None,
+                staleness=max(
+                    0.0,
+                    (
+                        datetime.now(UTC) - _parse_datetime(payload.get(PAYLOAD_RECORDED_AT))
+                    ).total_seconds(),
+                )
+                if payload.get(PAYLOAD_RECORDED_AT)
+                else None,
             )
         )
-    
+
     versions = [h.applied_version for h in hits if h.applied_version is not None]
     min_applied_version = min(versions) if versions else None
 

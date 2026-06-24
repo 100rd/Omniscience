@@ -177,7 +177,7 @@ class Neo4jGraphStore:
             max_transaction_retry_time=(config.max_transaction_retry_time_seconds),
         )
         self._bootstrapped: bool = False
-        self._bitemporal_enabled: bool = False
+        self._bitemporal_enabled: bool = config.bitemporal_enabled
 
     async def connect(self) -> None:
         """Verify connectivity and run the idempotent schema bootstrap."""
@@ -226,13 +226,15 @@ class Neo4jGraphStore:
         document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
+        workspace_id: uuid.UUID | None = None,
         snapshot_at: datetime | None = None,
         version: int | None = None,
         epoch: int | None = None,
         forced_replay: bool = False,
     ) -> None:
         """Persist a batch of entities+edges for one document (idempotent)."""
-        workspace_id = self._workspace_from_entities(entities)
+        if workspace_id is None:
+            workspace_id = self._workspace_from_entities(entities)
         snap_iso = snapshot_at.isoformat() if snapshot_at is not None else None
         async with self._driver.session(database=self._config.database) as session:
             counts = await session.execute_write(
@@ -298,30 +300,45 @@ class Neo4jGraphStore:
 
         if version is not None:
             res = await tx.run(
-                "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
-                {"workspace_id": str(workspace_id), "source_id": str(source_id)}
+                (
+                    "MATCH (c:StoreCheckpoint"
+                    " {workspace_id: $workspace_id, source_id: $source_id})"
+                    " RETURN c.version AS version, c.epoch AS epoch"
+                ),
+                {"workspace_id": str(workspace_id), "source_id": str(source_id)},
             )
             record = await res.single()
-            
+
             existing_version = record["version"] if record is not None else None
             existing_epoch = record["epoch"] if record is not None else None
-            
+
             should_skip = False
             if existing_version is not None and existing_version >= version:
                 should_skip = True
-                
+
             if epoch is not None and existing_epoch is not None and epoch > existing_epoch:
                 should_skip = False
-                
+
             if forced_replay:
                 should_skip = False
-                
+
             if should_skip:
                 return 0, 0
 
             await tx.run(
-                "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
-                {"workspace_id": str(workspace_id), "source_id": str(source_id), "version": version, "epoch": epoch, "now": now}
+                (
+                    "MERGE (c:StoreCheckpoint"
+                    " {workspace_id: $workspace_id, source_id: $source_id})"
+                    " SET c.version = $version, c.epoch = $epoch,"
+                    " c.updated_at = datetime($now)"
+                ),
+                {
+                    "workspace_id": str(workspace_id),
+                    "source_id": str(source_id),
+                    "version": version,
+                    "epoch": epoch,
+                    "now": now,
+                },
             )
 
         entities_end_dated = 0
@@ -425,6 +442,10 @@ class Neo4jGraphStore:
             # metadata so list_entities matches by cluster via index seek.
             "cluster": _cluster_from_metadata(metadata),
             "metadata": metadata,
+            # AP2 — per-entity anti-entropy hash projected to Neo4j node property.
+            "content_hash": (
+                str(entity.content_hash) if entity.content_hash is not None else None
+            ),
             "now": now,
         }
         cypher = self._select_entity_upsert_cypher(params)
@@ -432,31 +453,46 @@ class Neo4jGraphStore:
         async def _run(tx: Any) -> None:
             if getattr(entity, "version", None) is not None:
                 res = await tx.run(
-                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
-                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id)}
+                    (
+                        "MATCH (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " RETURN c.version AS version, c.epoch AS epoch"
+                    ),
+                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id)},
                 )
                 record = await res.single()
-                
+
                 existing_version = record["version"] if record is not None else None
                 existing_epoch = record["epoch"] if record is not None else None
-                
+
                 should_skip = False
                 if existing_version is not None and existing_version >= entity.version:
                     should_skip = True
-                    
+
                 ep = getattr(entity, "epoch", None)
                 if ep is not None and existing_epoch is not None and ep > existing_epoch:
                     should_skip = False
-                    
+
                 fr = getattr(entity, "forced_replay", False)
                 if fr:
                     should_skip = False
-                    
+
                 if should_skip:
                     return
                 await tx.run(
-                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
-                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id), "version": entity.version, "epoch": ep, "now": now}
+                    (
+                        "MERGE (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " SET c.version = $version, c.epoch = $epoch,"
+                        " c.updated_at = datetime($now)"
+                    ),
+                    {
+                        "workspace_id": str(workspace_id),
+                        "source_id": str(entity.source_id),
+                        "version": entity.version,
+                        "epoch": ep,
+                        "now": now,
+                    },
                 )
             await tx.run(cypher, params)
 
@@ -489,31 +525,46 @@ class Neo4jGraphStore:
             if getattr(edge, "version", None) is not None and edge.metadata.get("source_id"):
                 source_id = str(edge.metadata["source_id"])
                 res = await tx.run(
-                    "MATCH (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) RETURN c.version AS version, c.epoch AS epoch",
-                    {"workspace_id": str(workspace_id), "source_id": source_id}
+                    (
+                        "MATCH (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " RETURN c.version AS version, c.epoch AS epoch"
+                    ),
+                    {"workspace_id": str(workspace_id), "source_id": source_id},
                 )
                 record = await res.single()
-                
+
                 existing_version = record["version"] if record is not None else None
                 existing_epoch = record["epoch"] if record is not None else None
-                
+
                 should_skip = False
                 if existing_version is not None and existing_version >= edge.version:
                     should_skip = True
-                    
+
                 ep = getattr(edge, "epoch", None)
                 if ep is not None and existing_epoch is not None and ep > existing_epoch:
                     should_skip = False
-                    
+
                 fr = getattr(edge, "forced_replay", False)
                 if fr:
                     should_skip = False
-                    
+
                 if should_skip:
                     return
                 await tx.run(
-                    "MERGE (c:StoreCheckpoint {workspace_id: $workspace_id, source_id: $source_id}) SET c.version = $version, c.epoch = $epoch, c.updated_at = datetime($now)",
-                    {"workspace_id": str(workspace_id), "source_id": source_id, "version": edge.version, "epoch": ep, "now": now}
+                    (
+                        "MERGE (c:StoreCheckpoint"
+                        " {workspace_id: $workspace_id, source_id: $source_id})"
+                        " SET c.version = $version, c.epoch = $epoch,"
+                        " c.updated_at = datetime($now)"
+                    ),
+                    {
+                        "workspace_id": str(workspace_id),
+                        "source_id": source_id,
+                        "version": edge.version,
+                        "epoch": ep,
+                        "now": now,
+                    },
                 )
             await tx.run(rendered, params)
 
@@ -602,6 +653,15 @@ class Neo4jGraphStore:
             edges_end_dated=edges_end_dated,
         )
         return entities_end_dated
+
+    async def delete_tombstoned_graph(self, *, workspace_id: uuid.UUID | None = None) -> int:
+        """Protocol alias for :meth: (AP1 rename).
+
+        delete_tombstoned_graph is the canonical name on the GraphStore
+        protocol to avoid collision with VectorStore.delete_tombstoned.
+        Delegates to the existing implementation unchanged.
+        """
+        return await self.delete_tombstoned(workspace_id=workspace_id)
 
     # ------------------------------------------------------------------
     # Bitemporal backfill (ADR-0008 §8 phase 1, issue #130)
@@ -1135,7 +1195,7 @@ class Neo4jGraphStore:
             if not rows:
                 return False
 
-            async def _merge_tx(tx):
+            async def _merge_tx(tx: Any) -> bool:
                 merge_rel_cypher = """
                 MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})
                 MATCH (b:`Entity` {workspace_id: $workspace_id, id: $target_id})
@@ -1146,8 +1206,8 @@ class Neo4jGraphStore:
 
                 inc_cypher = """
                 MATCH (x)-[r]->(a:`Entity` {workspace_id: $workspace_id, id: $source_id})
-                WHERE r.workspace_id = $workspace_id 
-                  AND type(r) <> 'MERGED_INTO' 
+                WHERE r.workspace_id = $workspace_id
+                  AND type(r) <> 'MERGED_INTO'
                   AND type(r) <> 'HAD_STATE'
                 RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, x.id AS other_id
                 """
@@ -1156,8 +1216,8 @@ class Neo4jGraphStore:
 
                 out_cypher = """
                 MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})-[r]->(y)
-                WHERE r.workspace_id = $workspace_id 
-                  AND type(r) <> 'MERGED_INTO' 
+                WHERE r.workspace_id = $workspace_id
+                  AND type(r) <> 'MERGED_INTO'
                   AND type(r) <> 'HAD_STATE'
                 RETURN id(r) AS rid, type(r) AS rtype, properties(r) AS rprops, y.id AS other_id
                 """
@@ -1208,8 +1268,8 @@ class Neo4jGraphStore:
 
                 del_cypher = """
                 MATCH (a:`Entity` {workspace_id: $workspace_id, id: $source_id})-[r]-()
-                WHERE r.workspace_id = $workspace_id 
-                  AND type(r) <> 'MERGED_INTO' 
+                WHERE r.workspace_id = $workspace_id
+                  AND type(r) <> 'MERGED_INTO'
                   AND type(r) <> 'HAD_STATE'
                 DELETE r
                 """
@@ -1243,7 +1303,7 @@ class Neo4jGraphStore:
             target_id = rows[0]["target_id"]
             params["target_id"] = str(target_id)
 
-            async def _unmerge_tx(tx):
+            async def _unmerge_tx(tx: Any) -> bool:
                 inc_cypher = """
                 MATCH (x)-[r]->(b:`Entity` {workspace_id: $workspace_id, id: $target_id})
                 WHERE r.workspace_id = $workspace_id AND r.original_node_id = $merged_node_id
@@ -1326,3 +1386,59 @@ class Neo4jGraphStore:
 
             await session.execute_write(_unmerge_tx)
             return True
+
+    async def get_entity_versions(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, int]:
+        """Return {entity_id: version} for all entities in this workspace.
+
+        Used by the reconcile worker (AP2) for per-entity version drift
+        detection.  Entities absent from the result have version 0 in the
+        graph and must be re-upserted.
+        """
+        cypher = (
+            "MATCH (e:Entity {workspace_id: $workspace_id}) "
+            "WHERE e.version IS NOT NULL "
+            "RETURN e.id AS entity_id, e.version AS version"
+        )
+        params = {"workspace_id": str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        result: dict[uuid.UUID, int] = {}
+        for row in rows:
+            raw_id = row.get("entity_id")
+            raw_ver = row.get("version")
+            if raw_id is not None and raw_ver is not None:
+                result[uuid.UUID(str(raw_id))] = int(raw_ver)
+        return result
+
+    async def get_entity_content_hashes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, str]:
+        """Return {entity_id: content_hash} for all entities with a hash in this workspace.
+
+        AP2 — per-entity anti-entropy: used by the reconcile worker to detect
+        same-version content drift (e.g. a graph node whose content_hash was
+        corrupted or manually edited).  Entities with no ``content_hash``
+        property are omitted; the reconcile worker treats them as "not yet
+        hashed" and skips hash comparison for those rows.
+        """
+        cypher = (
+            "MATCH (e:Entity {workspace_id: $workspace_id}) "
+            "WHERE e.content_hash IS NOT NULL "
+            "RETURN e.id AS entity_id, e.content_hash AS content_hash"
+        )
+        params = {"workspace_id": str(workspace_id)}
+        async with self._driver.session(database=self._config.database) as session:
+            rows = await session.execute_read(_run_read_stmt, cypher, params)
+        result: dict[uuid.UUID, str] = {}
+        for row in rows:
+            raw_id = row.get("entity_id")
+            raw_hash = row.get("content_hash")
+            if raw_id is not None and raw_hash is not None:
+                result[uuid.UUID(str(raw_id))] = str(raw_hash)
+        return result

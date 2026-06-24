@@ -354,6 +354,24 @@ class VectorStore(Protocol):
         """
         ...
 
+    # ------------------------------------------------------------------
+    # AP2 — per-entity content-hash anti-entropy
+    # ------------------------------------------------------------------
+
+    async def get_entity_content_hashes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, str]:
+        """Return {entity_id: content_hash} for entity-outbox chunks with a hash.
+
+        AP2 per-entity anti-entropy: reads the content_hash payload field
+        from entity-strategy chunks in the workspace.  Chunks that pre-date
+        AP2 (no content_hash in payload) are omitted; callers treat them as
+        not yet hashed and skip hash comparison for those entities.
+        """
+        ...
+
 
 __all__ = [
     "ChunkPayload",

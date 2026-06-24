@@ -123,6 +123,10 @@ def test_calculate_probabilistic_incident_confidence() -> None:
     alert = MagicMock()
     alert.source = "alerts-receiver"
     alert.valid_from = now
+    # MagicMock auto-creates any attribute as a truthy MagicMock, so
+    # is_parked must be explicitly set to False to avoid the parked-entity
+    # confidence penalty path (AP3/AP4 contract).
+    alert.is_parked = False
 
     classified = MagicMock()
     classified.responsible_pr = None
@@ -143,6 +147,8 @@ def test_calculate_probabilistic_incident_confidence() -> None:
     res_node.source = "k8s"
     res_node.valid_from = now
     res_node.depth = 2
+    # Explicit False to prevent MagicMock auto-attribute truthy value.
+    res_node.is_parked = False
     classified.target_resource = res_node
 
     # Expected: 0.45 * 0.70 * 0.95 * 1.0 * 1.0 * e^(-0.15 * 1) = 0.29925 * e^(-0.15)
@@ -153,6 +159,7 @@ def test_calculate_probabilistic_incident_confidence() -> None:
     )
     assert not is_prov
     assert pytest.approx(res, abs=1e-5) == expected
+
 
 def test_temporal_hold_out() -> None:
     now = datetime.now(UTC)
@@ -167,11 +174,12 @@ def test_temporal_hold_out() -> None:
     age_future = calculate_watermark_age(future, now)
     assert age_future == 0.0
 
+
 def test_cold_start_fallback() -> None:
     score = 0.5
     # with min_support=30, support_size=15
     alpha = 15 / 30
-    iso_val = calibrate_isotonic(score, support_size=100) # no fallback
+    iso_val = calibrate_isotonic(score, support_size=100)  # no fallback
     platt_val = calibrate_platt(score)
     expected = alpha * iso_val + (1.0 - alpha) * platt_val
 

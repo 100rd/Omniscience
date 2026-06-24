@@ -7,8 +7,9 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
+from omniscience_core.audit.fingerprint import entity_content_hash
 from omniscience_core.db.models import Chunk, Document, Edge, Entity, Source
 from omniscience_core.storage.graph import (
     EdgeUpsert,
@@ -21,7 +22,7 @@ from omniscience_core.storage.vector import (
     ChunkPayload,
     UpsertOutcome,
 )
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import Float, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -112,9 +113,11 @@ class PostgresOnlyStore:
             # Insert entities
             for ent in entities:
                 ent_id = getattr(ent, "id", None) or uuid.uuid4()
-                ent_type = getattr(ent, "entity_type", None) or getattr(ent, "kind", "entity")
-                name = getattr(ent, "name", "")
-                display_name = getattr(ent, "display_name", name)
+                ent_type: str = str(
+                    getattr(ent, "entity_type", None) or getattr(ent, "kind", "entity")
+                )
+                name: str = str(getattr(ent, "name", ""))
+                display_name: str = str(getattr(ent, "display_name", name))
                 chunk_id = getattr(ent, "chunk_id", None)
                 metadata = getattr(ent, "metadata", None) or {}
                 if isinstance(metadata, str):
@@ -133,6 +136,12 @@ class PostgresOnlyStore:
                     display_name=display_name,
                     chunk_id=chunk_id,
                     entity_metadata=metadata,
+                    content_hash=entity_content_hash(
+                        entity_type=ent_type,
+                        name=name,
+                        display_name=display_name,
+                        metadata=metadata,
+                    ),
                 )
                 session.add(db_ent)
                 name_to_id[name] = ent_id
@@ -165,6 +174,12 @@ class PostgresOnlyStore:
                         name=stub_name,
                         display_name=stub_name,
                         entity_metadata={"is_stub": True},
+                        content_hash=entity_content_hash(
+                            entity_type="stub",
+                            name=stub_name,
+                            display_name=stub_name,
+                            metadata={"is_stub": True},
+                        ),
                     )
                     session.add(stub_ent)
                     await session.flush()
@@ -188,6 +203,12 @@ class PostgresOnlyStore:
             stmt = select(Entity).where(Entity.id == entity.id)
             res = await session.execute(stmt)
             db_ent = res.scalar_one_or_none()
+            _hash = entity_content_hash(
+                entity_type=entity.entity_type,
+                name=entity.name,
+                display_name=entity.display_name,
+                metadata=entity.metadata,
+            )
             if db_ent is None:
                 db_ent = Entity(
                     id=entity.id,
@@ -197,6 +218,7 @@ class PostgresOnlyStore:
                     display_name=entity.display_name,
                     chunk_id=entity.chunk_id,
                     entity_metadata=entity.metadata,
+                    content_hash=_hash,
                 )
                 session.add(db_ent)
             else:
@@ -205,6 +227,7 @@ class PostgresOnlyStore:
                 db_ent.display_name = entity.display_name
                 db_ent.chunk_id = entity.chunk_id
                 db_ent.entity_metadata = entity.metadata
+                db_ent.content_hash = _hash
 
     async def upsert_edge(self, *, edge: EdgeUpsert, workspace_id: uuid.UUID) -> None:
         async with self._session_factory() as session, session.begin():
@@ -249,6 +272,12 @@ class PostgresOnlyStore:
                     name=target_name,
                     display_name=target_name,
                     entity_metadata={"is_stub": True},
+                    content_hash=entity_content_hash(
+                        entity_type="stub",
+                        name=target_name,
+                        display_name=target_name,
+                        metadata={"is_stub": True},
+                    ),
                 )
                 session.add(tgt_ent)
                 await session.flush()
@@ -331,7 +360,10 @@ class PostgresOnlyStore:
                 .where(Entity.name == entity_name, Source.tenant_id == workspace_id)
             )
             res = await session.execute(stmt)
-            ent = res.scalar_one_or_none()
+            # Use scalars().first() instead of scalar_one_or_none() to handle
+            # the case where concurrent upserts created duplicate name rows (no
+            # unique constraint on name+workspace in entities table).
+            ent = res.scalars().first()
             if ent is None:
                 return None
 
@@ -384,7 +416,9 @@ class PostgresOnlyStore:
                 .where(Entity.name == entity_name, Source.tenant_id == workspace_id)
             )
             res = await session.execute(stmt)
-            seed_ent = res.scalar_one_or_none()
+            # Use scalars().first() to handle potential duplicate rows from
+            # concurrent upserts (no unique constraint on name+workspace).
+            seed_ent = res.scalars().first()
             if seed_ent is None:
                 raise ValueError(f"entity_not_found:{entity_name}")
 
@@ -662,6 +696,47 @@ class PostgresOnlyStore:
             res = await session.execute(stmt)
             return {str(r[0]): r[1] for r in res.all()}
 
+    async def get_entity_versions(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, int]:
+        """Return {entity_id: version} for all entities in this workspace.
+
+        AP2 lite-mode: reads from Postgres directly.  In lite mode Postgres
+        is both the SoT and the only store, so versions are always in sync.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(Entity.id, Entity.version)
+                .join(Source)
+                .where(Source.tenant_id == workspace_id)
+            )
+            res = await session.execute(stmt)
+            return {row[0]: row[1] for row in res.all()}
+
+    async def get_entity_content_hashes(
+        self,
+        *,
+        workspace_id: uuid.UUID,
+    ) -> dict[uuid.UUID, str]:
+        """Return {entity_id: content_hash} for entities with a hash in this workspace.
+
+        AP2 lite-mode: reads from Postgres directly.  Only entities with a
+        non-NULL content_hash (written post-AP2) are returned.
+        """
+        async with self._session_factory() as session:
+            stmt = (
+                select(Entity.id, Entity.content_hash)
+                .join(Source)
+                .where(
+                    Source.tenant_id == workspace_id,
+                    Entity.content_hash.is_not(None),
+                )
+            )
+            res = await session.execute(stmt)
+            return {row[0]: row[1] for row in res.all()}
+
     # ------------------------------------------------------------------
     # VectorStore Write API
     # ------------------------------------------------------------------
@@ -684,6 +759,7 @@ class PostgresOnlyStore:
             )
             doc_res = await session.execute(doc_stmt)
             doc = doc_res.scalar_one_or_none()
+            action: Literal["created", "updated"]
             if doc is None:
                 doc = Document(
                     id=uuid.uuid4(),
@@ -728,7 +804,7 @@ class PostgresOnlyStore:
                 if chunk_payload.get("embedding"):
                     emb_str = "[" + ",".join(map(str, chunk_payload["embedding"])) + "]"
                     await session.execute(
-                        text("UPDATE chunks SET embedding = :emb::vector WHERE id = :cid"),
+                        text("UPDATE chunks SET embedding = CAST(:emb AS vector) WHERE id = :cid"),
                         {"emb": emb_str, "cid": chunk.id},
                     )
 
@@ -800,7 +876,7 @@ class PostgresOnlyStore:
                     Chunk,
                     Document,
                     Source,
-                    Chunk.embedding.op("<=>")(query_vector).label("distance"),
+                    Chunk.embedding.op("<=>", return_type=Float)(query_vector).label("distance"),
                 )
                 .join(Document, Chunk.document_id == Document.id)
                 .join(Source, Document.source_id == Source.id)
@@ -843,7 +919,7 @@ class PostgresOnlyStore:
                         source=SourceInfo(
                             id=src.id,
                             name=src.name,
-                            type=src.source_type,
+                            type=src.type,
                         ),
                         citation=Citation(
                             uri=doc.uri,
@@ -860,7 +936,9 @@ class PostgresOnlyStore:
                         ),
                         metadata=chk.chunk_metadata,
                         applied_version=doc.doc_version,
-                        staleness=max(0.0, (datetime.now(UTC) - doc.indexed_at).total_seconds()) if doc.indexed_at else None,
+                        staleness=max(0.0, (datetime.now(UTC) - doc.indexed_at).total_seconds())
+                        if doc.indexed_at
+                        else None,
                     )
                 )
 

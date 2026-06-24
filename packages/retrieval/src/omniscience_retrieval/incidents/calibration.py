@@ -1,4 +1,5 @@
 """Pipeline for confidence calibration using Isotonic Regression with temporal discounting."""
+
 from __future__ import annotations
 
 import math
@@ -13,6 +14,7 @@ from omniscience_retrieval.probabilistic_scoring import LAMBDA_TIME_DECAY
 @dataclass
 class IncidentLabel:
     """Represents a labeled incident for calibration."""
+
     incident_id: str
     predicted_confidence: float
     true_label: int  # 1 for correct, 0 for incorrect
@@ -57,9 +59,7 @@ def collect_labeled_incidents(raw_data: list[dict[str, Any]]) -> list[IncidentLa
 
 
 def compute_brier_score(
-    predictions: list[float],
-    labels: list[int],
-    weights: list[float] | None = None
+    predictions: list[float], labels: list[int], weights: list[float] | None = None
 ) -> float:
     """Compute weighted Brier score."""
     if not predictions:
@@ -71,7 +71,8 @@ def compute_brier_score(
     if total_weight == 0:
         return 0.0
 
-    weighted_sq_err = sum(w * (p - y) ** 2 for p, y, w in zip(predictions, labels, weights))
+    zipped = zip(predictions, labels, weights, strict=False)
+    weighted_sq_err = sum(w * (p - y) ** 2 for p, y, w in zipped)
     return weighted_sq_err / total_weight
 
 
@@ -79,7 +80,7 @@ def compute_ece(
     predictions: list[float],
     labels: list[int],
     weights: list[float] | None = None,
-    num_bins: int = 10
+    num_bins: int = 10,
 ) -> float:
     """Compute weighted Expected Calibration Error (ECE)."""
     if not predictions:
@@ -91,7 +92,7 @@ def compute_ece(
     bin_weights: list[list[float]] = [[] for _ in range(num_bins)]
     bin_labels: list[list[int]] = [[] for _ in range(num_bins)]
 
-    for p, y, w in zip(predictions, labels, weights):
+    for p, y, w in zip(predictions, labels, weights, strict=False):
         b = int(p * num_bins)
         if b == num_bins:
             b = num_bins - 1
@@ -109,8 +110,8 @@ def compute_ece(
         if bw_sum == 0:
             continue
 
-        bin_acc = sum(w * y for w, y in zip(bin_weights[b], bin_labels[b])) / bw_sum
-        bin_conf = sum(w * p for w, p in zip(bin_weights[b], bins[b])) / bw_sum
+        bin_acc = sum(w * y for w, y in zip(bin_weights[b], bin_labels[b], strict=False)) / bw_sum
+        bin_conf = sum(w * p for w, p in zip(bin_weights[b], bins[b], strict=False)) / bw_sum
 
         ece += (bw_sum / total_weight) * abs(bin_acc - bin_conf)
 
@@ -118,9 +119,7 @@ def compute_ece(
 
 
 def fit_isotonic_regression(
-    predictions: list[float],
-    labels: list[int],
-    weights: list[float] | None = None
+    predictions: list[float], labels: list[int], weights: list[float] | None = None
 ) -> tuple[list[float], list[float]]:
     """
     Fit isotonic regression using Pool Adjacent Violators Algorithm (PAVA).
@@ -142,46 +141,38 @@ def fit_isotonic_regression(
     blocks: list[dict[str, Any]] = []
 
     for i in range(len(x)):
-        blocks.append({
-            'weight': w[i],
-            'value': float(y[i]),
-            'start': i,
-            'end': i
-        })
+        blocks.append({"weight": w[i], "value": float(y[i]), "start": i, "end": i})
 
         # Merge backwards if decreasing
-        while len(blocks) > 1 and blocks[-1]['value'] < blocks[-2]['value']:
+        while len(blocks) > 1 and blocks[-1]["value"] < blocks[-2]["value"]:
             b2 = blocks.pop()
             b1 = blocks.pop()
 
-            new_weight = b1['weight'] + b2['weight']
+            new_weight = b1["weight"] + b2["weight"]
             if new_weight > 0:
-                new_value = (b1['value'] * b1['weight'] + b2['value'] * b2['weight']) / new_weight
+                new_value = (b1["value"] * b1["weight"] + b2["value"] * b2["weight"]) / new_weight
             else:
                 new_value = 0.0
 
-            blocks.append({
-                'weight': new_weight,
-                'value': new_value,
-                'start': b1['start'],
-                'end': b2['end']
-            })
+            blocks.append(
+                {"weight": new_weight, "value": new_value, "start": b1["start"], "end": b2["end"]}
+            )
 
     # Construct thresholds and values
     thresholds: list[float] = []
     values: list[float] = []
 
     for b in blocks:
-        start_x = x[b['start']]
-        end_x = x[b['end']]
+        start_x = x[b["start"]]
+        end_x = x[b["end"]]
 
         if not thresholds or start_x > thresholds[-1]:
             thresholds.append(start_x)
-            values.append(b['value'])
+            values.append(b["value"])
 
         if end_x > thresholds[-1]:
             thresholds.append(end_x)
-            values.append(b['value'])
+            values.append(b["value"])
 
     if not thresholds:
         return [0.0, 1.0], [0.0, 1.0]
@@ -198,7 +189,7 @@ def fit_isotonic_regression(
     final_thresholds = [thresholds[0]]
     final_values = [values[0]]
 
-    for t, v in zip(thresholds[1:], values[1:]):
+    for t, v in zip(thresholds[1:], values[1:], strict=False):
         if t > final_thresholds[-1]:
             final_thresholds.append(t)
             final_values.append(v)
@@ -211,21 +202,18 @@ def fit_isotonic_regression(
 def apply_isotonic(p: float, thresholds: list[float], values: list[float]) -> float:
     """Apply isotonic piecewise linear interpolation."""
     for i in range(len(thresholds) - 1):
-        if thresholds[i] <= p <= thresholds[i+1]:
-            if thresholds[i+1] == thresholds[i]:
+        if thresholds[i] <= p <= thresholds[i + 1]:
+            if thresholds[i + 1] == thresholds[i]:
                 return values[i]
-            t = (p - thresholds[i]) / (thresholds[i+1] - thresholds[i])
-            return values[i] * (1 - t) + values[i+1] * t
+            t = (p - thresholds[i]) / (thresholds[i + 1] - thresholds[i])
+            return values[i] * (1 - t) + values[i + 1] * t
     if p < thresholds[0]:
         return values[0]
     return values[-1]
 
 
 def get_out_of_fold_predictions(
-    predictions: list[float],
-    labels: list[int],
-    weights: list[float],
-    k_folds: int = 5
+    predictions: list[float], labels: list[int], weights: list[float], k_folds: int = 5
 ) -> list[float]:
     """Compute out-of-fold isotonic predictions."""
     n = len(predictions)
@@ -245,7 +233,7 @@ def get_out_of_fold_predictions(
     current = 0
     for i in range(k_folds):
         fold_size = fold_sizes[i]
-        val_indices = indices[current:current + fold_size]
+        val_indices = indices[current : current + fold_size]
         train_indices = [idx for idx in indices if idx not in val_indices]
         current += fold_size
 
@@ -266,7 +254,7 @@ def bootstrap_metrics(
     labels: list[int],
     weights: list[float],
     num_bootstraps: int = 200,
-    confidence_level: float = 0.95
+    confidence_level: float = 0.95,
 ) -> dict[str, tuple[float, float]]:
     """Compute bootstrap confidence intervals for Brier and ECE scores."""
     n = len(predictions)
@@ -278,7 +266,7 @@ def bootstrap_metrics(
     random.seed(42)
 
     for _ in range(num_bootstraps):
-        idx = [random.randint(0, n - 1) for _ in range(n)]
+        idx = [random.randint(0, n - 1) for _ in range(n)]  # noqa: S311
         boot_p = [predictions[i] for i in idx]
         boot_y = [labels[i] for i in idx]
         boot_w = [weights[i] for i in idx]
@@ -297,7 +285,7 @@ def bootstrap_metrics(
 
     return {
         "brier_ci": (briers[lower_idx], briers[upper_idx]),
-        "ece_ci": (eces[lower_idx], eces[upper_idx])
+        "ece_ci": (eces[lower_idx], eces[upper_idx]),
     }
 
 
@@ -332,7 +320,9 @@ class CalibrationPipeline:
             eval_predictions = predictions
         else:
             # Out-of-fold predictions for unbiased evaluation
-            eval_predictions = get_out_of_fold_predictions(predictions, labels, weights, self.k_folds)
+            eval_predictions = get_out_of_fold_predictions(
+                predictions, labels, weights, self.k_folds
+            )
             # Final isotonic thresholds fitted on full data
             thresholds, values = fit_isotonic_regression(predictions, labels, weights)
 
@@ -349,5 +339,5 @@ class CalibrationPipeline:
             "isotonic_values": values,
             "num_samples": num_samples,
             "discounted_weight_sum": sum(weights),
-            "mode": "calibrated" if num_samples >= self.min_samples else "uncalibrated"
+            "mode": "calibrated" if num_samples >= self.min_samples else "uncalibrated",
         }

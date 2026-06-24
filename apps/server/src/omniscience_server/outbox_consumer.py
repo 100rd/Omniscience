@@ -3,27 +3,37 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import uuid
 import time
+import uuid
+from typing import Any, cast
 
 import structlog
-from prometheus_client import Gauge
+from omniscience_core.audit.fingerprint import entity_content_hash
+from omniscience_core.db.models import Edge, Entity, Source
 from omniscience_core.queue import NatsConnection, QueueConsumer, QueueProducer
-from omniscience_core.queue.messages import DLQMessage, EdgeUpsertEvent, EntityUpsertEvent
+from omniscience_core.queue.messages import (
+    DLQMessage,
+    EdgeUpsertEvent,
+    EntityMergeEvent,
+    EntityUpsertEvent,
+)
 from omniscience_core.storage.graph import EdgeUpsert, EntityUpsert, GraphStore
-from omniscience_core.storage.vector import VectorStore
+from omniscience_core.storage.vector import ChunkPayload, VectorStore
 from omniscience_embeddings.base import EmbeddingProvider
+from prometheus_client import Gauge
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-from omniscience_core.db.models import Entity, Edge, Source
 
 log = structlog.get_logger(__name__)
 
 PARKED_ENTITIES_COUNT = Gauge("omniscience_outbox_parked_entities_total", "Total parked entities")
-PARKED_ENTITIES_OLDEST = Gauge("omniscience_outbox_parked_entities_oldest_age_seconds", "Oldest parked entity age")
+PARKED_ENTITIES_OLDEST = Gauge(
+    "omniscience_outbox_parked_entities_oldest_age_seconds", "Oldest parked entity age"
+)
 PARKED_EDGES_COUNT = Gauge("omniscience_outbox_parked_edges_total", "Total parked edges")
-PARKED_EDGES_OLDEST = Gauge("omniscience_outbox_parked_edges_oldest_age_seconds", "Oldest parked edge age")
+PARKED_EDGES_OLDEST = Gauge(
+    "omniscience_outbox_parked_edges_oldest_age_seconds", "Oldest parked edge age"
+)
 
 MAX_PARKED_ITEMS = 10000
 MAX_RETRIES_BEFORE_PARK = 3
@@ -48,8 +58,10 @@ class OutboxConsumerWorker:
         self._running = False
         self._entity_consumer: QueueConsumer[EntityUpsertEvent] | None = None
         self._edge_consumer: QueueConsumer[EdgeUpsertEvent] | None = None
+        self._merge_consumer: QueueConsumer[EntityMergeEvent] | None = None
         self._entity_task: asyncio.Task[None] | None = None
         self._edge_task: asyncio.Task[None] | None = None
+        self._merge_task: asyncio.Task[None] | None = None
         self._unpark_task: asyncio.Task[None] | None = None
         self._dlq_producer: QueueProducer | None = None
 
@@ -103,8 +115,18 @@ class OutboxConsumerWorker:
             dlq_subject="ingest.dlq.outbox_edge",
         )
 
+        self._merge_consumer = QueueConsumer(
+            js=self._nats_conn.jetstream,
+            stream="OUTBOX",
+            subject="outbox.entity.*",
+            durable="omniscience-outbox-merge-consumer",
+            payload_type=EntityMergeEvent,
+            dlq_subject="ingest.dlq.outbox_merge",
+        )
+
         self._entity_task = asyncio.create_task(self._consume_entities())
         self._edge_task = asyncio.create_task(self._consume_edges())
+        self._merge_task = asyncio.create_task(self._consume_merges())
         if self._session_factory:
             self._unpark_task = asyncio.create_task(self._unpark_loop())
         log.info("outbox_consumer_worker_started")
@@ -116,17 +138,16 @@ class OutboxConsumerWorker:
             self._entity_consumer.stop()
         if self._edge_consumer:
             self._edge_consumer.stop()
+        if self._merge_consumer:
+            self._merge_consumer.stop()
 
-        if self._entity_task:
-            self._entity_task.cancel()
-        if self._edge_task:
-            self._edge_task.cancel()
-        if self._unpark_task:
-            self._unpark_task.cancel()
+        for task in (self._entity_task, self._edge_task, self._merge_task, self._unpark_task):
+            if task:
+                task.cancel()
 
         log.info("outbox_consumer_worker_stopped")
 
-    async def _route_to_dlq(self, msg, dlq_subject: str, error_msg: str) -> None:
+    async def _route_to_dlq(self, msg: Any, dlq_subject: str, error_msg: str) -> None:
         """Route a message to the DLQ and term it."""
         if not self._dlq_producer:
             return
@@ -134,7 +155,11 @@ class OutboxConsumerWorker:
         try:
             dlq_msg = DLQMessage(
                 original_subject=msg.subject,
-                original_payload=msg.payload.model_dump_json() if hasattr(msg.payload, "model_dump_json") else str(msg.payload),
+                original_payload=(
+                    msg.payload.model_dump_json()
+                    if hasattr(msg.payload, "model_dump_json")
+                    else str(msg.payload)
+                ),
                 error=error_msg,
                 attempt_count=1,
             )
@@ -150,55 +175,73 @@ class OutboxConsumerWorker:
             return
 
         producer = QueueProducer(self._nats_conn.jetstream)
-        
+
         while self._running:
             try:
                 now = time.monotonic()
-                stale_entities = [eid for eid, parked_at in list(self._parked_entities.items()) if now - parked_at > self._unpark_timeout_seconds]
-                stale_edges = [eid for eid, parked_at in list(self._parked_edges.items()) if now - parked_at > self._unpark_timeout_seconds]
+                stale_entities = [
+                    eid
+                    for eid, parked_at in list(self._parked_entities.items())
+                    if now - parked_at > self._unpark_timeout_seconds
+                ]
+                stale_edges = [
+                    eid
+                    for eid, parked_at in list(self._parked_edges.items())
+                    if now - parked_at > self._unpark_timeout_seconds
+                ]
 
                 if stale_entities or stale_edges:
                     async with self._session_factory() as session:
                         if stale_entities:
-                            stmt = select(Entity, Source.workspace_id).join(Source, Entity.source_id == Source.id).where(Entity.id.in_(stale_entities))
+                            stmt = (
+                                select(Entity, Source.tenant_id)
+                                .join(Source, Entity.source_id == Source.id)
+                                .where(Entity.id.in_(stale_entities))
+                            )
                             res = await session.execute(stmt)
-                            for entity, workspace_id in res:
+                            for entity, tenant_id in res:
                                 event = EntityUpsertEvent(
                                     id=str(entity.id),
                                     source_id=str(entity.source_id),
-                                    workspace_id=str(workspace_id) if workspace_id else None,
+                                    workspace_id=str(tenant_id) if tenant_id else None,
                                     entity_type=entity.entity_type,
                                     name=entity.name,
                                     display_name=entity.display_name,
                                     metadata=entity.entity_metadata,
                                     version=entity.version,
                                     is_backfill=True,
+                                    content_hash=entity.content_hash,
                                 )
                                 await producer.publish("outbox.entity.upsert", event)
                                 log.info("unpark_backfill_entity", entity_id=str(entity.id))
-                        
+
                         if stale_edges:
-                            stmt = select(Edge, Source.workspace_id).join(Entity, Edge.source_entity_id == Entity.id).join(Source, Entity.source_id == Source.id).where(Edge.id.in_(stale_edges))
-                            res = await session.execute(stmt)
-                            for edge, workspace_id in res:
-                                event = EdgeUpsertEvent(
+                            stmt_e = (
+                                select(Edge, Source.tenant_id)
+                                .join(Entity, Edge.source_entity_id == Entity.id)
+                                .join(Source, Entity.source_id == Source.id)
+                                .where(Edge.id.in_(stale_edges))
+                            )
+                            res_e = await session.execute(stmt_e)
+                            for edge, tenant_id in res_e:
+                                edge_event = EdgeUpsertEvent(
                                     id=str(edge.id),
                                     source_entity_id=str(edge.source_entity_id),
                                     target_entity_id=str(edge.target_entity_id),
-                                    workspace_id=str(workspace_id) if workspace_id else None,
+                                    workspace_id=str(tenant_id) if tenant_id else None,
                                     edge_type=edge.edge_type,
                                     metadata=edge.edge_metadata,
                                     version=edge.version,
                                     is_backfill=True,
                                 )
-                                await producer.publish("outbox.edge.upsert", event)
+                                await producer.publish("outbox.edge.upsert", edge_event)
                                 log.info("unpark_backfill_edge", edge_id=str(edge.id))
-                                
+
             except asyncio.CancelledError:
                 break
             except Exception as exc:
                 log.error("unpark_loop_failed", error=str(exc))
-            
+
             try:
                 await asyncio.sleep(60.0)
             except asyncio.CancelledError:
@@ -217,8 +260,7 @@ class OutboxConsumerWorker:
 
                     if event.is_backfill:
                         self._parked_entities.pop(entity_id, None)
-                        if entity_id in self._entity_attempts:
-                            del self._entity_attempts[entity_id]
+                        self._entity_attempts.pop(entity_id, None)
                         self._update_metrics()
 
                     if entity_id in self._parked_entities:
@@ -253,97 +295,145 @@ class OutboxConsumerWorker:
                     )
 
                     # 2. Update Qdrant
-                    text = f"Entity: {event.entity_type} {event.name} ({event.display_name}). Metadata: {event.metadata}"
-                    embedding = await self._embedding_provider.embed_query(text)
-                    chunk = {
-                        "ord": 0,
-                        "text": text,
-                        "embedding": embedding,
-                        "symbol": event.name,
-                        "metadata": {
-                            "workspace_id": str(workspace_id),
-                            "entity_type": event.entity_type,
-                            "name": event.name,
-                            "display_name": event.display_name,
-                            **event.metadata,
+                    text = (
+                        f"Entity: {event.entity_type} {event.name} ({event.display_name}). "
+                        f"Metadata: {event.metadata}"
+                    )
+                    embeddings = await self._embedding_provider.embed([text])
+                    embedding = embeddings[0]
+                    chunk = cast(
+                        "ChunkPayload",
+                        {
+                            "ord": 0,
+                            "text": text,
+                            "embedding": embedding,
+                            "symbol": event.name,
+                            "metadata": {
+                                "workspace_id": str(workspace_id),
+                                "entity_type": event.entity_type,
+                                "name": event.name,
+                                "display_name": event.display_name,
+                                **event.metadata,
+                            },
+                            "embedding_model": self._embedding_provider.model_name,
+                            "embedding_provider": self._embedding_provider.provider_name,
+                            "parser_version": "outbox_v1",
+                            "chunker_strategy": "entity_outbox",
                         },
-                        "embedding_model": self._embedding_provider.model_name,
-                        "embedding_provider": self._embedding_provider.provider_name,
-                        "parser_version": "outbox_v1",
-                        "chunker_strategy": "entity_outbox",
-                    }
-                    content_hash = hashlib.sha256(text.encode()).hexdigest()
+                    )
+                    # AP2: use the canonical BLAKE2b-256 entity hash forwarded
+                    # from Postgres Entity.content_hash so all three stores
+                    # store the SAME value and the reconcile worker can compare
+                    # them directly.  Fall back to entity_content_hash() if the
+                    # event pre-dates AP2 (content_hash field is None).
+                    if event.content_hash is not None:
+                        qdrant_content_hash = event.content_hash
+                    else:
+                        qdrant_content_hash = entity_content_hash(
+                            entity_type=event.entity_type,
+                            name=event.name,
+                            display_name=event.display_name,
+                            metadata=event.metadata,
+                        )
 
                     await self._vector_store.upsert_chunks(
                         source_id=uuid.UUID(event.source_id),
                         external_id=f"entity:{event.id}",
                         uri=f"entity://{event.entity_type}/{event.name}",
                         title=event.display_name,
-                        content_hash=content_hash,
+                        content_hash=qdrant_content_hash,
                         metadata={"workspace_id": str(workspace_id)},
                         chunks=[chunk],
                         version=event.version,
                     )
 
-                    if entity_id in self._entity_attempts:
-                        del self._entity_attempts[entity_id]
+                    self._entity_attempts.pop(entity_id, None)
                     await msg.ack()
 
                     # Auto-unpark dependent edges
                     if self._session_factory:
-                        edges_to_unpark = []
-                        for e_id, (src_id, tgt_id) in list(self._edge_deps.items()):
-                            if src_id == entity_id or tgt_id == entity_id:
-                                other_id = tgt_id if src_id == entity_id else src_id
-                                if other_id not in self._parked_entities:
-                                    edges_to_unpark.append(e_id)
-                        
-                        if edges_to_unpark:
-                            async with self._session_factory() as session:
-                                stmt = select(Edge, Source.workspace_id).join(Entity, Edge.source_entity_id == Entity.id).join(Source, Entity.source_id == Source.id).where(Edge.id.in_(edges_to_unpark))
-                                res = await session.execute(stmt)
-                                producer = QueueProducer(self._nats_conn.jetstream)
-                                for edge, workspace_id in res:
-                                    backfill_event = EdgeUpsertEvent(
-                                        id=str(edge.id),
-                                        source_entity_id=str(edge.source_entity_id),
-                                        target_entity_id=str(edge.target_entity_id),
-                                        workspace_id=str(workspace_id) if workspace_id else None,
-                                        edge_type=edge.edge_type,
-                                        metadata=edge.edge_metadata,
-                                        version=edge.version,
-                                        is_backfill=True,
-                                    )
-                                    await producer.publish("outbox.edge.upsert", backfill_event)
-                                    log.info("auto_unpark_edge", edge_id=str(edge.id), trigger_entity_id=str(entity_id))
-                                    self._parked_edges.pop(edge.id, None)
-                                    self._edge_deps.pop(edge.id, None)
-                            self._update_metrics()
+                        await self._auto_unpark_edges(entity_id)
                 except Exception as exc:
                     log.error("outbox_consume_entity_failed", error=str(exc))
-                    if 'entity_id' in locals():
-                        attempt = self._entity_attempts.get(entity_id, 0) + 1
-                        self._entity_attempts[entity_id] = attempt
-                        if attempt <= MAX_RETRIES_BEFORE_PARK:
-                            delay = 2 ** attempt
-                            log.info("outbox_entity_retry", entity_id=str(entity_id), attempt=attempt, delay=delay)
-                            await msg.nak(delay=delay)
-                        else:
-                            if entity_id not in self._parked_entities:
-                                self._parked_entities[entity_id] = time.monotonic()
-                            if len(self._parked_entities) > MAX_PARKED_ITEMS:
-                                oldest_key = min(self._parked_entities, key=self._parked_entities.get)
-                                del self._parked_entities[oldest_key]
-                            self._update_metrics()
-                            await self._route_to_dlq(
-                                msg,
-                                dlq_subject="ingest.dlq.outbox_entity",
-                                error_msg=f"Processing failed: {exc}",
-                            )
+                    if "entity_id" in dir():
+                        await self._handle_entity_failure(entity_id, msg, exc)
                     else:
                         await msg.nak()
         except asyncio.CancelledError:
             pass
+
+    async def _auto_unpark_edges(self, resolved_entity_id: uuid.UUID) -> None:
+        """Republish edges that were waiting for ``resolved_entity_id`` to land."""
+        if not self._session_factory:
+            return
+        edges_to_unpark = [
+            e_id
+            for e_id, (src_id, tgt_id) in list(self._edge_deps.items())
+            if (src_id == resolved_entity_id or tgt_id == resolved_entity_id)
+            and ((tgt_id if src_id == resolved_entity_id else src_id) not in self._parked_entities)
+        ]
+
+        if not edges_to_unpark:
+            return
+
+        async with self._session_factory() as session:
+            stmt = (
+                select(Edge, Source.tenant_id)
+                .join(Entity, Edge.source_entity_id == Entity.id)
+                .join(Source, Entity.source_id == Source.id)
+                .where(Edge.id.in_(edges_to_unpark))
+            )
+            res = await session.execute(stmt)
+            producer = QueueProducer(self._nats_conn.jetstream)
+            for edge, tenant_id in res:
+                backfill_event = EdgeUpsertEvent(
+                    id=str(edge.id),
+                    source_entity_id=str(edge.source_entity_id),
+                    target_entity_id=str(edge.target_entity_id),
+                    workspace_id=str(tenant_id) if tenant_id else None,
+                    edge_type=edge.edge_type,
+                    metadata=edge.edge_metadata,
+                    version=edge.version,
+                    is_backfill=True,
+                )
+                await producer.publish("outbox.edge.upsert", backfill_event)
+                log.info(
+                    "auto_unpark_edge",
+                    edge_id=str(edge.id),
+                    trigger_entity_id=str(resolved_entity_id),
+                )
+                self._parked_edges.pop(edge.id, None)
+                self._edge_deps.pop(edge.id, None)
+        self._update_metrics()
+
+    async def _handle_entity_failure(self, entity_id: uuid.UUID, msg: Any, exc: Exception) -> None:
+        """Retry or park an entity after a processing failure."""
+        attempt = self._entity_attempts.get(entity_id, 0) + 1
+        self._entity_attempts[entity_id] = attempt
+        if attempt <= MAX_RETRIES_BEFORE_PARK:
+            delay = float(2**attempt)
+            log.info(
+                "outbox_entity_retry",
+                entity_id=str(entity_id),
+                attempt=attempt,
+                delay=delay,
+            )
+            await msg.nak(delay=delay)
+        else:
+            if entity_id not in self._parked_entities:
+                self._parked_entities[entity_id] = time.monotonic()
+            if len(self._parked_entities) > MAX_PARKED_ITEMS:
+                oldest_key = min(
+                    self._parked_entities,
+                    key=lambda k: self._parked_entities[k],
+                )
+                del self._parked_entities[oldest_key]
+            self._update_metrics()
+            await self._route_to_dlq(
+                msg,
+                dlq_subject="ingest.dlq.outbox_entity",
+                error_msg=f"Processing failed: {exc}",
+            )
 
     async def _consume_edges(self) -> None:
         """Loop to consume edge upsert events."""
@@ -361,8 +451,7 @@ class OutboxConsumerWorker:
                     if event.is_backfill:
                         self._parked_edges.pop(edge_id, None)
                         self._edge_deps.pop(edge_id, None)
-                        if edge_id in self._edge_attempts:
-                            del self._edge_attempts[edge_id]
+                        self._edge_attempts.pop(edge_id, None)
                         self._update_metrics()
 
                     if edge_id in self._parked_edges:
@@ -374,13 +463,19 @@ class OutboxConsumerWorker:
                         )
                         continue
 
-                    if source_entity_id in self._parked_entities or target_entity_id in self._parked_entities:
+                    if (
+                        source_entity_id in self._parked_entities
+                        or target_entity_id in self._parked_entities
+                    ):
                         log.warning("outbox_edge_skip_parked_entity", edge_id=str(edge_id))
                         if edge_id not in self._parked_edges:
                             self._parked_edges[edge_id] = time.monotonic()
                             self._edge_deps[edge_id] = (source_entity_id, target_entity_id)
                         if len(self._parked_edges) > MAX_PARKED_ITEMS:
-                            oldest_key = min(self._parked_edges, key=self._parked_edges.get)
+                            oldest_key = min(
+                                self._parked_edges,
+                                key=lambda k: self._parked_edges[k],
+                            )
                             del self._parked_edges[oldest_key]
                             self._edge_deps.pop(oldest_key, None)
                         self._update_metrics()
@@ -410,33 +505,112 @@ class OutboxConsumerWorker:
                         workspace_id=workspace_id,
                     )
 
-                    if edge_id in self._edge_attempts:
-                        del self._edge_attempts[edge_id]
+                    self._edge_attempts.pop(edge_id, None)
                     await msg.ack()
                 except Exception as exc:
                     log.error("outbox_consume_edge_failed", error=str(exc))
-                    if 'edge_id' in locals():
-                        attempt = self._edge_attempts.get(edge_id, 0) + 1
-                        self._edge_attempts[edge_id] = attempt
-                        if attempt <= MAX_RETRIES_BEFORE_PARK:
-                            delay = 2 ** attempt
-                            log.info("outbox_edge_retry", edge_id=str(edge_id), attempt=attempt, delay=delay)
-                            await msg.nak(delay=delay)
-                        else:
-                            if edge_id not in self._parked_edges:
-                                self._parked_edges[edge_id] = time.monotonic()
-                                self._edge_deps[edge_id] = (source_entity_id, target_entity_id)
-                            if len(self._parked_edges) > MAX_PARKED_ITEMS:
-                                oldest_key = min(self._parked_edges, key=self._parked_edges.get)
-                                del self._parked_edges[oldest_key]
-                                self._edge_deps.pop(oldest_key, None)
-                            self._update_metrics()
-                            await self._route_to_dlq(
-                                msg,
-                                dlq_subject="ingest.dlq.outbox_edge",
-                                error_msg=f"Processing failed: {exc}",
-                            )
+                    if "edge_id" in dir():
+                        await self._handle_edge_failure(
+                            edge_id, source_entity_id, target_entity_id, msg, exc
+                        )
                     else:
                         await msg.nak()
+        except asyncio.CancelledError:
+            pass
+
+    async def _handle_edge_failure(
+        self,
+        edge_id: uuid.UUID,
+        source_entity_id: uuid.UUID,
+        target_entity_id: uuid.UUID,
+        msg: Any,
+        exc: Exception,
+    ) -> None:
+        """Retry or park an edge after a processing failure."""
+        attempt = self._edge_attempts.get(edge_id, 0) + 1
+        self._edge_attempts[edge_id] = attempt
+        if attempt <= MAX_RETRIES_BEFORE_PARK:
+            delay = float(2**attempt)
+            log.info(
+                "outbox_edge_retry",
+                edge_id=str(edge_id),
+                attempt=attempt,
+                delay=delay,
+            )
+            await msg.nak(delay=delay)
+        else:
+            if edge_id not in self._parked_edges:
+                self._parked_edges[edge_id] = time.monotonic()
+                self._edge_deps[edge_id] = (source_entity_id, target_entity_id)
+            if len(self._parked_edges) > MAX_PARKED_ITEMS:
+                oldest_key = min(
+                    self._parked_edges,
+                    key=lambda k: self._parked_edges[k],
+                )
+                del self._parked_edges[oldest_key]
+                self._edge_deps.pop(oldest_key, None)
+            self._update_metrics()
+            await self._route_to_dlq(
+                msg,
+                dlq_subject="ingest.dlq.outbox_edge",
+                error_msg=f"Processing failed: {exc}",
+            )
+
+    async def _consume_merges(self) -> None:
+        """Loop to consume entity.merge and entity.unmerge events (AP1)."""
+        if not self._merge_consumer:
+            return
+
+        try:
+            async for msg in self._merge_consumer:
+                try:
+                    event: EntityMergeEvent = msg.payload
+                    workspace_id = uuid.UUID(event.workspace_id)
+
+                    if msg.subject.endswith("entity.merge"):
+                        if event.source_id is None or event.target_id is None:
+                            log.warning(
+                                "outbox_merge_missing_ids",
+                                workspace_id=str(workspace_id),
+                            )
+                            await msg.term()
+                            continue
+                        success = await self._graph_store.merge_nodes(
+                            workspace_id=workspace_id,
+                            source_id=uuid.UUID(event.source_id),
+                            target_id=uuid.UUID(event.target_id),
+                        )
+                        if not success:
+                            log.warning(
+                                "outbox_merge_nodes_failed",
+                                source_id=event.source_id,
+                                target_id=event.target_id,
+                            )
+                    elif msg.subject.endswith("entity.unmerge"):
+                        if event.merged_node_id is None:
+                            log.warning(
+                                "outbox_unmerge_missing_id",
+                                workspace_id=str(workspace_id),
+                            )
+                            await msg.term()
+                            continue
+                        success = await self._graph_store.unmerge_node(
+                            workspace_id=workspace_id,
+                            merged_node_id=uuid.UUID(event.merged_node_id),
+                        )
+                        if not success:
+                            log.warning(
+                                "outbox_unmerge_node_failed",
+                                merged_node_id=event.merged_node_id,
+                            )
+
+                    await msg.ack()
+                except Exception as exc:
+                    log.error("outbox_consume_merge_failed", error=str(exc))
+                    await self._route_to_dlq(
+                        msg,
+                        dlq_subject="ingest.dlq.outbox_merge",
+                        error_msg=f"Merge/unmerge processing failed: {exc}",
+                    )
         except asyncio.CancelledError:
             pass

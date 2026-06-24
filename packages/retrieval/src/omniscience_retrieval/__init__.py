@@ -20,6 +20,8 @@ Prior to v0.2 this package also exposed:
   ``strategies`` sub-package.
 """
 
+from omniscience_retrieval.reconciler import GlobalReconciler
+
 from .federation import FederatedSearch
 from .federation_config import FederatedInstance, FederationConfig
 from .graph_query import EdgeResult, EntityNode, GraphQueryService, GraphResult
@@ -32,7 +34,6 @@ from .graph_rag import (
     MERGE_ALPHA,
     GraphRAGComposer,
 )
-from omniscience_retrieval.reconciler import GlobalReconciler
 from .models import (
     ChunkLineage,
     Citation,

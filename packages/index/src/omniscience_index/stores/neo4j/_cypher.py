@@ -111,6 +111,7 @@ ON CREATE SET
     n.chunk_id = $chunk_id,
     n.cluster = $cluster,
     n.metadata = $metadata,
+    n.content_hash = $content_hash,
     n.is_stub = false,
     n.created_at = $now,
     n.updated_at = $now
@@ -122,6 +123,7 @@ ON MATCH SET
     n.chunk_id = $chunk_id,
     n.cluster = $cluster,
     n.metadata = $metadata,
+    n.content_hash = $content_hash,
     n.is_stub = false,
     n.updated_at = $now
 """

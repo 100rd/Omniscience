@@ -156,15 +156,13 @@ async def test_bitemporal_update_and_retention_flow() -> None:
         composer._graphrag_active = True
 
         # Query for Version 1
-        res1 = await composer.search(
-            MagicMock(query="content", top_k=1, filters={}), workspace_id=_WS_ID, as_of=_T1
-        )
+        req1 = MagicMock(query="content", top_k=1, filters={}, cursor=None)
+        res1 = await composer.search(req1, workspace_id=_WS_ID, as_of=_T1)
         assert "Version 1" in res1.hits[0].text
 
         # Query for Version 2
-        res2 = await composer.search(
-            MagicMock(query="content", top_k=1, filters={}), workspace_id=_WS_ID, as_of=_T2
-        )
+        req2 = MagicMock(query="content", top_k=1, filters={}, cursor=None)
+        res2 = await composer.search(req2, workspace_id=_WS_ID, as_of=_T2)
         assert "Version 2" in res2.hits[0].text
 
     # --- STEP 4: RETENTION WORKER EMULATION ---

@@ -1,4 +1,7 @@
-"""Tests for the Outbox flow (OtlpIngester -> OutboxEvent -> OutboxWorker -> JetStream -> OutboxConsumerWorker)."""
+"""Tests for the Outbox flow.
+
+Covers: OtlpIngester -> OutboxEvent -> OutboxWorker -> JetStream -> OutboxConsumerWorker.
+"""
 
 from __future__ import annotations
 
@@ -24,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 @pytest.mark.asyncio
 async def test_otlp_ingester_writes_to_outbox() -> None:
-    """OtlpIngester.ingest creates entities and edges, and writes OutboxEvent rows in the same txn."""
+    """OtlpIngester.ingest creates entities/edges and writes OutboxEvent rows in the same txn."""
     ws_id = uuid.uuid4()
     src = MagicMock(spec=Source)
     src.id = uuid.uuid4()
@@ -167,7 +170,7 @@ async def test_outbox_consumer_worker_updates_neo4j_and_qdrant() -> None:
     embedding_provider = AsyncMock(spec=EmbeddingProvider)
     embedding_provider.model_name = "test-model"
     embedding_provider.provider_name = "test-provider"
-    embedding_provider.embed_query = AsyncMock(return_value=[0.1, 0.2, 0.3])
+    embedding_provider.embed = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
 
     consumer_worker = OutboxConsumerWorker(
         nats_conn=nats_conn,
@@ -325,7 +328,7 @@ async def test_outbox_consumer_worker_park_the_entity() -> None:
     # Verify fourth failure parked the entity
     assert uuid.UUID(ent_id) in consumer_worker._parked_entities
 
-    # DLQ producer should be called twice (once for final failure of msg1, once for parked skip of msg2)
+    # DLQ producer called twice: once for final failure of msg1, once for parked skip of msg2
     assert consumer_worker._dlq_producer.publish.call_count == 2
 
     # First DLQ call

@@ -42,6 +42,9 @@ class SearchRequest(BaseModel):
             "this time per ADR-0008 §5. Naive datetimes are rejected."
         ),
     )
+    cursor: str | None = Field(
+        default=None, description="Opaque pagination cursor to resume a prior search."
+    )
 
     @field_validator("as_of", mode="after")
     @classmethod
@@ -127,14 +130,11 @@ class SearchHit(BaseModel):
         description="Probabilistic impact score for this search hit.",
     )
     staleness: float | None = Field(
-        default=None,
-        description="Lag of this evidence from SoT or current time in seconds."
+        default=None, description="Lag of this evidence from SoT or current time in seconds."
     )
     applied_version: int | None = Field(
-        default=None,
-        description="Version of this evidence projection."
+        default=None, description="Version of this evidence projection."
     )
-
 
 
 class QueryStats(BaseModel):
@@ -160,6 +160,16 @@ class SearchResult(BaseModel):
     caller's ``as_of`` precedes any recorded history for the workspace
     (issue #133 §B).  ``None`` means "no hints to convey" and serialises
     as a plain absent field.
+
+    ``degraded_subsystems`` lists store names (e.g. ``["neo4j", "qdrant"]``)
+    that lagged behind the Postgres SoT watermark when this response was
+    produced.  Non-empty means the result may reflect stale projections
+    for those stores.  ``staleness_seconds`` is the age of the lagging
+    projection relative to the SoT watermark (wall-clock seconds); ``None``
+    when all stores are converged or the lag could not be measured.
+    Callers MUST treat a non-empty ``degraded_subsystems`` as an indication
+    that the result may be stale and should not be cached or used for
+    time-sensitive decisions without a retry.
     """
 
     hits: list[SearchHit]
@@ -182,13 +192,27 @@ class SearchResult(BaseModel):
     )
     min_applied_version: int | None = Field(
         default=None,
-        description="The minimum applied version among all evidence in this response."
+        description="The minimum applied version among all evidence in this response.",
     )
     degraded_subsystems: list[str] = Field(
         default_factory=list,
-        description="List of subsystems that are operating in a degraded mode."
+        description=(
+            "Store names (e.g. 'neo4j', 'qdrant') that were behind the Postgres SoT "
+            "watermark when this response was produced.  Non-empty means the result "
+            "may reflect stale projections."
+        ),
+    )
+    staleness_seconds: float | None = Field(
+        default=None,
+        description=(
+            "Age in wall-clock seconds of the lagging projection relative to the "
+            "Postgres SoT watermark.  Set when degraded_subsystems is non-empty and "
+            "the lag could be measured; None otherwise."
+        ),
     )
     snapshot_id: str | None = Field(
-        default=None,
-        description="ID of the graph snapshot used for this response."
+        default=None, description="ID of the graph snapshot used for this response."
+    )
+    next_cursor: str | None = Field(
+        default=None, description="Opaque pagination cursor to fetch the next page of results."
     )

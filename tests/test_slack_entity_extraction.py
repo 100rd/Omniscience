@@ -188,7 +188,7 @@ class TestErrorTokenExtraction:
         assert "E_DB_TIMEOUT" in out["errors"]
 
     def test_denylist_filters_common_words(self) -> None:
-        # Placeholder words and common acronyms (HTTPS/JSON) match the regex shape but are not error
+        # Placeholder words and common acronyms (HTTPS/JSON) match the regex but are not errors
         # codes — they would otherwise pollute every Slack thread.
         text = "TODO check this. Use HTTPS. Parse JSON output."
         out = extract_mentions(text)

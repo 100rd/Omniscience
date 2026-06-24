@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import datetime
 import time
 from collections.abc import AsyncIterator
 from typing import TypeVar
@@ -245,12 +246,13 @@ def _get_num_delivered(raw: Msg) -> int:
         log.debug("consumer_metadata_unavailable", error=str(exc))
     return 1
 
+
 def _get_timestamp(raw: Msg) -> datetime.datetime | None:
     """Extract publish timestamp from message metadata."""
     try:
         meta = raw.metadata
         if meta is not None and hasattr(meta, "timestamp"):
             return meta.timestamp
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("consumer_timestamp_unavailable", error=str(exc))
     return None

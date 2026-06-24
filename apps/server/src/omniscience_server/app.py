@@ -88,7 +88,7 @@ _SUPPORTED_VECTOR_BACKENDS: frozenset[str] = frozenset({"qdrant", "postgres"})
 class _UnwiredLegacyService:
     """Placeholder for ``GraphRAGComposer.legacy_service``.
 
-    The composer dispatches to the Neo4j+Qdrant/Postgres pipeline 
+    The composer dispatches to the Neo4j+Qdrant/Postgres pipeline
     (``graphrag_active`` is always True). The ``legacy_service``
     branch is therefore unreachable at runtime; we still need to pass
     *something* that satisfies the ``_LegacySearchCallable`` protocol.
@@ -216,7 +216,6 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             collection=qdrant_store.collection_name,
         )
 
-
     app.state.retrieval_service = None
 
     # --- Federation (optional) ---
@@ -260,7 +259,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         legacy_service=federated if federated is not None else _UnwiredLegacyService(),
         session_factory=session_factory,
         global_reconciler=global_reconciler,
-        is_entity_parked_fn=lambda eid: eid in getattr(app.state, "outbox_consumer")._parked_entities if getattr(app.state, "outbox_consumer", None) else False,
+        is_entity_parked_fn=lambda eid: (
+            eid in app.state.outbox_consumer._parked_entities
+            if getattr(app.state, "outbox_consumer", None)
+            else False
+        ),
     )
     app.state.graph_rag_composer = graph_rag_composer
     log.info(
@@ -427,7 +430,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         retention_worker.stop()
         retention_task.cancel()
 
-    outbox_consumer.stop()
+    await outbox_consumer.stop()
     outbox_consumer_task.cancel()
 
     outbox_worker.stop()

@@ -122,12 +122,16 @@ async def test_postgres_only_store_graph_ops(mock_session_factory):
                 seed_ent.display_name = "main.py"
                 seed_ent.chunk_id = None
                 res.scalar_one_or_none.return_value = seed_ent
+                # traverse now uses scalars().first() to handle potential
+                # duplicate rows (concurrent upserts); configure both.
+                res.scalars.return_value.first.return_value = seed_ent
             else:
                 res.all.return_value = []
         else:
             res.all.return_value = []
             res.fetchone.return_value = None
             res.scalar_one_or_none.return_value = None
+            res.scalars.return_value.first.return_value = None
         return res
 
     mock_session_factory.session.execute = AsyncMock(side_effect=mock_execute)

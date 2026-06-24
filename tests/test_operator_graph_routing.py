@@ -275,6 +275,7 @@ class _RecordingGraphStore:
         entities: list[Any],
         edges: list[Any],
         snapshot_at: Any = None,
+        workspace_id: uuid.UUID | None = None,
     ) -> None:
         self.calls.append(
             {

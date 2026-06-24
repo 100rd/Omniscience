@@ -651,9 +651,7 @@ class TestIndexWriterWithVectorStore:
         # was committed successfully before Qdrant threw the exception.
         tx_exit_call = tx_mock.__aexit__.call_args
         exc_type = tx_exit_call[0][0]  # positional arg 0: exc_type
-        assert exc_type is None, (
-            "begin().__aexit__ must NOT receive the exception; PG must commit"
-        )
+        assert exc_type is None, "begin().__aexit__ must NOT receive the exception; PG must commit"
 
     @pytest.mark.asyncio
     async def test_qdrant_failure_pg_add_was_called_before_raise(self) -> None:

@@ -197,8 +197,11 @@ class _InMemoryIndexWriter:
         edges: list[Any],
         workspace_id: uuid.UUID | None = None,
         snapshot_at: Any | None = None,
+        version: int | None = None,
+        epoch: int | None = None,
+        forced_replay: bool = False,
     ) -> None:
-        # Neo4j fan-out — mirrors IndexWriter.upsert_graph.
+        # Neo4j fan-out — mirrors IndexWriter.upsert_graph signature.
         if self._graph_store is not None and workspace_id is not None:
             for ent in entities:
                 if hasattr(ent, "metadata"):
@@ -210,7 +213,11 @@ class _InMemoryIndexWriter:
                 document_id=document_id,
                 entities=entities,
                 edges=edges,
+                workspace_id=workspace_id,
                 snapshot_at=snapshot_at,
+                version=version,
+                epoch=epoch,
+                forced_replay=forced_replay,
             )
 
     async def tombstone(

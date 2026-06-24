@@ -33,6 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
+from sqlalchemy.types import UserDefinedType
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -280,25 +281,22 @@ class IngestionRun(Base):
     __table_args__ = (Index("ix_ingestion_runs_source_id", "source_id"),)
 
 
-from sqlalchemy.types import UserDefinedType
-
-
-class SqlVector(UserDefinedType):
+class SqlVector(UserDefinedType[Any]):
     """Custom SQLAlchemy type for pgvector's vector type."""
 
-    def get_col_spec(self, **kw):
+    def get_col_spec(self, **kw: Any) -> str:
         return "vector"
 
-    def bind_processor(self, dialect):
-        def process(value):
+    def bind_processor(self, dialect: Any) -> Any:
+        def process(value: Any) -> Any:
             if value is None:
                 return None
             return f"[{','.join(map(str, value))}]"
 
         return process
 
-    def result_processor(self, dialect, coltype):
-        def process(value):
+    def result_processor(self, dialect: Any, coltype: Any) -> Any:
+        def process(value: Any) -> Any:
             if value is None:
                 return None
             if isinstance(value, str):
@@ -432,6 +430,11 @@ class Entity(Base):
         "metadata", JSONB, nullable=False, default=dict
     )
     version: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("1"))
+    # AP2 — per-entity anti-entropy: stable BLAKE2b-256 hash of content fields
+    # (entity_type, name, display_name, metadata).  Provenance fields are
+    # excluded.  NULL until the first post-migration write.  See
+    # audit.fingerprint.entity_content_hash.
+    content_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -454,6 +457,7 @@ class Entity(Base):
     __table_args__ = (
         Index("ix_entities_source_type", "source_id", "entity_type"),
         Index("ix_entities_name", "name"),
+        Index("ix_entities_content_hash", "content_hash"),
     )
 
 
@@ -565,13 +569,27 @@ class EntityEmitter(Base):
 
 
 class OutboxEvent(Base):
-    """Outbox table for reliable event publishing (Outbox pattern)."""
+    """Outbox table for reliable event publishing (Outbox pattern).
+
+    AP1 — single-writer invariant: ``entity_id`` is the per-entity partition
+    key added in migration 0013.  It is nullable so that legacy events and
+    events without a single entity affinity (e.g. bulk document imports) do
+    not require a back-fill.  The version guard in the store adapters is the
+    ordering backstop for NULL-keyed events.
+
+    For entity upserts the ``entity_id`` equals the entity's own UUID.
+    For edge upserts the ``entity_id`` equals the ``source_entity_id`` of the
+    edge (the "owning" end).  For merge/unmerge events it is the acted-on
+    entity's id.
+    """
 
     __tablename__ = "outbox_events"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # AP1 partition key (migration 0013).
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -583,6 +601,7 @@ class OutboxEvent(Base):
     __table_args__ = (
         Index("ix_outbox_events_processed", "processed"),
         Index("ix_outbox_events_created_at", "created_at"),
+        Index("ix_outbox_events_entity_created", "entity_id", "created_at"),
     )
 
 

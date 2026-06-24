@@ -123,6 +123,7 @@ class IndexWriter:
         async with self._session_factory() as session, session.begin():
             existing = await self._find_document(session, source_id, external_id)
 
+            action: Literal["created", "updated", "unchanged"]
             if existing is not None and existing.content_hash == content_hash:
                 doc = existing
                 action = "unchanged"
@@ -132,14 +133,14 @@ class IndexWriter:
                     doc = await self._insert_document(
                         session, source_id, external_id, uri, title, content_hash, metadata
                     )
-                    action = "created"  # type: ignore[assignment]
+                    action = "created"
                 else:
                     await self._delete_chunks(session, existing.id)
                     await self._update_document(
                         session, existing, uri, title, content_hash, metadata
                     )
                     doc = existing
-                    action = "updated"  # type: ignore[assignment]
+                    action = "updated"
 
                 await self._insert_chunks(session, doc.id, chunks, ingestion_run_id)
 
@@ -271,6 +272,7 @@ class IndexWriter:
                 document_id=document_id,
                 entities=entities,
                 edges=edges,
+                workspace_id=workspace_id,
                 snapshot_at=snapshot_at,
                 version=version,
                 epoch=epoch,

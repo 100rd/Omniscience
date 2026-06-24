@@ -136,6 +136,11 @@ ANCHOR_FILTER_KEY: str = "graphrag_anchor"
 #: response is not interpreted as "deleted" or "unauthorised".
 DEGRADED_PRE_HISTORY: str = "as_of_before_recorded_history"
 
+#: Global budget in characters for the composed GraphRAG result.
+#: Acts as a proxy for ~6000 tokens to avoid blowing up the LLM context.
+#: Tails of the graph (lower scored hits) are cut off when this budget is reached.
+GRAPHRAG_BUDGET_CHARS: int = 24000
+
 
 # ---------------------------------------------------------------------------
 # Prometheus metrics — omniscience_graphrag_* namespace
@@ -265,8 +270,7 @@ class _AnchorStageResult:
 
     candidate_source_ids: tuple[str, ...]
     candidate_depths: tuple[int, ...]
-    centralities: dict[str, float]
-    candidate_parked: tuple[bool, ...]
+    candidate_centralities: dict[str, float]
     #: The anchor name passed (empty when ``anchor_requested`` is False).
     anchor_name: str
     #: True when the anchor entity resolved in the graph.
@@ -275,6 +279,8 @@ class _AnchorStageResult:
     anchor_requested: bool
     #: Wall-clock duration of this stage in seconds.
     duration_s: float
+    #: Parked flags parallel to candidate_source_ids (default empty for legacy callers).
+    candidate_parked: tuple[bool, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +377,9 @@ class GraphRAGComposer:
         ``meta.degraded_response`` is set to
         :data:`DEGRADED_PRE_HISTORY` when the caller supplied
         ``as_of`` AND the anchor stage produced an empty subgraph.
+        ``degraded_subsystems`` lists any stores that lagged behind the
+        Postgres SoT watermark at query time; ``staleness_seconds``
+        quantifies that lag so callers can decide whether to retry.
         """
         # ``request.as_of`` is the SearchRequest field; the keyword
         # ``as_of`` wins when both are supplied so server-side overrides
@@ -385,8 +394,14 @@ class GraphRAGComposer:
         _COMPOSED_QUERIES_TOTAL.labels(path="graphrag").inc()
         start = time.monotonic()
 
+        # AP3: capture convergence signals; do NOT discard on timeout.
+        convergence_degraded: list[str] = []
+        convergence_staleness: float | None = None
         if self._global_reconciler is not None:
-            await self._global_reconciler.wait_for_convergence(workspace_id)
+            (
+                convergence_degraded,
+                convergence_staleness,
+            ) = await self._global_reconciler.wait_for_convergence(workspace_id)
 
         anchor = await self._run_anchor_stage(
             request=request,
@@ -403,6 +418,7 @@ class GraphRAGComposer:
             request=request,
             vector_result=vector_result,
             anchor=anchor,
+            as_of=effective,
         )
 
         valid_hits = await self._validate_hits(merged.hits, workspace_id)
@@ -419,6 +435,8 @@ class GraphRAGComposer:
             returned=len(merged.hits),
             duration_ms=duration_ms,
             as_of=effective.isoformat() if effective else None,
+            degraded_subsystems=convergence_degraded,
+            staleness_seconds=convergence_staleness,
         )
         # Pre-history detection: caller supplied an explicit ``as_of``,
         # graph anchor returned no hits AND zero merged hits remain.
@@ -446,7 +464,13 @@ class GraphRAGComposer:
                 "query_stats": merged.query_stats.model_copy(update={"duration_ms": duration_ms})
             }
         )
-        return _stamp_envelope(stamped, as_of=effective, degraded=degraded)
+        return _stamp_envelope(
+            stamped,
+            as_of=effective,
+            degraded=degraded,
+            degraded_subsystems=convergence_degraded,
+            staleness_seconds=convergence_staleness,
+        )
 
     # ------------------------------------------------------------------
     # Stage 1 — anchor
@@ -474,7 +498,7 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
-                centralities={},
+                candidate_centralities={},
                 candidate_parked=(),
                 duration_s=duration,
             )
@@ -491,17 +515,25 @@ class GraphRAGComposer:
             valid_entity_names = await self._validate_entities(all_entity_names, workspace_id)
 
             if graph_result.seed.name not in valid_entity_names:
-                log.warning("graph_rag_traversal_empty", entity=anchor_name, workspace_id=str(workspace_id))
+                log.warning(
+                    "graph_rag_traversal_empty", entity=anchor_name, workspace_id=str(workspace_id)
+                )
                 return _AnchorStageResult(
                     anchor_requested=True,
                     anchor_name=anchor_name,
                     anchor_hit=False,
                     candidate_source_ids=(),
                     candidate_depths=(),
-                    centralities={},
+                    candidate_centralities={},
                     candidate_parked=(),
                     duration_s=time.monotonic() - stage_start,
                 )
+
+            # Filter out related entities that are not in the validated set
+            # (e.g. from tombstoned documents or inactive sources).
+            graph_result.related = [
+                n for n in graph_result.related if n.name in valid_entity_names
+            ]
 
             if self._is_entity_parked_fn:
                 graph_result.seed.is_parked = self._is_entity_parked_fn(graph_result.seed.id)
@@ -510,6 +542,7 @@ class GraphRAGComposer:
 
             candidates, depths, centralities, parked = _collect_candidates(graph_result)
             duration = time.monotonic() - stage_start
+            _ANCHOR_HIT_TOTAL.labels(outcome="hit").inc()
             _STAGE_DURATION.labels(stage="anchor").observe(duration)
             return _AnchorStageResult(
                 anchor_requested=True,
@@ -517,7 +550,7 @@ class GraphRAGComposer:
                 anchor_hit=True,
                 candidate_source_ids=candidates,
                 candidate_depths=depths,
-                centralities=centralities,
+                candidate_centralities=centralities,
                 candidate_parked=parked,
                 duration_s=duration,
             )
@@ -531,7 +564,7 @@ class GraphRAGComposer:
                 anchor_hit=False,
                 candidate_source_ids=(),
                 candidate_depths=(),
-                centralities={},
+                candidate_centralities={},
                 candidate_parked=(),
                 duration_s=duration,
             )
@@ -569,6 +602,7 @@ class GraphRAGComposer:
         request: SearchRequest,
         vector_result: SearchResult,
         anchor: _AnchorStageResult,
+        as_of: datetime | None = None,
     ) -> SearchResult:
         from omniscience_retrieval.probabilistic_scoring import (
             calculate_probabilistic_confidence,
@@ -576,7 +610,7 @@ class GraphRAGComposer:
         )
 
         stage_start = time.monotonic()
-        
+
         # Unpack anchor results for O(1) lookup
         if anchor.candidate_source_ids:
             # Map source_id back to depth & parked status
@@ -592,12 +626,15 @@ class GraphRAGComposer:
             anchor_parked = {}
             graph_affinity = {}
 
-        scored: list[tuple[float, float, float, int, Any]] = []
+        # Each row: (merged_score, confidence, score_type, impact, original_idx, hit)
+        scored: list[tuple[float, float, str, float, int, SearchHit]] = []
         seen_chunks: set[uuid.UUID] = set()
 
         # Needs depth and centrality by source
         depth_by_source = anchor_depths
-        centrality_by_source = anchor.centralities if anchor.centralities else {}
+        centrality_by_source = (
+            anchor.candidate_centralities if anchor.candidate_centralities else {}
+        )
 
         for idx, hit in enumerate(vector_result.hits):
             if hit.chunk_id in seen_chunks:
@@ -619,7 +656,7 @@ class GraphRAGComposer:
                 source=hit.source.type,
                 valid_from=hit.citation.indexed_at,
                 depth=depth,
-                as_of=request.as_of,
+                as_of=as_of,
                 score_type="calibrated",
                 is_parked=is_parked,
             )
@@ -628,7 +665,7 @@ class GraphRAGComposer:
                 valid_from=hit.citation.indexed_at,
                 depth=depth,
                 centrality=centrality,
-                as_of=request.as_of,
+                as_of=as_of,
             )
 
             scored.append((merged_score, confidence_val, "calibrated", impact_val, idx, hit))
@@ -636,18 +673,49 @@ class GraphRAGComposer:
         # Sort: descending by score, tie-break by original index (stable).
         scored.sort(key=lambda row: (-row[0], row[4]))
 
+        start_idx = 0
+        if request.cursor:
+            try:
+                start_idx = int(request.cursor)
+            except ValueError:
+                # Invalid cursor — treat as start of results (safe default).
+                log.warning("graphrag_invalid_cursor", cursor=request.cursor)
+                start_idx = 0
+
+        top_hits: list[SearchHit] = []
+        char_budget = 0
         top_k = request.top_k
-        top_hits = [
-            hit.model_copy(
-                update={"score": score, "confidence": conf, "score_type": stype, "impact": imp}
+        next_cursor: str | None = None
+
+        for score, conf, stype, imp, _, hit in scored[start_idx:]:
+            if len(top_hits) >= top_k:
+                next_cursor = str(start_idx + len(top_hits))
+                break
+
+            hit_chars = len(hit.text)
+            if char_budget + hit_chars > GRAPHRAG_BUDGET_CHARS and len(top_hits) > 0:
+                next_cursor = str(start_idx + len(top_hits))
+                break
+
+            char_budget += hit_chars
+            top_hits.append(
+                hit.model_copy(
+                    update={"score": score, "confidence": conf, "score_type": stype, "impact": imp}
+                )
             )
-            for score, conf, stype, imp, _, hit in scored[:top_k]
-        ]
+
         duration = time.monotonic() - stage_start
         _STAGE_DURATION.labels(stage="merge").observe(duration)
-        versions = [h.applied_version for h in top_hits if getattr(h, "applied_version", None) is not None]
-        min_applied_version = min(versions) if versions else None
-        return SearchResult(hits=top_hits, query_stats=vector_result.query_stats, min_applied_version=min_applied_version)
+        versions: list[int] = [
+            h.applied_version for h in top_hits if h.applied_version is not None
+        ]
+        min_applied_version: int | None = min(versions) if versions else None
+        return SearchResult(
+            hits=top_hits,
+            query_stats=vector_result.query_stats,
+            min_applied_version=min_applied_version,
+            next_cursor=next_cursor,
+        )
 
     async def _validate_entities(
         self,
@@ -871,25 +939,35 @@ def _stamp_envelope(
     *,
     as_of: datetime | None,
     degraded: bool,
+    degraded_subsystems: list[str] | None = None,
+    staleness_seconds: float | None = None,
 ) -> SearchResult:
-    """Attach ``effective_as_of`` and the optional ``meta`` block.
+    """Attach ``effective_as_of``, optional ``meta`` block, and AP3 staleness fields.
 
     Issue #133 contract: explicit ``as_of`` echoes back; ``None`` is
     replaced with response generation time.  When ``degraded`` is true
     the ``meta`` block carries the ``"as_of_before_recorded_history"``
     hint so callers can distinguish "empty because no history yet"
     from "empty because nothing matched".
+
+    AP3 contract: ``degraded_subsystems`` and ``staleness_seconds`` are
+    set when any store lagged behind the Postgres SoT watermark at query
+    time, regardless of whether ``degraded`` is true.  Callers MUST treat
+    a non-empty ``degraded_subsystems`` as a staleness signal and may
+    choose to retry or surface a freshness warning.
     """
     effective_as_of = as_of if as_of is not None else datetime.now(UTC)
     meta: dict[str, Any] | None = None
     if degraded:
         meta = {"degraded_response": DEGRADED_PRE_HISTORY}
-    return result.model_copy(
-        update={
-            "effective_as_of": effective_as_of,
-            "meta": meta,
-        }
-    )
+    update: dict[str, Any] = {
+        "effective_as_of": effective_as_of,
+        "meta": meta,
+    }
+    if degraded_subsystems:
+        update["degraded_subsystems"] = degraded_subsystems
+        update["staleness_seconds"] = staleness_seconds
+    return result.model_copy(update=update)
 
 
 __all__ = [

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, cast
 from uuid import UUID
 
 
@@ -52,12 +52,12 @@ def decode_message(data: bytes) -> dict[int, list[Any]]:
         wire_type = tag & 0x07
         if wire_type == 2:
             val_len, pos = decode_varint(data, pos)
-            val = data[pos : pos + val_len]
+            bytes_val = data[pos : pos + val_len]
             pos += val_len
-            fields.setdefault(field_num, []).append(val)
+            fields.setdefault(field_num, []).append(bytes_val)
         elif wire_type == 0:
-            val, pos = decode_varint(data, pos)
-            fields.setdefault(field_num, []).append(val)
+            int_val, pos = decode_varint(data, pos)
+            fields.setdefault(field_num, []).append(int_val)
         else:
             raise NotImplementedError(f"Unsupported wire type {wire_type}")
     return fields
@@ -67,14 +67,14 @@ def get_str_field(fields: dict[int, list[Any]], field_num: int, default: str = "
     vals = fields.get(field_num)
     if not vals:
         return default
-    return vals[0].decode("utf-8")
+    return cast("bytes", vals[0]).decode("utf-8")
 
 
 def get_int_field(fields: dict[int, list[Any]], field_num: int, default: int = 0) -> int:
     vals = fields.get(field_num)
     if not vals:
         return default
-    return vals[0]
+    return cast("int", vals[0])
 
 
 def serialize_document_change_event(event: Any) -> bytes:

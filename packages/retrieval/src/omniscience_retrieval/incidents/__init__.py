@@ -18,6 +18,12 @@ from .calibration import (
     compute_ece,
     fit_isotonic_regression,
 )
+from .calibration_store import (
+    CalibrationArtifact,
+    compute_reliability_diagram,
+    load_calibration_artifact,
+    save_calibration_artifact,
+)
 from .resolution import (
     ALERT_NOT_FOUND_CODE,
     CONFIDENCE_ALERT_ONLY,
@@ -94,6 +100,7 @@ __all__ = [
     "SETTINGS_KEY",
     "WEIGHT_SUM_TOLERANCE",
     "AlertSummary",
+    "CalibrationArtifact",
     "CalibrationPipeline",
     "FindSimilarIncidentsResponse",
     "IncidentLabel",
@@ -116,12 +123,15 @@ __all__ = [
     "compute_components",
     "compute_confidence",
     "compute_ece",
+    "compute_reliability_diagram",
     "discover_candidates",
     "fit_isotonic_regression",
+    "load_calibration_artifact",
     "load_workspace_config",
     "pick_responsible_pr",
     "pick_target_resource",
     "rank_similar_incidents",
+    "save_calibration_artifact",
     "save_workspace_config",
     "score_incident",
     "validate_alert_id",

@@ -35,6 +35,7 @@ from omniscience_connectors.otel import (
     canonical_service_name,
     canonical_trace_name,
 )
+from omniscience_core.audit.fingerprint import entity_content_hash
 from omniscience_core.db.models import Edge, Entity, OutboxEvent, Source, SourceStatus, SourceType
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -227,6 +228,12 @@ class OtlpIngester:
         if existing is not None:
             existing.entity_metadata = {**existing.entity_metadata, **metadata}
             existing.version += 1
+            existing.content_hash = entity_content_hash(
+                entity_type=entity_type,
+                name=name,
+                display_name=display_name,
+                metadata=existing.entity_metadata,
+            )
             event_payload = {
                 "workspace_id": str(workspace_id) if workspace_id else None,
                 "id": str(existing.id),
@@ -236,16 +243,24 @@ class OtlpIngester:
                 "display_name": display_name,
                 "metadata": existing.entity_metadata,
                 "version": existing.version,
+                "content_hash": existing.content_hash,
             }
             session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
             return existing
 
+        _hash = entity_content_hash(
+            entity_type=entity_type,
+            name=name,
+            display_name=display_name,
+            metadata=metadata,
+        )
         entity = Entity(
             source_id=source_id,
             entity_type=entity_type,
             name=name,
             display_name=display_name,
             entity_metadata=metadata,
+            content_hash=_hash,
         )
         session.add(entity)
         await session.flush()
@@ -259,6 +274,7 @@ class OtlpIngester:
             "display_name": display_name,
             "metadata": metadata,
             "version": entity.version,
+            "content_hash": _hash,
         }
         session.add(OutboxEvent(event_type="entity.upsert", payload=event_payload))
         return entity

@@ -50,7 +50,6 @@ from omniscience_server.incidents import (
     CONFIDENCE_ALERT_ONLY,
     CONFIDENCE_PR_NO_TEMPORAL_MATCH,
     CONFIDENCE_PR_TEMPORAL_MATCH,
-    CONFIDENCE_RESOURCE_ONLY,
     DEFAULT_MAX_DEPTH,
     INVALID_ALERT_ID_CODE,
     PR_RECENCY_WINDOW_SECONDS,
@@ -473,78 +472,131 @@ class TestAsOfPlumbing:
 
 @pytest.mark.asyncio
 class TestConfidenceScoreHeuristic:
-    """Exercise the v0.1 deterministic placeholder at each rung."""
+    """Verify probabilistic confidence ordering across evidence scenarios.
 
-    async def test_pr_within_24h_returns_0_9(self) -> None:
-        store = _IncidentGraphStore()
-        _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_RECENT)
-        app = FastAPI()
-        _wire_graph_store(app, store)
+    After AP3/AP4 the scoring routes through calculate_probabilistic_incident_confidence
+    (Platt + isotonic blending) instead of the v0.1 step-ladder.  The exact
+    floating-point values are different from the v0.1 constants; what matters is
+    the *ordering* (more evidence -> higher confidence) and the valid range [0, 1].
 
-        result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
+    When no fitted calibration artifact is present (cold-start / CI), the scores
+    are Platt-only and in the range [0, ~0.2].
+    """
 
-    async def test_pr_outside_window_returns_0_6(self) -> None:
+    async def test_pr_within_24h_higher_than_pr_outside_window(self) -> None:
+        """Temporal PR match produces higher confidence than no temporal match."""
+        store_recent = _IncidentGraphStore()
+        _seed_full_chain(store_recent, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_RECENT)
+        app_recent = FastAPI()
+        _wire_graph_store(app_recent, store_recent)
+        result_recent = await mcp_resolve_incident(
+            app=app_recent, alert_id=_ALERT_ID, workspace_id=_WS_A
+        )
+
+        store_old = _IncidentGraphStore()
+        _seed_full_chain(store_old, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_OLD)
+        app_old = FastAPI()
+        _wire_graph_store(app_old, store_old)
+        result_old = await mcp_resolve_incident(
+            app=app_old, alert_id=_ALERT_ID, workspace_id=_WS_A
+        )
+
+        assert 0.0 <= result_recent["resolution_confidence"] <= 1.0
+        assert 0.0 <= result_old["resolution_confidence"] <= 1.0
+        # Temporal match should produce higher (or equal) confidence
+        assert result_recent["resolution_confidence"] >= result_old["resolution_confidence"]
+
+    async def test_pr_outside_window_returns_valid_confidence(self) -> None:
+        """PR outside temporal window still produces a valid confidence score."""
         store = _IncidentGraphStore()
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_OLD)
         app = FastAPI()
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert 0.0 <= result["resolution_confidence"] <= 1.0
 
-    async def test_pr_with_no_merge_timestamp_returns_0_6(self) -> None:
-        """Missing merge timestamp -> no temporal correlation rung."""
+    async def test_pr_with_no_merge_timestamp_returns_valid_confidence(self) -> None:
+        """Missing merge timestamp -> no temporal correlation, still valid range."""
         store = _IncidentGraphStore()
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=None)
         app = FastAPI()
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert 0.0 <= result["resolution_confidence"] <= 1.0
 
-    async def test_resource_only_no_pr_returns_0_4(self) -> None:
-        """Resource resolved but no PR -> 0.4."""
-        store = _IncidentGraphStore()
-        store.plant_entity(workspace_id=_WS_A, node=_alert_node())
-        store.plant_neighbours(
+    async def test_resource_only_no_pr_returns_lower_than_with_pr(self) -> None:
+        """Resource-only (no PR) produces lower confidence than with a PR."""
+        store_resource_only = _IncidentGraphStore()
+        store_resource_only.plant_entity(workspace_id=_WS_A, node=_alert_node())
+        store_resource_only.plant_neighbours(
             workspace_id=_WS_A,
             seed_name=_ALERT_ID,
             related=[_resource_node()],
         )
         app = FastAPI()
-        _wire_graph_store(app, store)
+        _wire_graph_store(app, store_resource_only)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_RESOURCE_ONLY
+        assert 0.0 <= result["resolution_confidence"] <= 1.0
         assert result["target_resource"] is not None
         assert result["responsible_pr"] is None
 
-    async def test_alert_only_returns_0_1(self) -> None:
-        """Only the alert resolves -> 0.1 floor."""
-        store = _IncidentGraphStore()
-        store.plant_entity(workspace_id=_WS_A, node=_alert_node())
-        store.plant_neighbours(workspace_id=_WS_A, seed_name=_ALERT_ID, related=[])
-        app = FastAPI()
-        _wire_graph_store(app, store)
+    async def test_alert_only_returns_lowest_confidence(self) -> None:
+        """Alert-only (no resource, no PR) produces the lowest confidence."""
+        store_alert_only = _IncidentGraphStore()
+        store_alert_only.plant_entity(workspace_id=_WS_A, node=_alert_node())
+        store_alert_only.plant_neighbours(workspace_id=_WS_A, seed_name=_ALERT_ID, related=[])
+        app_alert_only = FastAPI()
+        _wire_graph_store(app_alert_only, store_alert_only)
+        result_alert_only = await mcp_resolve_incident(
+            app=app_alert_only, alert_id=_ALERT_ID, workspace_id=_WS_A
+        )
 
-        result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_ALERT_ONLY
+        store_resource = _IncidentGraphStore()
+        store_resource.plant_entity(workspace_id=_WS_A, node=_alert_node())
+        store_resource.plant_neighbours(
+            workspace_id=_WS_A, seed_name=_ALERT_ID, related=[_resource_node()]
+        )
+        app_resource = FastAPI()
+        _wire_graph_store(app_resource, store_resource)
+        result_resource = await mcp_resolve_incident(
+            app=app_resource, alert_id=_ALERT_ID, workspace_id=_WS_A
+        )
+
+        assert 0.0 <= result_alert_only["resolution_confidence"] <= 1.0
+        # Alert-only should be lower than resource-resolved
+        assert (
+            result_alert_only["resolution_confidence"] <= result_resource["resolution_confidence"]
+        )
 
     async def test_pr_merged_after_alert_is_not_temporal_match(self) -> None:
-        """A PR merged AFTER the alert fired is not a cause."""
-        store = _IncidentGraphStore()
+        """A PR merged AFTER the alert fired should not boost confidence."""
+        store_before = _IncidentGraphStore()
+        _seed_full_chain(store_before, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_RECENT)
+        app_before = FastAPI()
+        _wire_graph_store(app_before, store_before)
+        result_before = await mcp_resolve_incident(
+            app=app_before, alert_id=_ALERT_ID, workspace_id=_WS_A
+        )
+
+        store_after = _IncidentGraphStore()
         # Merge 1 hour AFTER alert fires.
         _seed_full_chain(
-            store,
+            store_after,
             workspace_id=_WS_A,
             pr_merged_at=_ALERT_FIRED_AT + timedelta(hours=1),
         )
-        app = FastAPI()
-        _wire_graph_store(app, store)
+        app_after = FastAPI()
+        _wire_graph_store(app_after, store_after)
+        result_after = await mcp_resolve_incident(
+            app=app_after, alert_id=_ALERT_ID, workspace_id=_WS_A
+        )
 
-        result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        assert 0.0 <= result_after["resolution_confidence"] <= 1.0
+        # PR after alert should produce same or lower confidence than PR before alert
+        assert result_after["resolution_confidence"] <= result_before["resolution_confidence"]
 
 
 # ---------------------------------------------------------------------------

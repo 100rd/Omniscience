@@ -34,6 +34,7 @@ from datetime import datetime
 from qdrant_client import models as qm
 
 from omniscience_index.stores.qdrant_constants import (
+    PAYLOAD_CHUNKER_STRATEGY,
     PAYLOAD_DOCUMENT_ID,
     PAYLOAD_EXTERNAL_ID,
     PAYLOAD_RECORDED_AT,
@@ -77,6 +78,8 @@ class QdrantFilterBuilder:
     as_of: datetime | None = None
     metadata_filters: tuple[tuple[str, str], ...] = field(default_factory=tuple)
     checkpoint_flag: bool = False
+    # AP2 — filter by chunker_strategy for entity-outbox chunk discovery.
+    chunker_strategy: str | None = None
 
     def with_source_ids(self, source_ids: list[uuid.UUID]) -> QdrantFilterBuilder:
         """Return a new builder narrowed to the given sources."""
@@ -137,6 +140,14 @@ class QdrantFilterBuilder:
         """Return a new builder narrowed to checkpoint points."""
         return replace(self, checkpoint_flag=True)
 
+    def with_chunker_strategy(self, strategy: str) -> QdrantFilterBuilder:
+        """Return a new builder narrowed to chunks with a specific chunker_strategy.
+
+        AP2: used to filter entity-outbox chunks (``strategy="entity_outbox"``)
+        for per-entity version and content-hash reconciliation.
+        """
+        return replace(self, chunker_strategy=strategy)
+
     def build(self) -> qm.Filter:
         """Emit the concrete Qdrant filter.
 
@@ -193,6 +204,13 @@ class QdrantFilterBuilder:
                 qm.FieldCondition(
                     key="is_checkpoint",
                     match=qm.MatchValue(value=True),
+                )
+            )
+        if self.chunker_strategy is not None:
+            must.append(
+                qm.FieldCondition(
+                    key=PAYLOAD_CHUNKER_STRATEGY,
+                    match=qm.MatchValue(value=self.chunker_strategy),
                 )
             )
         return qm.Filter(must=must)
@@ -398,6 +416,9 @@ def build_end_date_chunks_filter(
             key=PAYLOAD_SOURCE_ID,
             match=qm.MatchValue(value=str(source_id)),
         ),
+        # Only end-date points whose valid_to is still NULL (open rows).
+        # Points already end-dated are skipped — idempotency invariant.
+        qm.IsNullCondition(is_null=qm.PayloadField(key=PAYLOAD_VALID_TO)),
     ]
 
     must_not: list[_MustClause] = []

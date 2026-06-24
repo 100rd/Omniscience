@@ -256,10 +256,15 @@ class FederatedSearch:
             text_matches=sum(s.text_matches for s in all_stats),
             duration_ms=max(s.duration_ms for s in all_stats),
         )
-        versions = [h.applied_version for h in merged_hits if getattr(h, "applied_version", None) is not None]
+        versions: list[int] = [
+            h.applied_version for h in merged_hits if h.applied_version is not None
+        ]
         min_applied_version = min(versions) if versions else None
 
-        return SearchResult(hits=merged_hits, query_stats=merged_stats, min_applied_version=min_applied_version)
+        return SearchResult(
+            hits=merged_hits, query_stats=merged_stats, min_applied_version=min_applied_version
+        )
+
 
 __all__ = [
     "FederatedSearch",

@@ -95,8 +95,12 @@ class AlertSummary(BaseModel):
     source: str | None = None
     chunk_text: str | None = None
     valid_from: datetime | None = None
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class ResourceSummary(BaseModel):
@@ -109,8 +113,12 @@ class ResourceSummary(BaseModel):
         default=None,
         description="The edge_type by which the alert reached this resource.",
     )
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class PrSummary(BaseModel):
@@ -128,8 +136,12 @@ class PrSummary(BaseModel):
             "(GitHub PR #150).  Calibrated extraction lands in #155."
         ),
     )
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class SlackThreadSummary(BaseModel):
@@ -140,8 +152,12 @@ class SlackThreadSummary(BaseModel):
     source: str | None = None
     chunk_text: str | None = None
     edge_type: str | None = None
-    staleness: float | None = Field(default=None, description="Lag from SoT or current time in seconds.")
-    applied_version: int | None = Field(default=None, description="Version of this evidence projection.")
+    staleness: float | None = Field(
+        default=None, description="Lag from SoT or current time in seconds."
+    )
+    applied_version: int | None = Field(
+        default=None, description="Version of this evidence projection."
+    )
 
 
 class ResolveIncidentResponse(BaseModel):
@@ -182,7 +198,7 @@ class ResolveIncidentResponse(BaseModel):
     )
     min_applied_version: int | None = Field(
         default=None,
-        description="The minimum applied version among all evidence in this response."
+        description="The minimum applied version among all evidence in this response.",
     )
 
 
@@ -348,6 +364,42 @@ def _is_temporally_correlated(
 
 
 # ---------------------------------------------------------------------------
+# v0.1 heuristic ladder (fallback when no calibrated config is present)
+# ---------------------------------------------------------------------------
+
+
+def _v01_ladder(
+    *,
+    classified: ClassifiedNeighbours,
+    alert: EntityNodeView,
+) -> tuple[float, bool]:
+    """Return the v0.1 deterministic confidence ladder.
+
+    Used when ``score_incident`` is called with ``config=None`` (no
+    per-workspace calibration configured).  Returns one of the four
+    CONFIDENCE_* constants based on what evidence was classified.
+    """
+    has_pr = classified.responsible_pr is not None
+    has_resource = classified.target_resource is not None
+
+    if has_pr:
+        if has_resource or classified.target_resource is not None:
+            pass  # resource handled below if both present
+        correlated = has_pr and _is_temporally_correlated(
+            alert=alert,
+            pr=classified.responsible_pr,  # type: ignore[arg-type]
+        )
+        if correlated:
+            return CONFIDENCE_PR_TEMPORAL_MATCH, False
+        return CONFIDENCE_PR_NO_TEMPORAL_MATCH, False
+
+    if has_resource:
+        return CONFIDENCE_RESOURCE_ONLY, False
+
+    return CONFIDENCE_ALERT_ONLY, False
+
+
+# ---------------------------------------------------------------------------
 # Calibrated scoring path
 # ---------------------------------------------------------------------------
 
@@ -370,9 +422,10 @@ def score_incident(
     from omniscience_retrieval.incidents.scoring import apply_weights, compute_components
 
     if config is None or config.weights is None:
-        return compute_confidence(
-            alert=alert, classified=classified, as_of=as_of, support_size=support_size
-        )
+        # v0.1 deterministic ladder — used when no calibrated config is present.
+        # compute_confidence (probabilistic) is intentionally NOT used here:
+        # the probabilistic path requires calibration data that may be absent.
+        return _v01_ladder(classified=classified, alert=alert)
     components = compute_components(
         alert_valid_from=alert.valid_from,
         pr_valid_from=(
@@ -421,6 +474,7 @@ def _compute_staleness(node: EntityNodeView | None, now: datetime) -> float | No
         return None
     return max(0.0, (now - node.recorded_at).total_seconds())
 
+
 def build_resolve_response(
     *,
     alert: EntityNodeView,
@@ -450,12 +504,16 @@ def build_resolve_response(
     responsible_pr = _summarise_pr(classified.responsible_pr, effective_as_of)
     slack_threads = [_summarise_thread(t, effective_as_of) for t in classified.slack_threads]
 
-    versions = [v for v in [
-        alert_summary.applied_version,
-        target_resource.applied_version if target_resource else None,
-        responsible_pr.applied_version if responsible_pr else None,
-        *[t.applied_version for t in slack_threads]
-    ] if v is not None]
+    versions = [
+        v
+        for v in [
+            alert_summary.applied_version,
+            target_resource.applied_version if target_resource else None,
+            responsible_pr.applied_version if responsible_pr else None,
+            *[t.applied_version for t in slack_threads],
+        ]
+        if v is not None
+    ]
     min_applied_version = min(versions) if versions else None
 
     return ResolveIncidentResponse(

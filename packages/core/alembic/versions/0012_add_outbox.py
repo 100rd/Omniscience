@@ -25,7 +25,7 @@ def upgrade() -> None:
         "outbox_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), nullable=False),
         sa.Column("event_type", sa.Text(), nullable=False),
-        sa.Column("payload", postgresql.JSONB(as_uuid=True), nullable=False),
+        sa.Column("payload", postgresql.JSONB(), nullable=False),
         sa.Column(
             "created_at",
             sa.DateTime(timezone=True),

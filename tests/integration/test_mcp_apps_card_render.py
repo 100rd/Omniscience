@@ -181,7 +181,11 @@ def _build_app() -> tuple[FastAPI, _FakeGraphStore]:
     app = FastAPI()
     store = _FakeGraphStore()
     app.state.graph_store = store
-    app.state.db_session_factory = AsyncMock()
+    session = AsyncMock()
+    factory = MagicMock()
+    factory.return_value.__aenter__ = AsyncMock(return_value=session)
+    factory.return_value.__aexit__ = AsyncMock(return_value=False)
+    app.state.db_session_factory = factory
     return app, store
 
 

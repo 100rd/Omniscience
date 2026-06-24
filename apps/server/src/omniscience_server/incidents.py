@@ -19,6 +19,20 @@ ACL invariant (non-negotiable)
 ----------------------------
 
 See :mod:`omniscience_server.as_of` for bitemporal handling.
+
+AP4 changes
+-----------
+
+- ``support_size`` is no longer hardcoded to ``0`` ("cold start assumed").
+  It defaults to :data:`~omniscience_retrieval.probabilistic_scoring.DEFAULT_SUPPORT_SIZE`
+  (``30``), which allows the isotonic path when a fitted artifact is
+  loaded.  Callers can override via the ``support_size`` parameter when
+  real observation counts are available.
+- The response now carries an explicit ``calibrated: bool`` field.  It is
+  ``True`` when the fitted isotonic artifact is in use (loaded from disk),
+  ``False`` otherwise.  This is separate from ``uncalibrated`` (which
+  flags provisional / low-support scoring).  Both fields are surfaced to
+  MCP and REST consumers.
 """
 
 from __future__ import annotations
@@ -76,6 +90,10 @@ from omniscience_retrieval.incidents.scoring import (
     IncidentScoringConfig,
     load_workspace_config,
 )
+from omniscience_retrieval.probabilistic_scoring import (
+    DEFAULT_SUPPORT_SIZE,
+    is_fitted_map_loaded,
+)
 
 from omniscience_server.as_of import (
     enforce_utc,
@@ -102,6 +120,7 @@ async def mcp_resolve_incident(
     workspace_id: uuid.UUID,
     as_of: datetime | None = None,
     max_depth: int = DEFAULT_MAX_DEPTH,
+    support_size: int | None = None,
 ) -> dict[str, Any]:
     """Resolve an alert into a recommendation bundle.
 
@@ -122,6 +141,22 @@ async def mcp_resolve_incident(
     max_depth:
         BFS depth from the alert seed.  Clamped to
         ``[MIN_MAX_DEPTH, MAX_MAX_DEPTH]``; default ``DEFAULT_MAX_DEPTH``.
+    support_size:
+        Number of labeled examples available for the isotonic calibrator.
+        ``None`` uses :data:`~omniscience_retrieval.probabilistic_scoring.DEFAULT_SUPPORT_SIZE`
+        (``30``), enabling the isotonic path when a fitted artifact is loaded.
+        Pass ``0`` explicitly only to force Platt-only (e.g. during cold start
+        before any labeled data is collected).
+
+    AP4 response contract
+    ---------------------
+
+    The returned dict includes:
+    - ``resolution_confidence``: calibrated float in ``[0, 1]``.
+    - ``calibrated``: ``True`` when the fitted isotonic artifact is loaded,
+      ``False`` otherwise (cold start / no artifact yet).
+    - ``uncalibrated``: ``True`` when the scoring is provisional (low support
+      or any entity is parked).
     """
     _validate_alert_id(alert_id)
     normalised_as_of = enforce_utc(as_of)
@@ -130,6 +165,9 @@ async def mcp_resolve_incident(
     graph_store: GraphStore | None = getattr(app.state, "graph_store", None)
     if graph_store is None:
         raise RuntimeError("graph_store not available on app.state")
+
+    # AP4: determine effective support_size — never silently default to 0.
+    effective_support = support_size if support_size is not None else DEFAULT_SUPPORT_SIZE
 
     with record_request_duration(
         surface="mcp", tool="resolve_incident", as_of=normalised_as_of
@@ -174,8 +212,13 @@ async def mcp_resolve_incident(
             max_depth=clamped_depth,
             config=scoring_config,
             as_of=normalised_as_of,
-            support_size=0,  # Cold start assumed for now
+            support_size=effective_support,
         )
+
+        # AP4: flag whether the returned confidence number is backed by a
+        # fitted isotonic artifact (calibrated=True) or is Platt-only fallback.
+        is_calibrated: bool = is_fitted_map_loaded()
+
         meta = _build_meta(
             confidence=confidence, config=scoring_config, is_provisional=is_provisional
         )
@@ -185,7 +228,7 @@ async def mcp_resolve_incident(
             workspace_id=workspace_id,
             as_of=normalised_as_of,
         )
-        return _build_response(
+        response = _build_response(
             alert=seed,
             classified=classified,
             resolution_confidence=confidence,
@@ -198,7 +241,11 @@ async def mcp_resolve_incident(
             effective_as_of=resolve_effective_as_of(normalised_as_of),
             meta=meta,
             similar_past=similar_past,
-        ).model_dump(mode="json")
+        )
+        result = response.model_dump(mode="json")
+        # Inject calibrated flag — AP4 explicit contract field.
+        result["calibrated"] = is_calibrated
+        return result
 
 
 # ---------------------------------------------------------------------------

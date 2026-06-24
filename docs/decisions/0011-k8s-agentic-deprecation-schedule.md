@@ -122,7 +122,7 @@ connector:
   test are deleted.
 - The `[k8s-agentic]` extra is removed from `pyproject.toml`.
 - The connector registry entry is removed from
-  `omniscience_connectors/__init__.py`.
+  `packages/connectors/src/omniscience_connectors/__init__.py`.
 - A v0.5 changelog entry under **Removed** announces the deletion.
 - A one-final-warning is logged on Omniscience server start if any
   Source row in the database still has `connector_type="k8s-agentic"`

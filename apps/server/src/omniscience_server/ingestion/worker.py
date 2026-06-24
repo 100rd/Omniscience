@@ -376,6 +376,7 @@ class IngestionWorker:
             entities_written, edges_written = await route_operator_event_to_graph(
                 graph_store=self._graph_store,
                 event=operator_event,
+                session_factory=self._session_factory,
             )
         except Exception as exc:
             log.error(

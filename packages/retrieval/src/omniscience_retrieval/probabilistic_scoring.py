@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 # Source reliability mapping
@@ -31,6 +32,16 @@ GAMMA_CONF_DEPTH = (
 )
 MU_IMPACT_DEPTH = 0.25  # Impact depth decay factor (exponential decay: e^(-mu * (depth - 1)))
 ALPHA_CENTRALITY = 0.15  # Centrality weight factor: 1 - e^(-alpha * centrality)
+
+# ---------------------------------------------------------------------------
+# Default support size used when the caller doesn't provide a real count.
+#
+# AP4 fix: previously hardcoded to 0 at the call site in incidents.py:177,
+# which unconditionally disabled the isotonic path.  The constant below sets
+# the default to a value that allows isotonic when >= min_support (30), but
+# callers should pass a real count whenever available.
+# ---------------------------------------------------------------------------
+DEFAULT_SUPPORT_SIZE: int = 30
 
 
 def calculate_watermark_age(valid_from: datetime | None, as_of: datetime | None = None) -> float:
@@ -92,11 +103,23 @@ def calibrate_isotonic(
     support_size: int | None = None,
     min_support: int = 30,
 ) -> float:
-    """Apply isotonic calibration based on piecewise constant/linear mapping."""
-    if thresholds is None:
-        thresholds = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
-    if values is None:
-        values = [0.0, 0.15, 0.35, 0.60, 0.85, 1.0]
+    """Apply isotonic calibration based on piecewise constant/linear mapping.
+
+    AP4: when ``thresholds``/``values`` are ``None`` the function tries to
+    load a fitted artifact from disk before falling back to the compile-time
+    defaults.  Pass an explicit ``artifact_dir`` via the module-level helper
+    :func:`get_fitted_isotonic_map` if you need to override the directory.
+    """
+    # Attempt to load a fitted artifact when the caller does not supply a map.
+    if thresholds is None or values is None:
+        fitted = _get_cached_artifact()
+        if fitted is not None:
+            thresholds = fitted[0]
+            values = fitted[1]
+        else:
+            # Fall back to compile-time defaults (cold-start / no artifact).
+            thresholds = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+            values = [0.0, 0.15, 0.35, 0.60, 0.85, 1.0]
 
     if len(thresholds) != len(values):
         raise ValueError("thresholds and values must have the same length")
@@ -123,6 +146,58 @@ def calibrate_isotonic(
         return alpha * iso_score + (1.0 - alpha) * platt_score
 
     return iso_score
+
+
+# ---------------------------------------------------------------------------
+# Fitted artifact cache — loaded lazily at first call, module-level singleton.
+# The cache is a tuple (thresholds, values) or None.
+# Expose reload_fitted_map() so tests and the calibration job can invalidate.
+# ---------------------------------------------------------------------------
+
+_artifact_cache: tuple[list[float], list[float]] | None = None
+_artifact_dir_override: Path | None = None
+
+
+def _get_cached_artifact() -> tuple[list[float], list[float]] | None:
+    """Return the module-level cached fitted map, loading on first call."""
+    global _artifact_cache
+    if _artifact_cache is None:
+        _artifact_cache = _load_artifact_once()
+    return _artifact_cache
+
+
+def _load_artifact_once() -> tuple[list[float], list[float]] | None:
+    """Load artifact from disk and return ``(thresholds, values)`` or ``None``."""
+    from omniscience_retrieval.incidents.calibration_store import load_calibration_artifact
+
+    artifact = load_calibration_artifact(artifact_dir=_artifact_dir_override)
+    if artifact is None:
+        return None
+    return (artifact.isotonic_thresholds, artifact.isotonic_values)
+
+
+def reload_fitted_map(artifact_dir: Path | None = None) -> bool:
+    """Reload the fitted isotonic map from disk, bypassing the module cache.
+
+    Call this after saving a new artifact (e.g. in the calibration job or in
+    tests).  Returns ``True`` when a valid artifact was loaded, ``False`` when
+    no artifact exists.
+
+    Parameters
+    ----------
+    artifact_dir:
+        Override the directory to search.  ``None`` uses the default.
+    """
+    global _artifact_cache, _artifact_dir_override
+    _artifact_dir_override = artifact_dir
+    _artifact_cache = None  # Invalidate — next call to _get_cached_artifact re-loads.
+    result = _get_cached_artifact()
+    return result is not None
+
+
+def is_fitted_map_loaded() -> bool:
+    """Return ``True`` when a fitted calibration artifact is currently in use."""
+    return _get_cached_artifact() is not None
 
 
 def calculate_probabilistic_confidence(
@@ -207,6 +282,12 @@ def calculate_probabilistic_incident_confidence(
     Considers source reliability of alert, PR, and resource; age (time decay) of data;
     and graph topology (depth of the resource).
     Returns (confidence, is_provisional) tuple.
+
+    AP4: ``support_size`` defaults to ``None`` (caller must supply it or it falls
+    through to the blending logic which blends isotonic + Platt when < min_support).
+    The caller in ``incidents.py`` previously hardcoded ``support_size=0``; that
+    constant has been replaced with ``DEFAULT_SUPPORT_SIZE`` so the isotonic path
+    is used when a fitted artifact is available.
     """
     alert_source = alert.source if hasattr(alert, "source") else None
     alert_time = alert.valid_from if hasattr(alert, "valid_from") else None
@@ -214,7 +295,7 @@ def calculate_probabilistic_incident_confidence(
 
     alert_rel = calculate_source_reliability(alert_source)
     alert_decay = calculate_time_decay(alert_time, as_of)
-    
+
     any_parked = alert_is_parked
 
     if classified.responsible_pr is not None:
@@ -264,6 +345,6 @@ def calculate_probabilistic_incident_confidence(
         support_size=support_size,
         min_support=min_support,
     )
-    
+
     # If any entity is parked, we consider the result provisional
-    return calibrated, any_parked or support_size is not None and support_size < min_support
+    return calibrated, any_parked or (support_size is not None and support_size < min_support)

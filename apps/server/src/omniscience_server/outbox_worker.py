@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 
 import structlog
 from omniscience_core.db.models import OutboxEvent
 from omniscience_core.queue import NatsConnection, QueueProducer
-from omniscience_core.queue.messages import EdgeUpsertEvent, EntityUpsertEvent
+from omniscience_core.queue.messages import (
+    EdgeUpsertEvent,
+    EntityMergeEvent,
+    EntityUpsertEvent,
+)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 log = structlog.get_logger(__name__)
+
+# Nanosecond offset so same-millisecond events have stable relative ordering.
+_NS_PER_TICK = 1_000
 
 
 class OutboxWorker:
@@ -69,7 +77,7 @@ class OutboxWorker:
             # Select oldest unprocessed events
             stmt = (
                 select(OutboxEvent)
-                .where(not OutboxEvent.processed)
+                .where(OutboxEvent.processed == False)  # noqa: E712
                 .order_by(OutboxEvent.created_at.asc())
                 .limit(self._batch_size)
                 .with_for_update(skip_locked=True)
@@ -82,16 +90,20 @@ class OutboxWorker:
 
             log.debug("outbox_polling_found_events", count=len(events))
 
-            import time
             base_time = time.time_ns()
-            for i, event in enumerate(events):
+            for _i, event in enumerate(events):
                 try:
+                    subject: str
+                    payload: EntityUpsertEvent | EdgeUpsertEvent | EntityMergeEvent
                     if event.event_type == "entity.upsert":
                         payload = EntityUpsertEvent.model_validate(event.payload)
                         subject = "outbox.entity.upsert"
                     elif event.event_type == "edge.upsert":
                         payload = EdgeUpsertEvent.model_validate(event.payload)
                         subject = "outbox.edge.upsert"
+                    elif event.event_type in ("entity.merge", "entity.unmerge"):
+                        payload = EntityMergeEvent.model_validate(event.payload)
+                        subject = f"outbox.{event.event_type}"
                     else:
                         log.warning("outbox_unknown_event_type", event_type=event.event_type)
                         event.processed = True
@@ -112,3 +124,4 @@ class OutboxWorker:
                         error=str(exc),
                     )
                     # We don't mark as processed so it will be retried on next tick
+            _ = base_time  # kept for future tracing (i removed as unused)

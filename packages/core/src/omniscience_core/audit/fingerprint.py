@@ -137,8 +137,53 @@ def compute_state_fingerprint(payload: Any) -> str:
     return hasher.hexdigest()
 
 
+def entity_content_hash(
+    *,
+    entity_type: str,
+    name: str,
+    display_name: str,
+    metadata: Any,
+) -> str:
+    """Return the AP2 per-entity content hash.
+
+    Computes a stable BLAKE2b-256 fingerprint over the four *content* fields
+    of an entity.  Provenance fields (id, source_id, chunk_id, version,
+    created_at) are intentionally excluded so that two replicas of the same
+    logical entity always hash identically regardless of when or where they
+    were ingested.
+
+    The hash is stored on Entity.content_hash in Postgres and projected
+    onto the Neo4j node property and Qdrant chunk payload so the reconcile
+    worker can compare all three stores with a single value.
+
+    Parameters
+    ----------
+    entity_type:
+        Entity kind string (e.g. "function", "service").
+    name:
+        Fully-qualified name / canonical URI.
+    display_name:
+        Short human-readable label.
+    metadata:
+        Free-form metadata dict (or JSON-serialisable equivalent).
+
+    Returns
+    -------
+    64-char lowercase hex string (BLAKE2b-256, same length as
+    :func:).
+    """
+    payload: dict[str, Any] = {
+        "entity_type": entity_type,
+        "name": name,
+        "display_name": display_name,
+        "metadata": metadata,
+    }
+    return compute_state_fingerprint(payload)
+
+
 __all__ = [
     "FINGERPRINT_ALGORITHM",
     "FINGERPRINT_HEX_LENGTH",
     "compute_state_fingerprint",
+    "entity_content_hash",
 ]
