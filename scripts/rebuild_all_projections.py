@@ -5,6 +5,7 @@ Wipes Neo4j and Qdrant, then rebuilds them from active Postgres records.
 Usage:
     python scripts/rebuild_all_projections.py --yes [--rto-seconds 900]
     python scripts/rebuild_all_projections.py --yes --verify-only
+    python scripts/rebuild_all_projections.py --yes --recompute-embeddings
 
 WARNING — SANCTIONED DR EXCEPTION (ADR-0015)
 =============================================
@@ -25,6 +26,22 @@ RTO (Recovery Time Objective)
 Default budget: 900 seconds (15 minutes).  Override with --rto-seconds N.
 The script exits with code 2 if elapsed time exceeds the budget.
 See docs/decisions/0015-rebuild-direct-write-exception.md §RTO for guidance.
+
+--recompute-embeddings (AP5)
+=============================
+When set, the rebuild IGNORES stored ``chunk.embedding`` values and
+recomputes all embeddings from ``chunk.text`` via the live embedding
+provider.  This exercises the true rebuild-from-SoT path (not
+restore-from-backup) as required by AP5 / consilium-v9.
+
+Default behaviour (flag absent): reuse stored embeddings when present,
+only calling the embedding provider for chunks with an empty ``embedding``
+field.  This is the fast path for non-DR-critical reindexing.
+
+For true DR validation (where you need to prove that the embedding
+provider + SoT text can reproduce the stored vectors), always pass
+``--recompute-embeddings``.  The ``dr-drill.yml`` nightly workflow uses
+this flag.
 """
 
 from __future__ import annotations
@@ -52,6 +69,9 @@ from omniscience_index.stores.qdrant_constants import COLLECTION_NAME_PREFIX
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
 from sqlalchemy import func, select
+
+#: AP5 flag: exported so tests can assert the flag exists and is parseable.
+RECOMPUTE_EMBEDDINGS_FLAG: str = "--recompute-embeddings"
 
 
 class EntityWrapper:
@@ -196,17 +216,20 @@ class _Neo4jAdapter:
 # ---------------------------------------------------------------------------
 
 
-def _parse_args() -> tuple[bool, bool, int]:
-    """Return (confirm_yes, verify_only, rto_seconds).
+def _parse_args() -> tuple[bool, bool, int, bool]:
+    """Return (confirm_yes, verify_only, rto_seconds, recompute_embeddings).
 
     Recognised flags (positional scanning, no argparse to keep deps light):
-      --yes            required for destructive rebuild
-      --verify-only    skip wipe/rebuild; only run post-rebuild verification
-      --rto-seconds N  RTO budget in seconds (default: DEFAULT_RTO_SECONDS)
+      --yes                  required for destructive rebuild
+      --verify-only          skip wipe/rebuild; only run post-rebuild verification
+      --rto-seconds N        RTO budget in seconds (default: DEFAULT_RTO_SECONDS)
+      --recompute-embeddings ignore stored chunk.embedding; recompute from chunk.text
+                             via the live embedding provider (AP5 rebuild-from-SoT path)
     """
     args = sys.argv[1:]
     confirm_yes = "--yes" in args
     verify_only = "--verify-only" in args
+    recompute_embeddings = RECOMPUTE_EMBEDDINGS_FLAG in args
 
     rto_seconds = DEFAULT_RTO_SECONDS
     if "--rto-seconds" in args:
@@ -217,7 +240,7 @@ def _parse_args() -> tuple[bool, bool, int]:
             print("--rto-seconds requires an integer argument")
             sys.exit(1)
 
-    return confirm_yes, verify_only, rto_seconds
+    return confirm_yes, verify_only, rto_seconds, recompute_embeddings
 
 
 # ---------------------------------------------------------------------------
@@ -260,11 +283,17 @@ async def _run_verification(
 
 
 async def main() -> None:
-    confirm_yes, verify_only, rto_seconds = _parse_args()
+    confirm_yes, verify_only, rto_seconds, recompute_embeddings = _parse_args()
 
     if not confirm_yes and not verify_only:
         print("Refusing to rebuild without --yes (or use --verify-only for check-only mode)")
         sys.exit(1)
+
+    if recompute_embeddings:
+        print(
+            "AP5 --recompute-embeddings: stored chunk.embedding values will be IGNORED. "
+            "All embeddings will be recomputed from chunk.text via the live provider."
+        )
 
     start_time = time.monotonic()
 
@@ -392,11 +421,19 @@ async def main() -> None:
                 # Prepare payloads typed as ChunkPayload for mypy.
                 payloads: list[ChunkPayload] = []
                 for chunk in chunks:
-                    embedding = chunk.embedding
-                    if not embedding:
-                        print(f"    Generating embedding for chunk {chunk.id}...")
+                    # AP5 --recompute-embeddings: always recompute from text.
+                    # Default path (flag absent): reuse stored embedding when present.
+                    if recompute_embeddings or not chunk.embedding:
+                        if recompute_embeddings:
+                            print(
+                                f"    Recomputing embedding for chunk {chunk.id} from SoT text..."
+                            )
+                        else:
+                            print(f"    Generating embedding for chunk {chunk.id}...")
                         vectors = await embedding_provider.embed([chunk.text])
                         embedding = vectors[0]
+                    else:
+                        embedding = chunk.embedding
 
                     payload: ChunkPayload = {
                         "ord": int(chunk.ord),

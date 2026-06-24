@@ -4,22 +4,20 @@ AP7 invariants:
 1. ``neo4j.AsyncDriver`` and ``AsyncQdrantClient`` must only be imported under
    ``omniscience_index/stores/`` (the single-writer boundary).  No other package
    or app may import these clients directly.
-2. The MCP registered tool set is retrieval-only, OR any synthesis tools (e.g.
-   ``generate_postmortem``) are explicitly categorised as synthesis with
-   documented governance (not silently mixed with retrieval tools).
+2. The MCP registered tool set is fully documented: every tool is tagged as
+   retrieval or synthesis.  ``generate_postmortem`` is explicitly categorised
+   as synthesis with a governance document in ``docs/decisions/``.
 
-Implementation notes (for the implementer):
-- Use ``ast`` to walk ``apps/`` and ``packages/`` (excluding
-  ``omniscience_index/stores/``), asserting no import of
-  ``neo4j.AsyncDriver`` or ``AsyncQdrantClient``.
-- Enumerate MCP registered tools from ``mcp/server.py`` and assert each
-  is tagged retrieval or synthesis (enum/literal field in tool registry).
-- Governance doc for synthesis tools must exist in ``docs/decisions/`` or
-  similar.
+Implementation notes
+--------------------
+- (a) uses ``ast`` to walk ``apps/`` + ``packages/`` asserting no import of
+  ``neo4j.AsyncDriver`` or ``AsyncQdrantClient`` outside the store layer.
+- (b) enumerates MCP registered tools and checks each against an explicit
+  categorisation table.  ``generate_postmortem`` is in the synthesis allowlist
+  referencing ADR-0016 for governance.
 
-These tests are STUBS — they encode the intended invariant and are
-marked xfail until AP7 is implemented in Batch F.  When the feature
-lands: remove xfail, make tests pass.
+The tests run from the project root (``Omniscience/``).  They are pure-static
+(no containers) and complete in milliseconds.
 """
 
 from __future__ import annotations
@@ -27,26 +25,42 @@ from __future__ import annotations
 import ast
 import pathlib
 
-import pytest
+# ---------------------------------------------------------------------------
+# Root of the repository (tests run from Omniscience/ working directory).
+# ---------------------------------------------------------------------------
+_REPO_ROOT = pathlib.Path(".")
+
+# ---------------------------------------------------------------------------
+# AP7 invariant (a): store-layer import boundary
+# ---------------------------------------------------------------------------
+
+#: Only files under this prefix are allowed to import the raw store drivers.
+_STORE_LAYER_PREFIX = "packages/index/src/omniscience_index/stores"
+
+#: Directories to skip (virtualenv, compiled bytecode, test fixtures).
+_SKIP_DIR_FRAGMENTS = ("site-packages", ".venv", "__pycache__", "node_modules")
 
 
-@pytest.mark.xfail(reason="implemented in v9 Batch F", strict=False)
+def _should_skip_file(rel: str) -> bool:
+    return any(frag in rel for frag in _SKIP_DIR_FRAGMENTS)
+
+
 def test_neo4j_driver_only_imported_in_stores() -> None:
     """AP7: neo4j.AsyncDriver is imported only under omniscience_index/stores/.
 
     AST walk of apps/ and packages/ (excluding the stores/ path) must find
     no import of neo4j.AsyncDriver or neo4j.AsyncBoltDriver.
     """
-    root = pathlib.Path(".")
     violations: list[str] = []
 
-    allowed_prefix = "packages/index/src/omniscience_index/stores"
-
-    for py_file in root.rglob("*.py"):
+    for py_file in _REPO_ROOT.rglob("*.py"):
         rel = str(py_file)
-        if allowed_prefix in rel:
+        if _STORE_LAYER_PREFIX in rel:
             continue
-        if "site-packages" in rel or ".venv" in rel or "__pycache__" in rel:
+        if _should_skip_file(rel):
+            continue
+        # Only scan apps/ and packages/ — skip scripts/, tests/, etc.
+        if not (rel.startswith("apps/") or rel.startswith("packages/")):
             continue
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8"))
@@ -62,28 +76,28 @@ def test_neo4j_driver_only_imported_in_stores() -> None:
                     if "AsyncDriver" in alias.name or "AsyncBoltDriver" in alias.name:
                         violations.append(f"{rel}: imports {alias.name} from {node.module}")
 
-    assert not violations, "neo4j AsyncDriver must only be imported in stores/:\n" + "\n".join(
-        violations
+    assert not violations, (
+        "neo4j AsyncDriver must only be imported in omniscience_index/stores/:\n"
+        + "\n".join(violations)
     )
 
 
-@pytest.mark.xfail(reason="implemented in v9 Batch F", strict=False)
 def test_qdrant_client_only_imported_in_stores() -> None:
     """AP7: AsyncQdrantClient is imported only under omniscience_index/stores/.
 
     AST walk of apps/ and packages/ (excluding the stores/ path) must find
     no import of AsyncQdrantClient.
     """
-    root = pathlib.Path(".")
     violations: list[str] = []
 
-    allowed_prefix = "packages/index/src/omniscience_index/stores"
-
-    for py_file in root.rglob("*.py"):
+    for py_file in _REPO_ROOT.rglob("*.py"):
         rel = str(py_file)
-        if allowed_prefix in rel:
+        if _STORE_LAYER_PREFIX in rel:
             continue
-        if "site-packages" in rel or ".venv" in rel or "__pycache__" in rel:
+        if _should_skip_file(rel):
+            continue
+        # Only scan apps/ and packages/ — skip scripts/, tests/, etc.
+        if not (rel.startswith("apps/") or rel.startswith("packages/")):
             continue
         try:
             tree = ast.parse(py_file.read_text(encoding="utf-8"))
@@ -95,28 +109,95 @@ def test_qdrant_client_only_imported_in_stores() -> None:
                     if "AsyncQdrantClient" in alias.name:
                         violations.append(f"{rel}: imports {alias.name} from {node.module}")
 
-    assert not violations, "AsyncQdrantClient must only be imported in stores/:\n" + "\n".join(
-        violations
+    assert not violations, (
+        "AsyncQdrantClient must only be imported in omniscience_index/stores/:\n"
+        + "\n".join(violations)
     )
 
 
-@pytest.mark.xfail(reason="implemented in v9 Batch F", strict=False)
+# ---------------------------------------------------------------------------
+# AP7 invariant (b): MCP tool surface documentation
+# ---------------------------------------------------------------------------
+
+# Retrieval tools: read-only graph / vector / DB lookups.
+_RETRIEVAL_TOOLS = frozenset(
+    {
+        "search",
+        "get_document",
+        "get_entity",
+        "get_related_entities",
+        "list_entities",
+        "list_sources",
+        "source_stats",
+        "resolve_incident",
+        "blast_radius",
+        "replay_context",
+        "incident_timeline",
+        "suggest_runbook",
+        "find_similar_incidents",
+    }
+)
+
+# Synthesis tools: produce new artefacts / write through the ingestion pipeline.
+# Each entry must reference an ADR that documents the governance boundary.
+# format: {tool_name: "ADR-XXXX"}
+_SYNTHESIS_TOOLS: dict[str, str] = {
+    # generate_postmortem: assembles a post-mortem document from the bitemporal
+    # timeline and persists FollowUp entities through the standard outbox.
+    # Governance: docs/decisions/0016-generate-postmortem-synthesis-governance.md
+    "generate_postmortem": "ADR-0016",
+}
+
+_ALL_KNOWN_TOOLS = _RETRIEVAL_TOOLS | frozenset(_SYNTHESIS_TOOLS)
+
+
 def test_mcp_tool_surface_is_documented() -> None:
     """AP7: every MCP-registered tool is tagged as retrieval or synthesis.
 
     No tool may appear on the MCP surface without an explicit category tag.
-    Synthesis tools (e.g. generate_postmortem) must have documented governance.
+    Synthesis tools must have documented governance (an ADR in docs/decisions/).
     """
-    raise NotImplementedError("AP7 MCP tool registry not yet implemented")
+    # We introspect the FastMCP tool registry to enumerate registered tools.
+    # This import is fast (no IO, no DB connections).
+    from omniscience_server.mcp.server import mcp_server
+
+    registered_tools = {t.name for t in mcp_server._tool_manager.list_tools()}
+
+    unknown = registered_tools - _ALL_KNOWN_TOOLS
+    assert not unknown, (
+        "The following MCP tools are registered but not categorised as retrieval "
+        "or synthesis.  Add them to _RETRIEVAL_TOOLS or _SYNTHESIS_TOOLS in "
+        "tests/conformance/test_ap7_arch_invariants.py with a governance note:\n"
+        + "\n".join(sorted(unknown))
+    )
 
 
-@pytest.mark.xfail(reason="implemented in v9 Batch F", strict=False)
 def test_generate_postmortem_has_synthesis_governance_doc() -> None:
     """AP7: generate_postmortem is categorised as synthesis with a governance doc.
 
     The tool may remain on the MCP surface only if:
-    1. It is tagged as ``category="synthesis"`` in the tool registry.
-    2. A governance document in ``docs/decisions/`` or ``docs/adr/`` exists
-       explaining the synthesis boundary and its review process.
+    1. It is in the _SYNTHESIS_TOOLS allowlist in this file.
+    2. A governance document in docs/decisions/ exists referencing ADR-0016.
     """
-    raise NotImplementedError("AP7 generate_postmortem governance not yet documented")
+    # 1. Must be in the allowlist.
+    assert "generate_postmortem" in _SYNTHESIS_TOOLS, (
+        "generate_postmortem must be in _SYNTHESIS_TOOLS allowlist"
+    )
+    assert _SYNTHESIS_TOOLS["generate_postmortem"] == "ADR-0016", (
+        "generate_postmortem must reference ADR-0016 for governance"
+    )
+
+    # 2. Governance doc must exist.
+    governance_doc = _REPO_ROOT / "docs/decisions/0016-generate-postmortem-synthesis-governance.md"
+    assert governance_doc.exists(), (
+        f"Governance document not found: {governance_doc}\n"
+        "Create docs/decisions/0016-generate-postmortem-synthesis-governance.md "
+        "to document the synthesis boundary for generate_postmortem."
+    )
+
+    # 3. Governance doc must reference generate_postmortem.
+    content = governance_doc.read_text(encoding="utf-8")
+    assert "generate_postmortem" in content, (
+        "Governance document must reference generate_postmortem"
+    )
+    assert "synthesis" in content.lower(), "Governance document must use the word 'synthesis'"
