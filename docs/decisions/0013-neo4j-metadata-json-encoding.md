@@ -22,7 +22,7 @@ This rejected every `Neo4jGraphStore.upsert_entity` /
 `Neo4jGraphStore.upsert_edge` call against a real Neo4j 5.x container
 (empty metadata included — the driver still serialised `{}` as `Map{}`).
 The bug shipped in PR #104 and stayed silent for a month because the
-writer contract suite at `tests/test_graph_store_contract.py` was gated
+writer contract suite at `tests/test_store_contract.py` was gated
 behind `OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1`, which CI never sets.
 See issue #226 for the full incident.
 
@@ -104,7 +104,7 @@ and passes JSON strings through verbatim instead of double-encoding.
 ### Test gate
 
 The parametric writer contract suite at
-`tests/test_graph_store_contract.py` no longer gates on
+`tests/test_store_contract.py` no longer gates on
 `OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1`. The skip condition is now
 "testcontainers-neo4j package missing OR Docker daemon unreachable",
 matching the pattern from `tests/integration/test_neo4j_bootstrap_schema.py`

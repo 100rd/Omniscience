@@ -12,6 +12,23 @@ BANNED_PATTERNS = [
     r"(?i)legacy_retrieval_service_unwired",
 ]
 
+#: A line containing this inline marker is exempt from ALL stale-architecture
+#: checks. Use it to sanction a reviewed, intentional reference.
+ALLOW_MARKER = "stale-arch-allow"
+
+#: Test-tree files whose module docstrings intentionally narrate removed
+#: architecture (historical scaffolding notes). Exempt from BANNED_PATTERNS
+#: only — ADR/test-id drift checks still apply to them.
+BANNED_PATTERN_EXEMPT = {
+    "tests/test_embedded_inference.py",
+    "tests/test_store_contract.py",
+    "tests/support/graph_store_proxy.py",
+}
+
+#: The linter's own test file carries deliberate negative fixtures (e.g.
+#: "pgvector was removed", ADR-9999). It is fully excluded from scanning.
+SELF_EXCLUDE = {"tests/test_lint_stale_architecture.py"}
+
 
 def get_available_adrs(docs_dir: Path) -> set[str]:
     adrs = set()
@@ -106,7 +123,11 @@ def check_docstrings_ast(content: str, path: Path) -> list[tuple[int, str]]:
 
 
 def check_file(
-    path: Path, available_adrs: set[str], available_tests: set[str]
+    path: Path,
+    available_adrs: set[str],
+    available_tests: set[str],
+    *,
+    skip_banned: bool = False,
 ) -> list[tuple[int, str]]:
     errors = []
     try:
@@ -117,11 +138,14 @@ def check_file(
 
         lines = content.splitlines()
         for i, line in enumerate(lines, 1):
-            for pattern in BANNED_PATTERNS:
-                if re.search(pattern, line):
-                    errors.append(
-                        (i, f"Stale architecture comment/string detected: {line.strip()}")
-                    )
+            if ALLOW_MARKER in line:
+                continue
+            if not skip_banned:
+                for pattern in BANNED_PATTERNS:
+                    if re.search(pattern, line):
+                        errors.append(
+                            (i, f"Stale architecture comment/string detected: {line.strip()}")
+                        )
 
             for adr_match in re.finditer(r"(?i)ADR-(\d{4}|\d+)", line):
                 adr_num = adr_match.group(1).zfill(4)
@@ -144,6 +168,8 @@ def check_adr_file(path: Path, root_dir: Path) -> list[tuple[int, str]]:
         content = path.read_text(encoding="utf-8")
         lines = content.splitlines()
         for i, line in enumerate(lines, 1):
+            if ALLOW_MARKER in line:
+                continue
             for match in re.finditer(r"`([a-zA-Z0-9_/-]+\.py)`", line):
                 py_path_str = match.group(1)
                 if "/" in py_path_str:
@@ -180,9 +206,11 @@ def main():
             paths_to_check.extend(p.rglob("*.md"))
 
     paths_to_check = list(set(paths_to_check))
+    paths_to_check = [p for p in paths_to_check if p.as_posix() not in SELF_EXCLUDE]
 
     for path in paths_to_check:
-        errors = check_file(path, available_adrs, available_tests)
+        skip_banned = path.as_posix() in BANNED_PATTERN_EXEMPT
+        errors = check_file(path, available_adrs, available_tests, skip_banned=skip_banned)
 
         if path.suffix == ".md" and "docs/decisions" in path.as_posix():
             errors.extend(check_adr_file(path, root_dir))
