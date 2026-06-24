@@ -70,3 +70,48 @@ guard, not a safety mechanism.
 This exception is reviewed at each consilium iteration.  If NATS HA is
 improved to survive the DR scenarios described above, routing the rebuild
 through the outbox should be reconsidered.
+
+---
+
+## RTO (Recovery Time Objective) — AP5, consilium-v8
+
+**Default budget: 900 seconds (15 minutes).**
+
+The rebuild script enforces an RTO budget so that CI/staging DR drills can
+assert recovery time objectively.  If the rebuild + verification completes
+within the budget the script exits 0.  If it exceeds the budget the script
+exits 2 and the CI job fails.
+
+### Rationale for the 900 s default
+
+| Factor | Estimate |
+|--------|----------|
+| Neo4j wipe + Qdrant wipe | ≤ 30 s |
+| Rebuild 50 k chunks (no re-embedding; stored vectors) | ≤ 600 s |
+| Post-rebuild verification (count queries) | ≤ 30 s |
+| Safety margin | 240 s |
+| **Total** | **≤ 900 s** |
+
+The default is intentionally conservative for the first iteration.  As
+empirical numbers accumulate from CI drills the budget should be tightened
+to 2× p95 observed rebuild time.
+
+### Override at runtime
+
+```
+python scripts/rebuild_all_projections.py --yes --rto-seconds 300
+```
+
+### CI/staging drill
+
+`.github/workflows/dr-drill.yml` seeds a small fixture dataset, runs the
+rebuild with `--rto-seconds 120` (small fixture budget), and fails the job
+if the RTO is exceeded or verification reports any count mismatch.
+
+### Deterministic rebuild order
+
+The script selects Documents with `ORDER BY source_id, id` to guarantee
+the same Postgres SoT produces byte-identical checkpoint epoch sequences
+across two independent runs.  Chunks within each document are ordered by
+`Chunk.ord` (pre-existing stable column).  This property is required for
+the CI determinism assertion in `tests/test_dr_rebuild.py`.
