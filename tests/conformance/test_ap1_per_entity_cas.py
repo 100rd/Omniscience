@@ -382,12 +382,13 @@ async def test_live_cas_stale_redelivery_is_rejected() -> None:
     # Dynamic import to avoid loading neo4j driver in unit-test-only runs
     from omniscience_index.stores.neo4j.store import Neo4jGraphStore, Neo4jStoreConfig
 
-    neo4j_uri = os.environ.get("OMNISCIENCE_NEO4J_URI", "bolt://localhost:7687")
-    neo4j_pw = os.environ.get("OMNISCIENCE_NEO4J_PASSWORD", "password")
+    neo4j_uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user = os.environ.get("NEO4J_USERNAME", "neo4j")
+    neo4j_pw = os.environ.get("NEO4J_PASSWORD", "neo4j")
 
     config = Neo4jStoreConfig(
         uri=neo4j_uri,
-        username="neo4j",
+        username=neo4j_user,
         password=neo4j_pw,
         database="neo4j",
         max_connection_pool_size=5,

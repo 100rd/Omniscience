@@ -16,6 +16,14 @@ Verifies:
   citations on each candidate).
 * The optional ``similar_past`` block is rendered when the inner
   response carries it (forward-compat with #233).
+
+AP4 contract (issue #238 update):
+  ``resolution_confidence`` is ``None`` when ``calibrated=False``
+  (no fitted isotonic artifact loaded).  Tests that previously asserted
+  the decimal value 0.9 now assert the AP4 band+flag contract instead:
+  ``calibrated=False`` and ``confidence_band`` is a valid band string.
+  The card builder uses the band midpoint for scoring bars so the card
+  still renders correctly when the decimal is suppressed.
 """
 
 from __future__ import annotations
@@ -51,6 +59,9 @@ _PR_MERGED_AT = datetime(2026, 5, 22, 11, 30, 0, tzinfo=UTC)
 _PR_URI = "https://github.com/acme/api/pull/42"
 _RESOURCE = "default/api"
 _SLACK_THREAD = "slack://channel/C12345/thread/1716383700.000100"
+
+#: AP4 valid confidence band values.
+_VALID_BANDS = {"low", "medium", "high"}
 
 
 def _alert_node() -> EntityNodeView:
@@ -286,7 +297,12 @@ class TestMcpAppsCardRender:
         assert response["alert"]["name"] == _ALERT_ID
         assert response["responsible_pr"]["name"] == _PR_URI
         assert response["target_resource"]["name"] == _RESOURCE
-        assert response["resolution_confidence"] == 0.9
+
+        # AP4 contract: when uncalibrated, resolution_confidence is None
+        # and confidence_band carries the qualitative assessment instead.
+        assert response["calibrated"] is False
+        assert response["resolution_confidence"] is None
+        assert response["confidence_band"] in _VALID_BANDS
 
     async def test_non_apps_client_receives_legacy_only(self) -> None:
         """Backwards-compat: no capability -> no card."""
@@ -313,7 +329,11 @@ class TestMcpAppsCardRender:
         assert "_meta" not in response
         # Top-level legacy fields untouched.
         assert response["alert"]["name"] == _ALERT_ID
-        assert response["resolution_confidence"] == 0.9
+        # AP4 contract: resolution_confidence is None when uncalibrated;
+        # confidence_band carries the qualitative result instead.
+        assert response["calibrated"] is False
+        assert response["resolution_confidence"] is None
+        assert response["confidence_band"] in _VALID_BANDS
 
     async def test_card_schema_round_trips_through_json(self) -> None:
         """The card payload must survive a JSON round-trip unchanged."""
