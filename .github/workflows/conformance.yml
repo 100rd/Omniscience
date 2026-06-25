@@ -12,10 +12,14 @@ name: Conformance Gates
 # AP5: DR-drill rebuild-from-SoT + hash-assert (Batch E, Postgres service)
 # AP7: arch invariants — single-writer + MCP retrieval-only (Batch F)
 #
-# conformance-live (v10-AP6 fix, Batch C): single shared container job that
-# runs all P0 behavioral assertions against REAL Neo4j/Qdrant/NATS.
-# This is the authoritative gate — mock-only jobs are a fast first signal
-# but the live job is what catches real Cypher/consumer/store bugs.
+# conformance-live (v10-AP6 fix, v11-AP3/AP4 upgrades):
+#   Single shared container job running ALL P0 behavioral assertions against
+#   REAL Neo4j / Qdrant / NATS / Postgres.
+#   This is the authoritative gate — mock-only jobs are a fast first signal
+#   but the live job is what catches real Cypher/consumer/store bugs.
+#
+# v11-AP3 upgrade: added Postgres service + REAL GlobalReconciler tests.
+# v11-AP4 upgrade: added CAS concurrency tests.
 
 on:
   pull_request:
@@ -149,34 +153,51 @@ jobs:
       - run: uv run pytest tests/conformance/test_ap7_arch_invariants.py -v --tb=short
 
   # ---------------------------------------------------------------------------
-  # LIVE behavioral conformance gate (v10-AP6 fix)
+  # LIVE behavioral conformance gate (v10-AP6 fix, v11-AP3/AP4 upgrade)
   #
   # Single shared container job running ALL P0 behavioral assertions against
-  # REAL Neo4j / Qdrant / NATS service containers — the same config as
-  # ci.yml's test job.  This is the authoritative gate: mock-only jobs above
-  # are a fast first signal, but this job exercises the real Cypher/consumer
-  # path and will catch exactly the class of bug that killed AP2 heal
+  # REAL Neo4j / Qdrant / NATS / Postgres service containers — the same config
+  # as ci.yml's test job.  This is the authoritative gate: mock-only jobs above
+  # are a fast first signal, but this job exercises the real Cypher/consumer/
+  # store path and will catch exactly the class of bug that killed AP2 heal
   # (consumer→store path was dead but mock gate was green).
   #
-  # Tests selected:
-  #   AP1 (per-entity CAS): tests/test_ap1_single_writer.py::test_live_cas_*
-  #     - test_live_cas_stale_write_does_not_regress_entity_version (Neo4j live)
-  #     - test_live_ap2_backfill_heals_stale_node_bypassing_source_checkpoint (via AP2 path)
-  #   AP2 (backfill heal): tests/integration/test_ap2_backfill_heal.py
-  #     - test_live_ap2_backfill_heals_stale_node_bypassing_source_checkpoint
-  #     - test_live_ap2_backfill_does_not_regress_node_ahead_of_backfill
-  #   AP3 (per-source watermark + graph-anchor pin):
-  #     tests/integration/test_ap3_live_conformance.py
-  #     - test_live_ap3_v10_ap1_cold_source_does_not_blackout_healthy_source
-  #     - test_live_ap3_v10_ap2_graph_ahead_anchor_treated_as_miss
+  # v11-AP3 addition: Postgres service + REAL GlobalReconciler tests
+  #   tests/integration/test_ap3_real_reconciler_live.py
+  #   - test_live_ap3_v11_real_reconciler_cold_source_explicit_zero
+  #     Exercises the REAL check_convergence with a cold source (no pg docs);
+  #     asserts cold source gets explicit 0 in per_source_watermark (v11-AP1a)
+  #     and its hits are dropped by fail-closed filter (v11-AP1b).
+  #   - test_live_ap3_v11_real_reconciler_healthy_source_unaffected_by_cold
+  #     Asserts healthy source is NOT blacked out by cold source's presence.
   #
-  # NATS note: GitHub Actions services: does not support passing CMD arguments to
-  # override a container's default command, so NATS is started as a background
-  # step instead of a service container (same pattern as ci.yml).
+  # v11-AP4 addition: CAS concurrency tests
+  #   tests/integration/test_ap4_cas_concurrency.py
+  #   - test_live_ap4_concurrent_upserts_final_version_is_max
+  #     N concurrent upserts across all permutations → final version == max.
+  #   - test_live_ap4_backfill_interleaved_with_live_writes
+  #     Backfill (bypass_source_checkpoint=True) interleaved with live writes
+  #     → backfill does NOT regress entity below live version.
+  #   - test_live_ap4_no_lost_update_random_permutations
+  #     20 seeded-random permutations → no lost update in any trial.
+  #
+  # Previous tests (unchanged):
+  #   AP1 live CAS: tests/test_ap1_single_writer.py::test_live_cas_*
+  #   AP2 backfill heal: tests/integration/test_ap2_backfill_heal.py
+  #   AP3 watermark + graph-anchor pin: tests/integration/test_ap3_live_conformance.py
+  #
+  # NATS note: GitHub Actions services: does not support passing CMD arguments
+  # to override a container's default command, so NATS is started as a
+  # background step instead of a service container (same pattern as ci.yml).
+  #
+  # Postgres note (v11-AP3): Postgres is required by the REAL GlobalReconciler
+  # to read pg watermarks via _snapshot_pg_watermark. Migrations are run in the
+  # setup step before any test.  Port 5432 is used (same as ci.yml and ap5-dr-smoke).
   # ---------------------------------------------------------------------------
   conformance-live:
-    name: "LIVE behavioral P0 assertions (AP1+AP2+AP3 real Neo4j/Qdrant/NATS)"
+    name: "LIVE behavioral P0 assertions (AP1+AP2+AP3+AP4 real Neo4j/Qdrant/Postgres/NATS)"
     runs-on: ubuntu-latest
+    # no continue-on-error — this job is a REQUIRED blocking check
 
     services:
       neo4j:
@@ -210,6 +231,24 @@ jobs:
           --health-retries 10
           --health-start-period 20s
 
+      # v11-AP3: Postgres service for the REAL GlobalReconciler.
+      # The reconciler's _snapshot_pg_watermark reads Document + Source rows
+      # from Postgres; tests insert Source/Document rows directly via ORM.
+      # Migrations are run in the setup step below.
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: omniscience_test
+          POSTGRES_USER: omniscience
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -241,17 +280,31 @@ jobs:
             fi
           done
 
+      # v11-AP3: run Alembic migrations so the REAL GlobalReconciler can
+      # read/write the sources + documents tables.  Mirrors the pattern used
+      # in ci.yml's test job (DATABASE_URL env → Alembic picks it up via
+      # packages/core/alembic/env.py).
+      - name: Run database migrations (v11-AP3 real reconciler)
+        run: |
+          cd packages/core
+          uv run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:test@localhost:5432/omniscience_test
+
       # Run all live P0 behavioral assertions:
-      #   - AP1 live CAS (tests/test_ap1_single_writer.py, test_live_cas_* marker)
-      #   - AP2 backfill heal (tests/integration/test_ap2_backfill_heal.py)
-      #   - AP3 multi-source watermark + graph-anchor pin
-      #     (tests/integration/test_ap3_live_conformance.py)
+      #   AP1:  live CAS (single-writer stale redelivery rejected)
+      #   AP2:  backfill heal (bypass_source_checkpoint → CAS heals stale node)
+      #   AP3a: mock-reconciler watermark + graph-anchor pin (unchanged from v10-AP6)
+      #   AP3b: REAL-reconciler cold-source + fail-closed gate (v11-AP3 NEW)
+      #   AP4:  CAS concurrency — no lost update under parallel writes (v11-AP4 NEW)
       - name: Run live P0 behavioral assertions
         run: |
           uv run pytest \
             tests/test_ap1_single_writer.py::test_live_cas_stale_write_does_not_regress_entity_version \
             tests/integration/test_ap2_backfill_heal.py \
             tests/integration/test_ap3_live_conformance.py \
+            tests/integration/test_ap3_real_reconciler_live.py \
+            tests/integration/test_ap4_cas_concurrency.py \
             -v --tb=short
         env:
           # --- Neo4j ---
@@ -269,8 +322,12 @@ jobs:
           # --- NATS ---
           NATS_URL: nats://localhost:4222
 
+          # --- Postgres (v11-AP3: REAL GlobalReconciler) ---
+          DATABASE_URL: postgresql+asyncpg://omniscience:test@localhost:5432/omniscience_test
+
           # --- Contract test gate flags ---
-          # Unlock live Neo4j contract tests (test_live_cas_*, AP2 heal, etc.)
+          # Unlock live Neo4j contract tests (test_live_cas_*, AP2 heal,
+          # AP4 concurrency, etc.)
           OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS: "1"
           # Unlock live Qdrant contract tests (AP3 multi-source watermark)
           OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS: "1"

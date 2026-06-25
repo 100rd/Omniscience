@@ -89,6 +89,7 @@ def _make_composer() -> GraphRAGComposer:
     composer._global_reconciler = None  # type: ignore[attr-defined]
     composer._session_factory = None  # type: ignore[attr-defined]
     composer._is_entity_parked_fn = None  # type: ignore[attr-defined]
+    composer._strict_epoch = True  # type: ignore[attr-defined]  # v11-AP1: fail-closed default
     return composer
 
 

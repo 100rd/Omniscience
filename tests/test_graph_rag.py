@@ -35,6 +35,7 @@ from omniscience_retrieval.graph_rag import (
     CANDIDATE_EXPANSION_FACTOR,
     MAX_ANCHOR_CANDIDATES,
     GraphRAGComposer,
+    _apply_graph_watermark_filter,
     _build_affinity_map,
     _collect_candidates,
     _extract_anchor,
@@ -1249,3 +1250,311 @@ class TestReadTimePostgresValidation:
         # Only hit1 should be returned, hit2 is filtered out because it's not valid/active
         assert len(result.hits) == 1
         assert result.hits[0].chunk_id == chunk1_id
+
+
+# ---------------------------------------------------------------------------
+# v11-AP2 tests: explicit anchor-miss, no control-flow-by-exception
+# ---------------------------------------------------------------------------
+
+
+def test_apply_graph_watermark_filter_returns_tuple() -> None:
+    """_apply_graph_watermark_filter returns (result, seed_excluded) tuple (v11-AP2).
+
+    Verifies the API change: the function no longer raises ValueError for
+    graph-ahead seeds — it returns an explicit boolean signal.
+    """
+
+    src = str(uuid.uuid4())
+
+    # Graph-ahead seed: version=10, watermark=7 → seed_excluded=True
+    seed_ahead = EntityNodeView(
+        id=uuid.uuid4(),
+        name="AheadSeed",
+        kind="service",
+        source=src,
+        chunk_text=None,
+        depth=0,
+        version=10,
+    )
+    graph_result_ahead = GraphResultView(seed=seed_ahead, related=[], edges=[])
+    _ahead_result, seed_excluded = _apply_graph_watermark_filter(graph_result_ahead, {src: 7})
+    assert seed_excluded is True, (
+        "v11-AP2: graph-ahead seed must set seed_excluded=True (not raise ValueError)"
+    )
+
+    # Seed within watermark: version=5, watermark=7 → seed_excluded=False
+    seed_ok = EntityNodeView(
+        id=uuid.uuid4(),
+        name="OkSeed",
+        kind="service",
+        source=src,
+        chunk_text=None,
+        depth=0,
+        version=5,
+    )
+    graph_result_ok = GraphResultView(seed=seed_ok, related=[], edges=[])
+    _ok_result, seed_excluded_ok = _apply_graph_watermark_filter(graph_result_ok, {src: 7})
+    assert seed_excluded_ok is False, "Seed within watermark must not be excluded"
+
+
+@pytest.mark.asyncio
+async def test_genuine_traverse_error_propagates_not_swallowed_as_anchor_miss(
+    force_graphrag: None,
+) -> None:
+    """v11-AP2: a genuine traverse() error (non-ValueError) must NOT be masked as anchor-miss.
+
+    Before v11-AP2, the too-wide except block caught ANY exception from
+    the graph store and treated it as anchor_hit=False.  This masked
+    real errors (network issues, schema errors) as silent misses.
+    Now only ValueError is caught; all other exceptions propagate.
+    """
+
+    class _RuntimeErrorStore:
+        """A graph store that raises RuntimeError (simulates a network/schema error)."""
+
+        async def traverse(
+            self,
+            *,
+            entity_name: str,
+            workspace_id: uuid.UUID,
+            as_of: datetime | None = None,
+            max_depth: int = 1,
+            edge_types: list[str] | None = None,
+        ) -> GraphResultView:
+            raise RuntimeError("connection_pool_exhausted: simulated network failure")
+
+    v = _FakeVectorStore(_make_result([]))
+    legacy = _FakeLegacyService(_make_result([]))
+    composer = GraphRAGComposer(
+        graph_store=cast("Any", _RuntimeErrorStore()),
+        vector_store=v,
+        legacy_service=legacy,
+    )
+    # Force graphrag path
+    composer._graphrag_active = True  # type: ignore[attr-defined]
+
+    req = SearchRequest(
+        query="traverse-error",
+        top_k=5,
+        filters={ANCHOR_FILTER_KEY: "SomeEntity"},
+    )
+    # The RuntimeError must propagate — it must NOT be silently converted to anchor_hit=False.
+    with pytest.raises(RuntimeError, match="connection_pool_exhausted"):
+        await composer._run_anchor_stage(
+            request=req,
+            workspace_id=uuid.uuid4(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_graph_ahead_seed_yields_clean_anchor_miss_no_exception(
+    force_graphrag: None,
+) -> None:
+    """v11-AP2: a graph-ahead seed yields anchor_hit=False without raising any exception.
+
+    _apply_graph_watermark_filter returns (result, seed_excluded=True); the
+    anchor stage maps this to anchor_hit=False deterministically.  No
+    exception is raised, no genuine traverse error is masked.
+    """
+    src_id = uuid.uuid4()
+    src_str = str(src_id)
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="AheadSeed",
+        kind="service",
+        source=src_str,
+        chunk_text=None,
+        depth=0,
+        version=10,  # > watermark of 7
+    )
+    graph_result = GraphResultView(seed=seed, related=[], edges=[])
+
+    class _AheadSeedStore:
+        async def traverse(
+            self,
+            *,
+            entity_name: str,
+            workspace_id: uuid.UUID,
+            as_of: datetime | None = None,
+            max_depth: int = 1,
+            edge_types: list[str] | None = None,
+        ) -> GraphResultView:
+            return graph_result
+
+    v = _FakeVectorStore(_make_result([]))
+    legacy = _FakeLegacyService(_make_result([]))
+    composer = GraphRAGComposer(
+        graph_store=cast("Any", _AheadSeedStore()),
+        vector_store=v,
+        legacy_service=legacy,
+    )
+    composer._graphrag_active = True  # type: ignore[attr-defined]
+
+    per_source_wm = {src_str: 7}
+
+    req = SearchRequest(
+        query="graph-ahead",
+        top_k=5,
+        filters={ANCHOR_FILTER_KEY: "AheadSeed"},
+    )
+    # Must not raise — the graph-ahead seed is a clean anchor-miss via explicit signal.
+    anchor = await composer._run_anchor_stage(
+        request=req,
+        workspace_id=uuid.uuid4(),
+        per_source_watermark=per_source_wm,
+    )
+    assert anchor.anchor_hit is False, (
+        "v11-AP2: graph-ahead seed must yield anchor_hit=False (no exception)"
+    )
+    assert anchor.anchor_requested is True
+    assert anchor.candidate_source_ids == ()
+
+
+# ---------------------------------------------------------------------------
+# v11-AP5 tests: reachability recompute after pruning ahead-nodes
+# ---------------------------------------------------------------------------
+
+
+def test_recompute_reachability_drops_phantom_nodes() -> None:
+    """v11-AP5: a node reachable ONLY via an excluded ahead-node is removed.
+
+    Topology:
+      Seed --edge1--> AheadNode (version=10, wm=7 → excluded)
+      AheadNode --edge2--> PhantomNode
+
+    After AheadNode is excluded and edge1/edge2 are pruned, PhantomNode
+    is no longer reachable from Seed — it must be removed from related.
+    """
+
+    src_seed = str(uuid.uuid4())
+    src_ahead = str(uuid.uuid4())
+    src_phantom = str(uuid.uuid4())
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Seed",
+        kind="service",
+        source=src_seed,
+        chunk_text=None,
+        depth=0,
+        version=5,
+    )
+    ahead_node = EntityNodeView(
+        id=uuid.uuid4(),
+        name="AheadNode",
+        kind="repo",
+        source=src_ahead,
+        chunk_text=None,
+        depth=1,
+        version=10,  # > ahead_node's watermark of 7 → will be excluded
+    )
+    phantom_node = EntityNodeView(
+        id=uuid.uuid4(),
+        name="PhantomNode",
+        kind="team",
+        source=src_phantom,
+        chunk_text=None,
+        depth=2,
+        version=3,  # within watermark — but only reachable via AheadNode
+    )
+
+    edge1 = GraphEdgeView(from_entity="Seed", to_entity="AheadNode", edge_type="OWNS")
+    edge2 = GraphEdgeView(from_entity="AheadNode", to_entity="PhantomNode", edge_type="USES")
+
+    graph_result = GraphResultView(
+        seed=seed,
+        related=[ahead_node, phantom_node],
+        edges=[edge1, edge2],
+    )
+    per_source_wm = {src_seed: 10, src_ahead: 7, src_phantom: 10}
+
+    filtered, seed_excluded = _apply_graph_watermark_filter(graph_result, per_source_wm)
+
+    assert seed_excluded is False, "Seed is within watermark (v5 <= wm=10)"
+    remaining_names = {n.name for n in filtered.related}
+    assert "AheadNode" not in remaining_names, (
+        "AheadNode (version=10 > wm=7) must be excluded by watermark filter"
+    )
+    assert "PhantomNode" not in remaining_names, (
+        "PhantomNode reachable ONLY via excluded AheadNode must also be removed (v11-AP5 BFS)"
+    )
+
+
+def test_recompute_reachability_keeps_directly_connected_nodes() -> None:
+    """v11-AP5: nodes directly connected to seed survive even when other paths are cut.
+
+    Topology:
+      Seed --edge1--> DirectNode (version=3, within watermark)
+      Seed --edge2--> AheadNode (version=10 > watermark → excluded)
+      AheadNode --edge3--> RelatedViaAhead (only reachable via AheadNode → dropped)
+
+    After exclusion + BFS:
+      - DirectNode: still reachable via edge1 → kept
+      - AheadNode: excluded by watermark
+      - RelatedViaAhead: unreachable after AheadNode removed → dropped
+    """
+
+    src_seed = str(uuid.uuid4())
+    src_direct = str(uuid.uuid4())
+    src_ahead = str(uuid.uuid4())
+    src_via_ahead = str(uuid.uuid4())
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Seed",
+        kind="service",
+        source=src_seed,
+        chunk_text=None,
+        depth=0,
+        version=5,
+    )
+    direct_node = EntityNodeView(
+        id=uuid.uuid4(),
+        name="DirectNode",
+        kind="repo",
+        source=src_direct,
+        chunk_text=None,
+        depth=1,
+        version=3,
+    )
+    ahead_node = EntityNodeView(
+        id=uuid.uuid4(),
+        name="AheadNode",
+        kind="team",
+        source=src_ahead,
+        chunk_text=None,
+        depth=1,
+        version=10,  # > wm=7
+    )
+    via_ahead = EntityNodeView(
+        id=uuid.uuid4(),
+        name="RelatedViaAhead",
+        kind="service",
+        source=src_via_ahead,
+        chunk_text=None,
+        depth=2,
+        version=2,
+    )
+
+    edges = [
+        GraphEdgeView(from_entity="Seed", to_entity="DirectNode", edge_type="OWNS"),
+        GraphEdgeView(from_entity="Seed", to_entity="AheadNode", edge_type="USES"),
+        GraphEdgeView(from_entity="AheadNode", to_entity="RelatedViaAhead", edge_type="PART_OF"),
+    ]
+    graph_result = GraphResultView(
+        seed=seed, related=[direct_node, ahead_node, via_ahead], edges=edges
+    )
+    per_source_wm = {src_seed: 10, src_direct: 10, src_ahead: 7, src_via_ahead: 10}
+
+    filtered, seed_excluded = _apply_graph_watermark_filter(graph_result, per_source_wm)
+
+    assert seed_excluded is False
+    remaining_names = {n.name for n in filtered.related}
+    assert "DirectNode" in remaining_names, (
+        "DirectNode directly connected to Seed and within watermark must survive"
+    )
+    assert "AheadNode" not in remaining_names, "AheadNode (version=10 > wm=7) must be excluded"
+    assert "RelatedViaAhead" not in remaining_names, (
+        "RelatedViaAhead reachable only via excluded AheadNode must be dropped (v11-AP5)"
+    )

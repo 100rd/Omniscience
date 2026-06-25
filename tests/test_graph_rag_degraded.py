@@ -189,6 +189,7 @@ def _make_composer(graph_hit: bool, vector_result: SearchResult) -> GraphRAGComp
     composer._vector_store = vector  # type: ignore[attr-defined]
     composer._legacy_service = _FakeLegacyService()  # type: ignore[attr-defined]
     composer._graphrag_active = True  # type: ignore[attr-defined]
+    composer._strict_epoch = True  # type: ignore[attr-defined]
     # AP3: no reconciler in these degraded-detector tests; convergence is not under test here.
     composer._global_reconciler = None  # type: ignore[attr-defined]
     composer._session_factory = None  # type: ignore[attr-defined]

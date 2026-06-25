@@ -30,6 +30,36 @@ Edges between excluded nodes are also removed.  This closes the
 one-directional pin: the graph view is now pinned to the same per-source
 epoch as the vector evidence.
 
+v11-AP1 — fail-closed epoch policy
+-------------------------------------
+``_apply_watermark_filter`` now operates FAIL-CLOSED by default: a hit
+whose source has no entry in the watermark map is DROPPED (unless
+``applied_version is None``).  This prevents mixed-epoch leaks where a
+cold source absent from the reconciler map could inject future-epoch
+evidence.  The behaviour is governed by the ``strict_epoch`` parameter
+(default ``True``); set ``strict_epoch=False`` to revert to the old
+fail-open behaviour (not recommended for production).
+
+A Prometheus counter ``omniscience_graphrag_epoch_dropped_unmapped_total``
+tracks the number of hits dropped by the fail-closed policy so the
+leak-rate is observable.
+
+v11-AP2 — explicit anchor-miss, no control-flow-by-exception
+--------------------------------------------------------------
+``_apply_graph_watermark_filter`` no longer raises ``ValueError`` for a
+graph-ahead seed.  Instead it returns ``(filtered_view, seed_excluded:
+bool)``.  ``_run_anchor_stage`` maps ``seed_excluded=True`` to
+``anchor_hit=False`` deterministically.  The ``except`` block around
+``graph_store.traverse()`` is narrowed so genuine traverse errors
+propagate rather than being silently swallowed as anchor-misses.
+
+v11-AP5 — reachability recompute after pruning ahead-nodes
+-----------------------------------------------------------
+After ``_apply_graph_watermark_filter`` excludes ahead nodes/edges, a
+BFS over the surviving edges re-derives which nodes are reachable from
+the seed.  Nodes reachable only through excluded edges are removed so
+phantom paths do not feed graph-affinity scoring.
+
 Backwards-compatibility
 -----------------------
 
@@ -59,9 +89,10 @@ Telemetry
 
 Per-stage metrics are emitted under the ``omniscience_graphrag_*``
 namespace; see :data:`_STAGE_DURATION`, :data:`_CANDIDATE_SET_SIZE`,
-:data:`_ANCHOR_HIT_TOTAL`, :data:`_COMPOSED_QUERIES_TOTAL`.  Each
-request also produces a structlog event ``graphrag_query_complete``
-with the same numbers for trace correlation.
+:data:`_ANCHOR_HIT_TOTAL`, :data:`_COMPOSED_QUERIES_TOTAL`,
+:data:`_EPOCH_DROPPED_UNMAPPED`.  Each request also produces a structlog
+event ``graphrag_query_complete`` with the same numbers for trace
+correlation.
 """
 
 from __future__ import annotations
@@ -205,6 +236,22 @@ _COMPOSED_QUERIES_TOTAL: Counter = Counter(
     labelnames=["path"],
 )
 
+#: v11-AP1: tracks hits dropped by the fail-closed epoch policy (strict_epoch=True)
+#: because the hit's source was absent from the per_source_watermark map.
+#: A non-zero rate indicates sources that were indexed into Qdrant/Neo4j but
+#: whose pg watermark snapshot did not include them — typically a reconciler
+#: race or a source newly added to a store but not yet committed to Postgres.
+_EPOCH_DROPPED_UNMAPPED: Counter = Counter(
+    name="omniscience_graphrag_epoch_dropped_unmapped_total",
+    documentation=(
+        "Number of vector hits dropped by the fail-closed epoch policy "
+        "(strict_epoch=True) because the hit's source_id was absent from "
+        "the per_source_watermark map.  A sustained non-zero rate signals "
+        "a reconciler gap or a newly-added source not yet seen by the "
+        "GlobalReconciler (v11-AP1)."
+    ),
+)
+
 
 # ---------------------------------------------------------------------------
 # Minimal protocols consumed by the composer
@@ -324,6 +371,14 @@ class GraphRAGComposer:
     ``search`` requires ``workspace_id`` as a keyword-only argument;
     every downstream store call forwards it.  Cross-workspace
     isolation is covered by a contract test (issue #107 acceptance).
+
+    Epoch policy
+    ------------
+    ``strict_epoch`` (default ``True``) controls the fail-closed behaviour
+    of ``_apply_watermark_filter``.  When ``True``, hits whose source has
+    no entry in the per_source_watermark map are dropped (unless
+    ``applied_version is None``).  Set to ``False`` to revert to the
+    legacy fail-open behaviour (not recommended — see ADR-0017).
     """
 
     def __init__(
@@ -335,6 +390,7 @@ class GraphRAGComposer:
         session_factory: async_sessionmaker[AsyncSession] | None = None,
         global_reconciler: Any | None = None,
         is_entity_parked_fn: Any | None = None,
+        strict_epoch: bool = True,
     ) -> None:
         self._graph_store = graph_store
         self._vector_store = vector_store
@@ -342,6 +398,7 @@ class GraphRAGComposer:
         self._session_factory = session_factory
         self._global_reconciler = global_reconciler
         self._is_entity_parked_fn = is_entity_parked_fn
+        self._strict_epoch = strict_epoch
         self._graphrag_active = _should_use_graphrag(graph_store, vector_store)
 
     @property
@@ -517,12 +574,21 @@ class GraphRAGComposer:
     ) -> _AnchorStageResult:
         """Resolve the anchor entity (when supplied) and collect candidates.
 
-        v10-AP2: traversed nodes whose ``version`` exceeds their source's
-        watermark are excluded from the result before candidate collection.
-        This pins the graph VIEW to the same per-source epoch as the vector
-        evidence — closing the one-directional pin gap.  Edges connecting
-        excluded nodes are also removed.  A node with ``version is None``
-        passes through (no version info → no ceiling applied).
+        v10-AP2 / v11-AP2: traversed nodes whose ``version`` exceeds their
+        source's watermark are excluded from the result before candidate
+        collection.  This pins the graph VIEW to the same per-source epoch
+        as the vector evidence.  Edges connecting excluded nodes are also
+        removed.  A node with ``version is None`` passes through (no version
+        info → no ceiling applied).
+
+        v11-AP2: ``_apply_graph_watermark_filter`` now returns an explicit
+        ``(filtered_result, seed_excluded)`` tuple instead of raising
+        ``ValueError`` for a graph-ahead seed.  ``seed_excluded=True`` maps
+        deterministically to ``anchor_hit=False``.  The ``try/except`` block
+        is narrowed to only catch genuine ``ValueError`` from
+        ``graph_store.traverse()`` (e.g. entity-not-found); a traverse error
+        that is NOT a ``ValueError`` propagates uncaught so it is not
+        silently swallowed as an anchor-miss.
         """
         stage_start = time.monotonic()
         anchor_name = _extract_anchor(request)
@@ -543,6 +609,10 @@ class GraphRAGComposer:
                 duration_s=duration,
             )
 
+        # v11-AP2: NARROW the try/except to only cover the traverse() call.
+        # A genuine traverse error (e.g. network failure, unexpected exception)
+        # must NOT be masked as an anchor-miss — only ValueError (entity-not-found
+        # semantics) is treated as a clean miss.  Any other exception propagates.
         try:
             graph_result = await self._graph_store.traverse(
                 entity_name=anchor_name,
@@ -550,58 +620,8 @@ class GraphRAGComposer:
                 as_of=as_of,
                 max_depth=MAX_ANCHOR_DEPTH,
             )
-
-            # v10-AP2: post-filter graph-ahead nodes before any candidate logic.
-            # A node whose version > per_source_watermark[its source] must be
-            # excluded so the graph VIEW is consistent with the watermark epoch.
-            if per_source_watermark:
-                graph_result = _apply_graph_watermark_filter(graph_result, per_source_watermark)
-
-            # Validate retrieved entities in Postgres
-            all_entity_names = [graph_result.seed.name] + [n.name for n in graph_result.related]
-            valid_entity_names = await self._validate_entities(all_entity_names, workspace_id)
-
-            if graph_result.seed.name not in valid_entity_names:
-                log.warning(
-                    "graph_rag_traversal_empty", entity=anchor_name, workspace_id=str(workspace_id)
-                )
-                return _AnchorStageResult(
-                    anchor_requested=True,
-                    anchor_name=anchor_name,
-                    anchor_hit=False,
-                    candidate_source_ids=(),
-                    candidate_depths=(),
-                    candidate_centralities={},
-                    candidate_parked=(),
-                    duration_s=time.monotonic() - stage_start,
-                )
-
-            # Filter out related entities that are not in the validated set
-            # (e.g. from tombstoned documents or inactive sources).
-            graph_result.related = [
-                n for n in graph_result.related if n.name in valid_entity_names
-            ]
-
-            if self._is_entity_parked_fn:
-                graph_result.seed.is_parked = self._is_entity_parked_fn(graph_result.seed.id)
-                for node in graph_result.related:
-                    node.is_parked = self._is_entity_parked_fn(node.id)
-
-            candidates, depths, centralities, parked = _collect_candidates(graph_result)
-            duration = time.monotonic() - stage_start
-            _ANCHOR_HIT_TOTAL.labels(outcome="hit").inc()
-            _STAGE_DURATION.labels(stage="anchor").observe(duration)
-            return _AnchorStageResult(
-                anchor_requested=True,
-                anchor_name=anchor_name,
-                anchor_hit=True,
-                candidate_source_ids=candidates,
-                candidate_depths=depths,
-                candidate_centralities=centralities,
-                candidate_parked=parked,
-                duration_s=duration,
-            )
         except ValueError:
+            # Entity not found in the graph — clean anchor-miss.
             _ANCHOR_HIT_TOTAL.labels(outcome="miss").inc()
             duration = time.monotonic() - stage_start
             _STAGE_DURATION.labels(stage="anchor").observe(duration)
@@ -615,6 +635,76 @@ class GraphRAGComposer:
                 candidate_parked=(),
                 duration_s=duration,
             )
+
+        # v10-AP2 / v11-AP2: post-filter graph-ahead nodes before any candidate logic.
+        # _apply_graph_watermark_filter now returns (filtered_result, seed_excluded)
+        # instead of raising ValueError — explicit signal, no control-flow-by-exception.
+        if per_source_watermark:
+            graph_result, seed_excluded = _apply_graph_watermark_filter(
+                graph_result, per_source_watermark
+            )
+            if seed_excluded:
+                log.info(
+                    "graph_anchor_seed_excluded_by_watermark",
+                    entity=anchor_name,
+                    workspace_id=str(workspace_id),
+                )
+                _ANCHOR_HIT_TOTAL.labels(outcome="miss").inc()
+                duration = time.monotonic() - stage_start
+                _STAGE_DURATION.labels(stage="anchor").observe(duration)
+                return _AnchorStageResult(
+                    anchor_requested=True,
+                    anchor_name=anchor_name,
+                    anchor_hit=False,
+                    candidate_source_ids=(),
+                    candidate_depths=(),
+                    candidate_centralities={},
+                    candidate_parked=(),
+                    duration_s=duration,
+                )
+
+        # Validate retrieved entities in Postgres
+        all_entity_names = [graph_result.seed.name] + [n.name for n in graph_result.related]
+        valid_entity_names = await self._validate_entities(all_entity_names, workspace_id)
+
+        if graph_result.seed.name not in valid_entity_names:
+            log.warning(
+                "graph_rag_traversal_empty", entity=anchor_name, workspace_id=str(workspace_id)
+            )
+            return _AnchorStageResult(
+                anchor_requested=True,
+                anchor_name=anchor_name,
+                anchor_hit=False,
+                candidate_source_ids=(),
+                candidate_depths=(),
+                candidate_centralities={},
+                candidate_parked=(),
+                duration_s=time.monotonic() - stage_start,
+            )
+
+        # Filter out related entities that are not in the validated set
+        # (e.g. from tombstoned documents or inactive sources).
+        graph_result.related = [n for n in graph_result.related if n.name in valid_entity_names]
+
+        if self._is_entity_parked_fn:
+            graph_result.seed.is_parked = self._is_entity_parked_fn(graph_result.seed.id)
+            for node in graph_result.related:
+                node.is_parked = self._is_entity_parked_fn(node.id)
+
+        candidates, depths, centralities, parked = _collect_candidates(graph_result)
+        duration = time.monotonic() - stage_start
+        _ANCHOR_HIT_TOTAL.labels(outcome="hit").inc()
+        _STAGE_DURATION.labels(stage="anchor").observe(duration)
+        return _AnchorStageResult(
+            anchor_requested=True,
+            anchor_name=anchor_name,
+            anchor_hit=True,
+            candidate_source_ids=candidates,
+            candidate_depths=depths,
+            candidate_centralities=centralities,
+            candidate_parked=parked,
+            duration_s=duration,
+        )
 
     # ------------------------------------------------------------------
     # Stage 2 — vector
@@ -659,10 +749,15 @@ class GraphRAGComposer:
 
         stage_start = time.monotonic()
 
-        # v10-AP1 consistent-stale PIN: drop a hit only when its
-        # applied_version exceeds the watermark of ITS OWN source.
-        # A cold/lagging source B does NOT decimate hits from healthy source A.
-        filtered_hits = _apply_watermark_filter(vector_result.hits, per_source_watermark)
+        # v10-AP1 / v11-AP1: consistent-stale PIN.
+        # Drop a hit only when its applied_version exceeds the watermark of
+        # ITS OWN source.  With strict_epoch=True (default): a source absent
+        # from the map is also dropped (fail-closed).
+        filtered_hits = _apply_watermark_filter(
+            vector_result.hits,
+            per_source_watermark,
+            strict_epoch=self._strict_epoch,
+        )
 
         # Unpack anchor results for O(1) lookup
         if anchor.candidate_source_ids:
@@ -831,6 +926,8 @@ class GraphRAGComposer:
 def _apply_watermark_filter(
     hits: list[SearchHit],
     per_source_watermark: dict[str, int] | None,
+    *,
+    strict_epoch: bool = True,
 ) -> list[SearchHit]:
     """Drop hits whose ``applied_version`` exceeds their own source's watermark.
 
@@ -839,21 +936,36 @@ def _apply_watermark_filter(
     A cold or lagging source B (watermark 0) does NOT decimate hits from
     healthy source A — only B's own future-epoch hits are dropped.
 
-    Rules:
+    v11-AP1 fail-closed policy (``strict_epoch=True``, the default):
+    a hit whose source has NO entry in the map is DROPPED unless
+    ``applied_version is None``.  This closes the mixed-epoch leak where
+    an unmapped source could inject future-epoch evidence.  Set
+    ``strict_epoch=False`` to revert to the legacy fail-open behaviour
+    (hit passes when its source has no map entry).
+
+    ``_EPOCH_DROPPED_UNMAPPED`` is incremented for each hit dropped by
+    the fail-closed policy so the leak-rate is observable.
+
+    Rules (strict_epoch=True, the default):
     - When ``per_source_watermark is None`` or empty: no filter applied —
-      all hits pass.  This handles cold stores (no version info) and the
-      no-reconciler path.
-    - For a hit whose source has no entry in the map: pass through (we have
-      no ceiling for it — don't blackout).
+      all hits pass.  This handles the no-reconciler path.
+    - For a hit whose source has no entry in the map:
+      - ``applied_version is None``: pass through (no version info).
+      - ``applied_version is not None``: DROP (fail-closed) and increment
+        ``omniscience_graphrag_epoch_dropped_unmapped_total``.
     - For a hit whose source IS in the map:
       - watermark == 0: drop if ``applied_version`` is not None and >= 1
         (version 0 means nothing applied for this source yet).
       - Otherwise: drop if ``applied_version > watermark``.
       - Hits with ``applied_version is None``: always pass through.
 
-    INVARIANT: after this filter, no retained hit has
-    ``applied_version > per_source_watermark[hit.source.id]``
-    for sources present in the map.
+    Rules (strict_epoch=False, legacy):
+    - Hits from unmapped sources pass through unconditionally (old behaviour).
+
+    INVARIANT (strict_epoch=True): after this filter, no retained hit has a
+    versioned ``applied_version`` for a source not in the map OR has
+    ``applied_version > per_source_watermark[hit.source.id]`` for sources
+    present in the map.
     """
     if not per_source_watermark:
         return hits
@@ -862,8 +974,20 @@ def _apply_watermark_filter(
     for h in hits:
         src_key = str(h.source.id)
         if src_key not in per_source_watermark:
-            # No watermark entry for this source → pass through (don't blackout).
-            result.append(h)
+            if h.applied_version is None:
+                # No version info — pass through regardless of strict_epoch.
+                result.append(h)
+            elif strict_epoch:
+                # Fail-closed: versioned hit from unmapped source is dropped.
+                _EPOCH_DROPPED_UNMAPPED.inc()
+                log.debug(
+                    "graphrag_epoch_dropped_unmapped",
+                    source_id=src_key,
+                    applied_version=h.applied_version,
+                )
+            else:
+                # Fail-open (legacy): pass through.
+                result.append(h)
             continue
         wm = per_source_watermark[src_key]
         if h.applied_version is None or h.applied_version <= wm:
@@ -874,7 +998,7 @@ def _apply_watermark_filter(
 def _apply_graph_watermark_filter(
     graph_result: Any,
     per_source_watermark: dict[str, int],
-) -> Any:
+) -> tuple[Any, bool]:
     """Remove graph-ahead nodes (and their edges) from a traversal result.
 
     v10-AP2 graph-anchor pin: an ``EntityNodeView`` node whose ``version``
@@ -883,23 +1007,36 @@ def _apply_graph_watermark_filter(
     as the vector evidence.  This closes the one-directional pin: without
     this filter, Neo4j@v10 nodes would compose with Qdrant@v7 evidence.
 
+    v11-AP2: instead of raising ``ValueError`` when the seed is graph-ahead
+    (which was caught by a too-wide ``except`` that also masked genuine
+    ``traverse()`` errors), this function returns an explicit
+    ``(filtered_result, seed_excluded: bool)`` tuple.  ``seed_excluded=True``
+    means the anchor seed's version exceeded the watermark — the caller
+    (``_run_anchor_stage``) maps this to ``anchor_hit=False`` deterministically.
+
+    v11-AP5: after pruning ahead nodes/edges, a BFS from the seed over the
+    surviving edges re-derives reachability.  Nodes reachable ONLY through
+    excluded edges (phantom paths) are removed from ``graph_result.related``
+    and their stale depths do not feed graph-affinity scoring.
+
     Rules:
     - Seed node version-ceiling is checked; if the seed is graph-ahead,
-      it is treated as a miss (the anchor stage caller checks ``seed.name
-      not in valid_entity_names`` and returns anchor_hit=False).  We signal
-      this by clearing the seed's version to ``None`` — BUT we do NOT
-      remove the seed object, because the caller's null-check is on name.
-      Instead we mark the seed as excluded via a sentinel so the anchor
-      stage can detect it.  Simpler approach: raise a ValueError here, but
-      that would be swallowed as an entity_not_found miss, which IS the
-      correct behaviour — so we do that.
+      returns ``(graph_result, True)`` — caller treats as anchor-miss.
     - Related nodes whose version exceeds the watermark are removed.
     - Edges between removed nodes are pruned.
     - Nodes with ``version is None`` pass through (no ceiling info).
     - Sources not in the watermark map pass through (no ceiling for them).
+    - After pruning, BFS reachability is recomputed from the seed over
+      surviving edges; unreachable nodes are dropped.
 
-    Returns the modified ``graph_result`` (mutated in-place for efficiency;
-    the caller owns the object after traverse() returns).
+    Returns
+    -------
+    ``(filtered_graph_result, seed_excluded)``
+        - ``filtered_graph_result``: the traversal result with ahead nodes /
+          edges / unreachable nodes removed (mutated in-place for efficiency;
+          the caller owns the object after ``traverse()`` returns).
+        - ``seed_excluded``: ``True`` when the seed node itself was
+          graph-ahead (caller should treat as anchor-miss).
     """
     excluded_names: set[str] = set()
 
@@ -909,12 +1046,8 @@ def _apply_graph_watermark_filter(
     if seed_src in per_source_watermark and seed.version is not None:
         wm = per_source_watermark[seed_src]
         if seed.version > wm:
-            # Seed is graph-ahead: treat as traversal miss by raising ValueError.
-            # This is caught by _run_anchor_stage and mapped to anchor_hit=False.
-            raise ValueError(
-                f"graph_anchor_ahead_of_watermark: seed '{seed.name}' "
-                f"version={seed.version} > watermark={wm} for source {seed_src}"
-            )
+            # v11-AP2: return explicit signal instead of raising ValueError.
+            return graph_result, True
 
     # Filter related nodes.
     kept_related = []
@@ -935,6 +1068,59 @@ def _apply_graph_watermark_filter(
             for e in graph_result.edges
             if e.from_entity not in excluded_names and e.to_entity not in excluded_names
         ]
+
+        # v11-AP5: recompute reachability from seed over surviving edges via BFS.
+        # Only needed when nodes were actually excluded — if nothing was excluded, the
+        # reachability set is identical to what traverse() computed.
+        # Nodes reachable only through excluded edges are phantom paths — drop them.
+        graph_result = _recompute_reachability(graph_result)
+
+    return graph_result, False
+
+
+def _recompute_reachability(graph_result: Any) -> Any:
+    """BFS from seed over surviving edges; drop unreachable related nodes.
+
+    v11-AP5: after ``_apply_graph_watermark_filter`` excludes ahead
+    nodes/edges, some related nodes may no longer be reachable from the
+    seed.  Their stale depth values would incorrectly feed graph-affinity
+    scoring.  This function re-derives the reachable set and prunes
+    orphaned nodes.
+
+    The seed node is always reachable (depth 0) and is never removed.
+    Related nodes reachable from the seed through surviving edges are kept;
+    those no longer reachable are dropped.
+
+    Depth reassignment: we do NOT reassign depths here — the surviving nodes
+    were already pinned to their original BFS depths by ``traverse()``.  The
+    important invariant is that nodes with phantom paths (only reachable via
+    excluded edges) are REMOVED entirely rather than getting a stale depth.
+    """
+    if not graph_result.related and not graph_result.edges:
+        return graph_result
+
+    seed_name = graph_result.seed.name
+
+    # Build adjacency list from surviving edges (undirected for reachability).
+    adjacency: dict[str, set[str]] = {}
+    for edge in graph_result.edges:
+        adjacency.setdefault(edge.from_entity, set()).add(edge.to_entity)
+        adjacency.setdefault(edge.to_entity, set()).add(edge.from_entity)
+
+    # BFS from seed.
+    reachable: set[str] = {seed_name}
+    frontier = [seed_name]
+    while frontier:
+        next_frontier = []
+        for node_name in frontier:
+            for neighbour in adjacency.get(node_name, set()):
+                if neighbour not in reachable:
+                    reachable.add(neighbour)
+                    next_frontier.append(neighbour)
+        frontier = next_frontier
+
+    # Keep only related nodes that are reachable from the seed.
+    graph_result.related = [n for n in graph_result.related if n.name in reachable]
 
     return graph_result
 
@@ -1151,4 +1337,5 @@ __all__ = [
     "GraphRAGComposer",
     "_apply_graph_watermark_filter",
     "_apply_watermark_filter",
+    "_recompute_reachability",
 ]
