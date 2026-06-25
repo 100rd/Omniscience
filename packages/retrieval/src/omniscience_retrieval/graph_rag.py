@@ -13,6 +13,23 @@ point that composes a ``GraphStore`` (Neo4j) and a ``VectorStore``
 3. **Merge stage**: blend the vector score with a graph-affinity bonus
    that decays with traversal depth, then slice to ``request.top_k``.
 
+v10-AP1 — per-source watermark
+-------------------------------
+``_apply_watermark_filter`` now receives a ``dict[str, int]`` mapping
+each source_id to its own safe version ceiling.  A hit from source A is
+dropped only when ``hit.applied_version > per_source_watermark[A]``.
+A cold source B (watermark 0) no longer blacks out hits from healthy
+source A in the same workspace.
+
+v10-AP2 — version-aware graph-anchor pin
+-----------------------------------------
+``_run_anchor_stage`` receives the per-source watermark and post-filters
+traversed ``EntityNodeView`` nodes whose ``version`` exceeds their
+source's watermark before they influence candidate selection or scoring.
+Edges between excluded nodes are also removed.  This closes the
+one-directional pin: the graph view is now pinned to the same per-source
+epoch as the vector evidence.
+
 Backwards-compatibility
 -----------------------
 
@@ -380,9 +397,9 @@ class GraphRAGComposer:
         ``degraded_subsystems`` lists any stores that lagged behind the
         Postgres SoT watermark at query time; ``staleness_seconds``
         quantifies that lag so callers can decide whether to retry.
-        ``pinned_watermark`` is the minimum version across all three
-        stores — all returned hits satisfy
-        ``applied_version <= pinned_watermark`` (AP3 consistent-stale PIN).
+        ``pinned_watermark`` is the global min version across all three
+        stores — for per-source filtering see ``per_source_watermark``
+        used internally (v10-AP1/AP2).
         """
         # ``request.as_of`` is the SearchRequest field; the keyword
         # ``as_of`` wins when both are supplied so server-side overrides
@@ -397,22 +414,27 @@ class GraphRAGComposer:
         _COMPOSED_QUERIES_TOTAL.labels(path="graphrag").inc()
         start = time.monotonic()
 
-        # AP3: capture convergence signals including min_watermark for the PIN.
+        # AP3 / v10-AP1: capture convergence signals including per-source watermark.
         # Do NOT discard on timeout — the watermark is what pins the read path.
         convergence_degraded: list[str] = []
         convergence_staleness: float | None = None
         min_watermark: int | None = None
+        per_source_watermark: dict[str, int] = {}
         if self._global_reconciler is not None:
             (
                 convergence_degraded,
                 convergence_staleness,
                 min_watermark,
+                per_source_watermark,
             ) = await self._global_reconciler.wait_for_convergence(workspace_id)
 
+        # v10-AP2: pass per-source watermark into anchor stage so graph-ahead
+        # nodes/edges are excluded before they influence candidate selection.
         anchor = await self._run_anchor_stage(
             request=request,
             workspace_id=workspace_id,
             as_of=effective,
+            per_source_watermark=per_source_watermark,
         )
         vector_result = await self._run_vector_stage(
             request=request,
@@ -425,7 +447,7 @@ class GraphRAGComposer:
             vector_result=vector_result,
             anchor=anchor,
             as_of=effective,
-            min_watermark=min_watermark,
+            per_source_watermark=per_source_watermark,
         )
 
         valid_hits = await self._validate_hits(merged.hits, workspace_id)
@@ -491,8 +513,17 @@ class GraphRAGComposer:
         request: SearchRequest,
         workspace_id: uuid.UUID,
         as_of: datetime | None = None,
+        per_source_watermark: dict[str, int] | None = None,
     ) -> _AnchorStageResult:
-        """Resolve the anchor entity (when supplied) and collect candidates."""
+        """Resolve the anchor entity (when supplied) and collect candidates.
+
+        v10-AP2: traversed nodes whose ``version`` exceeds their source's
+        watermark are excluded from the result before candidate collection.
+        This pins the graph VIEW to the same per-source epoch as the vector
+        evidence — closing the one-directional pin gap.  Edges connecting
+        excluded nodes are also removed.  A node with ``version is None``
+        passes through (no version info → no ceiling applied).
+        """
         stage_start = time.monotonic()
         anchor_name = _extract_anchor(request)
 
@@ -519,6 +550,13 @@ class GraphRAGComposer:
                 as_of=as_of,
                 max_depth=MAX_ANCHOR_DEPTH,
             )
+
+            # v10-AP2: post-filter graph-ahead nodes before any candidate logic.
+            # A node whose version > per_source_watermark[its source] must be
+            # excluded so the graph VIEW is consistent with the watermark epoch.
+            if per_source_watermark:
+                graph_result = _apply_graph_watermark_filter(graph_result, per_source_watermark)
+
             # Validate retrieved entities in Postgres
             all_entity_names = [graph_result.seed.name] + [n.name for n in graph_result.related]
             valid_entity_names = await self._validate_entities(all_entity_names, workspace_id)
@@ -612,7 +650,7 @@ class GraphRAGComposer:
         vector_result: SearchResult,
         anchor: _AnchorStageResult,
         as_of: datetime | None = None,
-        min_watermark: int | None = None,
+        per_source_watermark: dict[str, int] | None = None,
     ) -> SearchResult:
         from omniscience_retrieval.probabilistic_scoring import (
             calculate_probabilistic_confidence,
@@ -621,10 +659,10 @@ class GraphRAGComposer:
 
         stage_start = time.monotonic()
 
-        # AP3 consistent-stale PIN: drop any hit whose applied_version exceeds
-        # the min_watermark so the composed result never contains evidence from
-        # an epoch that some stores have not yet applied.
-        filtered_hits = _apply_watermark_filter(vector_result.hits, min_watermark)
+        # v10-AP1 consistent-stale PIN: drop a hit only when its
+        # applied_version exceeds the watermark of ITS OWN source.
+        # A cold/lagging source B does NOT decimate hits from healthy source A.
+        filtered_hits = _apply_watermark_filter(vector_result.hits, per_source_watermark)
 
         # Unpack anchor results for O(1) lookup
         if anchor.candidate_source_ids:
@@ -792,28 +830,113 @@ class GraphRAGComposer:
 
 def _apply_watermark_filter(
     hits: list[SearchHit],
-    min_watermark: int | None,
+    per_source_watermark: dict[str, int] | None,
 ) -> list[SearchHit]:
-    """Drop hits whose ``applied_version`` exceeds ``min_watermark``.
+    """Drop hits whose ``applied_version`` exceeds their own source's watermark.
 
-    AP3 consistent-stale PIN: ensures no composed result contains evidence
-    from a future epoch that some stores have not yet applied.
+    v10-AP1 per-source PIN: each hit is evaluated against
+    ``per_source_watermark[hit.source.id]``, not a single global minimum.
+    A cold or lagging source B (watermark 0) does NOT decimate hits from
+    healthy source A — only B's own future-epoch hits are dropped.
 
     Rules:
-    - When ``min_watermark is None``: no filter applied — all hits pass.
-      This handles cold stores (no version info) and the no-reconciler path.
-    - When ``min_watermark == 0``: all hits with a non-None ``applied_version``
-      are dropped (empty result), because even version 1 is "future" relative
-      to a cold store.  Hits with ``applied_version is None`` pass through.
-    - Otherwise: keep hits where ``applied_version is None`` or
-      ``applied_version <= min_watermark``.
+    - When ``per_source_watermark is None`` or empty: no filter applied —
+      all hits pass.  This handles cold stores (no version info) and the
+      no-reconciler path.
+    - For a hit whose source has no entry in the map: pass through (we have
+      no ceiling for it — don't blackout).
+    - For a hit whose source IS in the map:
+      - watermark == 0: drop if ``applied_version`` is not None and >= 1
+        (version 0 means nothing applied for this source yet).
+      - Otherwise: drop if ``applied_version > watermark``.
+      - Hits with ``applied_version is None``: always pass through.
 
     INVARIANT: after this filter, no retained hit has
-    ``applied_version > min_watermark`` (when watermark is not None).
+    ``applied_version > per_source_watermark[hit.source.id]``
+    for sources present in the map.
     """
-    if min_watermark is None:
+    if not per_source_watermark:
         return hits
-    return [h for h in hits if h.applied_version is None or h.applied_version <= min_watermark]
+
+    result: list[SearchHit] = []
+    for h in hits:
+        src_key = str(h.source.id)
+        if src_key not in per_source_watermark:
+            # No watermark entry for this source → pass through (don't blackout).
+            result.append(h)
+            continue
+        wm = per_source_watermark[src_key]
+        if h.applied_version is None or h.applied_version <= wm:
+            result.append(h)
+    return result
+
+
+def _apply_graph_watermark_filter(
+    graph_result: Any,
+    per_source_watermark: dict[str, int],
+) -> Any:
+    """Remove graph-ahead nodes (and their edges) from a traversal result.
+
+    v10-AP2 graph-anchor pin: an ``EntityNodeView`` node whose ``version``
+    exceeds ``per_source_watermark[node.source]`` is excluded from the
+    candidate set so the graph VIEW is pinned to the same per-source epoch
+    as the vector evidence.  This closes the one-directional pin: without
+    this filter, Neo4j@v10 nodes would compose with Qdrant@v7 evidence.
+
+    Rules:
+    - Seed node version-ceiling is checked; if the seed is graph-ahead,
+      it is treated as a miss (the anchor stage caller checks ``seed.name
+      not in valid_entity_names`` and returns anchor_hit=False).  We signal
+      this by clearing the seed's version to ``None`` — BUT we do NOT
+      remove the seed object, because the caller's null-check is on name.
+      Instead we mark the seed as excluded via a sentinel so the anchor
+      stage can detect it.  Simpler approach: raise a ValueError here, but
+      that would be swallowed as an entity_not_found miss, which IS the
+      correct behaviour — so we do that.
+    - Related nodes whose version exceeds the watermark are removed.
+    - Edges between removed nodes are pruned.
+    - Nodes with ``version is None`` pass through (no ceiling info).
+    - Sources not in the watermark map pass through (no ceiling for them).
+
+    Returns the modified ``graph_result`` (mutated in-place for efficiency;
+    the caller owns the object after traverse() returns).
+    """
+    excluded_names: set[str] = set()
+
+    # Check seed node.
+    seed = graph_result.seed
+    seed_src = str(seed.source)
+    if seed_src in per_source_watermark and seed.version is not None:
+        wm = per_source_watermark[seed_src]
+        if seed.version > wm:
+            # Seed is graph-ahead: treat as traversal miss by raising ValueError.
+            # This is caught by _run_anchor_stage and mapped to anchor_hit=False.
+            raise ValueError(
+                f"graph_anchor_ahead_of_watermark: seed '{seed.name}' "
+                f"version={seed.version} > watermark={wm} for source {seed_src}"
+            )
+
+    # Filter related nodes.
+    kept_related = []
+    for node in graph_result.related:
+        node_src = str(node.source)
+        if node_src in per_source_watermark and node.version is not None:
+            wm = per_source_watermark[node_src]
+            if node.version > wm:
+                excluded_names.add(node.name)
+                continue
+        kept_related.append(node)
+    graph_result.related = kept_related
+
+    # Prune edges that connect excluded nodes.
+    if excluded_names:
+        graph_result.edges = [
+            e
+            for e in graph_result.edges
+            if e.from_entity not in excluded_names and e.to_entity not in excluded_names
+        ]
+
+    return graph_result
 
 
 def _extract_anchor(request: SearchRequest) -> str:
@@ -992,11 +1115,13 @@ def _stamp_envelope(
     hint so callers can distinguish "empty because no history yet"
     from "empty because nothing matched".
 
-    AP3 contract: ``degraded_subsystems`` and ``staleness_seconds`` are
-    set when any store lagged behind the Postgres SoT watermark at query
+    AP3 / v10-AP1 contract: ``degraded_subsystems`` and ``staleness_seconds``
+    are set when any store lagged behind the Postgres SoT watermark at query
     time, regardless of whether ``degraded`` is true.  ``pinned_watermark``
-    is the min version across all stores — it is stamped here regardless
-    of convergence state so callers always know the epoch of the response.
+    is the global min version across all stores — it is stamped here
+    regardless of convergence state so callers always know the epoch of
+    the response.  Per-source filtering is applied internally via
+    ``per_source_watermark``; the scalar is for observability only.
     Callers MUST treat a non-empty ``degraded_subsystems`` as a staleness
     signal and may choose to retry or surface a freshness warning.
     """
@@ -1024,5 +1149,6 @@ __all__ = [
     "MAX_ANCHOR_DEPTH",
     "MERGE_ALPHA",
     "GraphRAGComposer",
+    "_apply_graph_watermark_filter",
     "_apply_watermark_filter",
 ]

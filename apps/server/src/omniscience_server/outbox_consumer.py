@@ -279,6 +279,14 @@ class OutboxConsumerWorker:
                     )
 
                     # 1. Update Neo4j
+                    # v10-AP3: if this is a reconciler backfill, bypass the
+                    # coarse source-checkpoint skip so the per-entity CAS can
+                    # still heal a node that is individually stale even when
+                    # the source-level checkpoint is already at or beyond the
+                    # incoming version.  The per-entity CAS monotonic guard
+                    # (incoming_version > node.version) remains active, so
+                    # a stale backfill cannot regress a node correctly written
+                    # at a higher version.
                     entity_upsert = EntityUpsert(
                         id=entity_id,
                         source_id=uuid.UUID(event.source_id),
@@ -288,6 +296,7 @@ class OutboxConsumerWorker:
                         chunk_id=None,
                         metadata=event.metadata,
                         version=event.version,
+                        bypass_source_checkpoint=event.is_backfill,
                     )
                     await self._graph_store.upsert_entity(
                         entity=entity_upsert,
@@ -493,12 +502,14 @@ class OutboxConsumerWorker:
                     )
 
                     # 1. Update Neo4j
+                    # v10-AP3: edge backfill also bypasses source-checkpoint skip.
                     edge_upsert = EdgeUpsert(
                         source_entity_id=source_entity_id,
                         target_entity_id=target_entity_id,
                         edge_type=event.edge_type,
                         metadata=event.metadata,
                         version=event.version,
+                        bypass_source_checkpoint=event.is_backfill,
                     )
                     await self._graph_store.upsert_edge(
                         edge=edge_upsert,

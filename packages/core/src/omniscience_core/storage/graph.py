@@ -114,6 +114,14 @@ class EntityUpsert:
     forced_replay: bool = False
     # AP2 — per-entity content hash for cross-store anti-entropy.
     content_hash: str | None = None
+    # v10-AP3 — bypass the coarse source-checkpoint skip so the per-entity
+    # CAS can still heal a node whose individual version is behind the SoT
+    # version, even when the source checkpoint is already at or ahead of the
+    # incoming version.  Safer than forced_replay: the per-entity monotonic
+    # CAS guard (incoming_version > node.version) is preserved, so a stale
+    # backfill cannot regress a node that was correctly written at a higher
+    # version.
+    bypass_source_checkpoint: bool = False
 
 
 @dataclass(slots=True)
@@ -127,6 +135,8 @@ class EdgeUpsert:
     version: int | None = None
     epoch: int | None = None
     forced_replay: bool = False
+    # v10-AP3 — same bypass-source-checkpoint semantics as EntityUpsert.
+    bypass_source_checkpoint: bool = False
 
 
 # ---------------------------------------------------------------------------

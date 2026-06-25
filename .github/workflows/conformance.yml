@@ -11,6 +11,11 @@ name: Conformance Gates
 # AP4: confidence decimal suppression (Batch D)
 # AP5: DR-drill rebuild-from-SoT + hash-assert (Batch E, Postgres service)
 # AP7: arch invariants — single-writer + MCP retrieval-only (Batch F)
+#
+# conformance-live (v10-AP6 fix, Batch C): single shared container job that
+# runs all P0 behavioral assertions against REAL Neo4j/Qdrant/NATS.
+# This is the authoritative gate — mock-only jobs are a fast first signal
+# but the live job is what catches real Cypher/consumer/store bugs.
 
 on:
   pull_request:
@@ -142,3 +147,132 @@ jobs:
           python-version: "3.12"
       - run: uv sync --frozen
       - run: uv run pytest tests/conformance/test_ap7_arch_invariants.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # LIVE behavioral conformance gate (v10-AP6 fix)
+  #
+  # Single shared container job running ALL P0 behavioral assertions against
+  # REAL Neo4j / Qdrant / NATS service containers — the same config as
+  # ci.yml's test job.  This is the authoritative gate: mock-only jobs above
+  # are a fast first signal, but this job exercises the real Cypher/consumer
+  # path and will catch exactly the class of bug that killed AP2 heal
+  # (consumer→store path was dead but mock gate was green).
+  #
+  # Tests selected:
+  #   AP1 (per-entity CAS): tests/test_ap1_single_writer.py::test_live_cas_*
+  #     - test_live_cas_stale_write_does_not_regress_entity_version (Neo4j live)
+  #     - test_live_ap2_backfill_heals_stale_node_bypassing_source_checkpoint (via AP2 path)
+  #   AP2 (backfill heal): tests/integration/test_ap2_backfill_heal.py
+  #     - test_live_ap2_backfill_heals_stale_node_bypassing_source_checkpoint
+  #     - test_live_ap2_backfill_does_not_regress_node_ahead_of_backfill
+  #   AP3 (per-source watermark + graph-anchor pin):
+  #     tests/integration/test_ap3_live_conformance.py
+  #     - test_live_ap3_v10_ap1_cold_source_does_not_blackout_healthy_source
+  #     - test_live_ap3_v10_ap2_graph_ahead_anchor_treated_as_miss
+  #
+  # NATS note: GitHub Actions services: does not support passing CMD arguments to
+  # override a container's default command, so NATS is started as a background
+  # step instead of a service container (same pattern as ci.yml).
+  # ---------------------------------------------------------------------------
+  conformance-live:
+    name: "LIVE behavioral P0 assertions (AP1+AP2+AP3 real Neo4j/Qdrant/NATS)"
+    runs-on: ubuntu-latest
+
+    services:
+      neo4j:
+        # Version matches docker-compose.yml and ci.yml neo4j service image.
+        image: neo4j:5.19-community
+        env:
+          NEO4J_AUTH: neo4j/ci_test_password
+          NEO4J_server_memory_heap_initial__size: 512m
+          NEO4J_server_memory_heap_max__size: 1G
+          NEO4J_server_memory_pagecache_size: 256m
+        ports:
+          - 7687:7687
+          - 7474:7474
+        options: >-
+          --health-cmd "wget -q -O - http://localhost:7474 > /dev/null"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 45s
+
+      qdrant:
+        # Version matches docker-compose.yml and ci.yml qdrant service image.
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
+          - 6334:6334
+        options: >-
+          --health-cmd "bash -c '</dev/tcp/localhost/6333'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 20s
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+
+      # NATS requires --jetstream which cannot be passed via service container
+      # CMD override in GitHub Actions — start it as a background docker step
+      # (identical pattern to ci.yml test job).
+      - name: Start NATS with JetStream
+        run: |
+          docker run -d \
+            --name nats-ci \
+            --network host \
+            nats:2.10-alpine \
+            --jetstream \
+            --store_dir /tmp/nats-data \
+            --http_port 8222
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8222/healthz && echo "NATS ready" && break
+            echo "Waiting for NATS... ($i/20)"
+            sleep 3
+            if [ "$i" -eq 20 ]; then
+              echo "NATS did not become ready in time"; docker logs nats-ci; exit 1
+            fi
+          done
+
+      # Run all live P0 behavioral assertions:
+      #   - AP1 live CAS (tests/test_ap1_single_writer.py, test_live_cas_* marker)
+      #   - AP2 backfill heal (tests/integration/test_ap2_backfill_heal.py)
+      #   - AP3 multi-source watermark + graph-anchor pin
+      #     (tests/integration/test_ap3_live_conformance.py)
+      - name: Run live P0 behavioral assertions
+        run: |
+          uv run pytest \
+            tests/test_ap1_single_writer.py::test_live_cas_stale_write_does_not_regress_entity_version \
+            tests/integration/test_ap2_backfill_heal.py \
+            tests/integration/test_ap3_live_conformance.py \
+            -v --tb=short
+        env:
+          # --- Neo4j ---
+          # Env var names derived from pydantic-settings field names in config.py
+          # (case-insensitive). Must match NEO4J_AUTH on the service container.
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: ci_test_password
+
+          # --- Qdrant ---
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+
+          # --- NATS ---
+          NATS_URL: nats://localhost:4222
+
+          # --- Contract test gate flags ---
+          # Unlock live Neo4j contract tests (test_live_cas_*, AP2 heal, etc.)
+          OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS: "1"
+          # Unlock live Qdrant contract tests (AP3 multi-source watermark)
+          OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS: "1"
+          # Unlock E2E ingestion tests (AP3 full round-trip assertions)
+          OMNISCIENCE_RUN_E2E_INGESTION: "1"

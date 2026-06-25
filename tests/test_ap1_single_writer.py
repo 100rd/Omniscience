@@ -607,3 +607,167 @@ async def test_live_cas_stale_write_does_not_regress_entity_version() -> None:
         )
     finally:
         await store.close()
+
+
+# ---------------------------------------------------------------------------
+# v10-AP3 unit tests: consumer sets bypass_source_checkpoint on backfill
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_consumer_sets_bypass_source_checkpoint_on_backfill_entity() -> None:
+    """v10-AP3 unit: OutboxConsumerWorker builds EntityUpsert with
+    bypass_source_checkpoint=True when event.is_backfill=True.
+
+    This is the unit-level regression guard that confirms the fix in
+    outbox_consumer.py is in place.  The live end-to-end confirmation lives in
+    tests/integration/test_ap2_backfill_heal.py.
+    """
+    from omniscience_core.queue.messages import EntityUpsertEvent
+    from omniscience_core.storage.graph import EntityUpsert
+
+    nats_conn = MagicMock()
+    nats_conn.jetstream = AsyncMock()
+
+    # Capture the EntityUpsert passed to upsert_entity
+    captured: list[EntityUpsert] = []
+
+    graph_store = AsyncMock(spec=GraphStore)
+
+    async def _capture_upsert(**kwargs: Any) -> None:
+        captured.append(kwargs["entity"])
+
+    graph_store.upsert_entity = _capture_upsert
+
+    vector_store = AsyncMock(spec=VectorStore)
+    vector_store.upsert_chunks = AsyncMock(return_value=None)
+
+    embedding_provider = AsyncMock(spec=EmbeddingProvider)
+    embedding_provider.embed = AsyncMock(return_value=[[0.1, 0.2]])
+    embedding_provider.model_name = "test-model"
+    embedding_provider.provider_name = "test-provider"
+
+    consumer = OutboxConsumerWorker(
+        nats_conn=nats_conn,
+        graph_store=graph_store,
+        vector_store=vector_store,
+        embedding_provider=embedding_provider,
+    )
+
+    ws_id = str(uuid.uuid4())
+    ent_id = str(uuid.uuid4())
+    src_id = str(uuid.uuid4())
+
+    # --- backfill=True message ---
+    backfill_msg = AsyncMock()
+    backfill_msg.payload = EntityUpsertEvent(
+        workspace_id=ws_id,
+        id=ent_id,
+        source_id=src_id,
+        entity_type="service",
+        name="svc.ap3-unit",
+        display_name="svc.ap3-unit",
+        metadata={},
+        version=5,
+        is_backfill=True,
+    )
+    backfill_msg.subject = "outbox.entity.upsert"
+
+    async def fake_entity_iter_backfill() -> Any:
+        yield backfill_msg
+
+    consumer._entity_consumer = AsyncMock()
+    consumer._entity_consumer.__aiter__ = lambda self: fake_entity_iter_backfill()
+    consumer._dlq_producer = AsyncMock()
+
+    await consumer._consume_entities()
+
+    assert len(captured) == 1, f"Expected 1 EntityUpsert, got {len(captured)}"
+    upsert = captured[0]
+    got = upsert.bypass_source_checkpoint
+    assert got is True, (
+        "v10-AP3 regression: consumer did NOT set bypass_source_checkpoint=True "
+        f"on backfill EntityUpsert; got bypass_source_checkpoint={got}. "
+        "Fix: set bypass_source_checkpoint=event.is_backfill in"
+        " outbox_consumer.py _consume_entities()."
+    )
+    assert upsert.forced_replay is False, (
+        "Consumer must NOT set forced_replay=True on backfill; "
+        "bypass_source_checkpoint is the safer mechanism (per-entity CAS is preserved)."
+    )
+    assert upsert.version == 5
+
+
+@pytest.mark.asyncio
+async def test_consumer_bypass_source_checkpoint_false_on_non_backfill_entity() -> None:
+    """v10-AP3 unit: bypass_source_checkpoint is False for non-backfill events.
+
+    Normal (non-backfill) entity upserts must NOT bypass the source-checkpoint
+    skip — the AP1 per-entity CAS monotonic guard is the only relevant guard for
+    those, and the coarse source-checkpoint skip remains active.
+    """
+    from omniscience_core.queue.messages import EntityUpsertEvent
+    from omniscience_core.storage.graph import EntityUpsert
+
+    nats_conn = MagicMock()
+    nats_conn.jetstream = AsyncMock()
+
+    captured: list[EntityUpsert] = []
+
+    graph_store = AsyncMock(spec=GraphStore)
+
+    async def _capture_upsert(**kwargs: Any) -> None:
+        captured.append(kwargs["entity"])
+
+    graph_store.upsert_entity = _capture_upsert
+
+    vector_store = AsyncMock(spec=VectorStore)
+    vector_store.upsert_chunks = AsyncMock(return_value=None)
+
+    embedding_provider = AsyncMock(spec=EmbeddingProvider)
+    embedding_provider.embed = AsyncMock(return_value=[[0.1, 0.2]])
+    embedding_provider.model_name = "test-model"
+    embedding_provider.provider_name = "test-provider"
+
+    consumer = OutboxConsumerWorker(
+        nats_conn=nats_conn,
+        graph_store=graph_store,
+        vector_store=vector_store,
+        embedding_provider=embedding_provider,
+    )
+
+    ws_id = str(uuid.uuid4())
+    ent_id = str(uuid.uuid4())
+    src_id = str(uuid.uuid4())
+
+    # --- backfill=False message (normal ingestion) ---
+    normal_msg = AsyncMock()
+    normal_msg.payload = EntityUpsertEvent(
+        workspace_id=ws_id,
+        id=ent_id,
+        source_id=src_id,
+        entity_type="service",
+        name="svc.ap3-normal",
+        display_name="svc.ap3-normal",
+        metadata={},
+        version=3,
+        is_backfill=False,
+    )
+    normal_msg.subject = "outbox.entity.upsert"
+
+    async def fake_entity_iter_normal() -> Any:
+        yield normal_msg
+
+    consumer._entity_consumer = AsyncMock()
+    consumer._entity_consumer.__aiter__ = lambda self: fake_entity_iter_normal()
+    consumer._dlq_producer = AsyncMock()
+
+    await consumer._consume_entities()
+
+    assert len(captured) == 1
+    upsert = captured[0]
+    assert upsert.bypass_source_checkpoint is False, (
+        "Non-backfill event must NOT set bypass_source_checkpoint=True; "
+        f"got {upsert.bypass_source_checkpoint}"
+    )
+    assert upsert.forced_replay is False
