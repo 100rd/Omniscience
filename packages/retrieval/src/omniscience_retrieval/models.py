@@ -171,11 +171,14 @@ class SearchResult(BaseModel):
     that the result may be stale and should not be cached or used for
     time-sensitive decisions without a retry.
 
-    ``pinned_watermark`` is the minimum version across all three stores
-    (Postgres, Neo4j, Qdrant) at the time this response was composed.
-    All hits in this response have ``applied_version <= pinned_watermark``
-    (or ``applied_version is None``).  ``None`` means no version information
-    was available — no watermark filter was applied (AP3 consistent-stale PIN).
+    ``pinned_watermark`` is the global minimum version across all sources
+    and all three stores (Postgres, Neo4j, Qdrant) at the time this
+    response was composed — for observability only.  Per-hit filtering is
+    applied PER-SOURCE internally (v10-AP1): each hit is filtered against
+    the watermark of its own source, so a cold/lagging source B does NOT
+    decimate hits from healthy source A.  The scalar here is the worst-case
+    floor.  ``None`` means no version information was available — no
+    watermark filter was applied (AP3 / v10-AP1 consistent-stale PIN).
     """
 
     hits: list[SearchHit]
@@ -219,10 +222,11 @@ class SearchResult(BaseModel):
     pinned_watermark: int | None = Field(
         default=None,
         description=(
-            "Minimum version across Postgres, Neo4j, and Qdrant at composition time. "
-            "All hits have applied_version <= pinned_watermark (or applied_version is None). "
+            "Global minimum version across all sources/stores at composition time "
+            "(observability scalar).  Per-hit filtering uses per-source watermarks "
+            "internally (v10-AP1) — a cold source does not blackout healthy sources. "
             "None when no version information was available — no watermark filter applied. "
-            "AP3 consistent-stale PIN."
+            "AP3 / v10-AP1 consistent-stale PIN."
         ),
     )
     snapshot_id: str | None = Field(
