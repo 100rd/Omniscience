@@ -106,6 +106,72 @@ def _make_qdrant_config() -> Any:
     return QdrantConfig(host=host, http_port=http_port, grpc_port=grpc_port, prefer_grpc=False)
 
 
+async def _ensure_vector_type(engine: Any) -> None:
+    """Ensure the ``vector`` PostgreSQL type is available before ``create_all``.
+
+    Mirrors the canonical setup in tests/test_store_contract.py lines 201-203:
+
+        await conn.execute(sa_text("CREATE EXTENSION IF NOT EXISTS vector"))
+        await conn.run_sync(Base.metadata.create_all)
+
+    The ``Chunk`` SQLAlchemy model contains a nullable ``embedding`` column
+    typed as ``SqlVector`` (emits ``vector`` DDL).  When ``create_all`` runs
+    on a **fresh** Postgres (no prior ``alembic upgrade head``), it tries to
+    CREATE the ``chunks`` table with ``embedding vector`` — which fails if the
+    ``vector`` type is not registered.
+
+    Two cases:
+    1. pgvector-capable Postgres (``pgvector/pgvector:pg16`` image, or a DB
+       where alembic already ran and the type still exists): ``CREATE EXTENSION
+       IF NOT EXISTS vector`` succeeds and ``create_all`` works normally.
+    2. Plain ``postgres:16-alpine`` (no pgvector binary, as in ci.yml's ``test``
+       job): the extension CREATE fails.  We fall back to registering a domain
+       type ``vector AS TEXT`` so ``create_all`` can emit the nullable column
+       without the real extension.  The column is not accessed by these
+       reconciler tests (reconciler reads Source/Document rows, not embeddings).
+
+    Both DDL statements are issued under AUTOCOMMIT so a failure in the first
+    statement does NOT abort the surrounding connection and leave it in an
+    error state (which would break every subsequent statement in the same txn).
+
+    If neither the extension nor the domain can be created (e.g., missing
+    privilege), ``pytest.skip`` is raised so the CI job surfaces a clean SKIP
+    rather than an error.
+    """
+    from sqlalchemy import text
+
+    # Use AUTOCOMMIT so a failed CREATE EXTENSION does not abort the
+    # connection-level transaction and leave it in an error state.
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+
+        # Try to load the real pgvector extension first.
+        ext_err: Exception | None = None
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            return  # extension available; create_all will work
+        except Exception as exc:
+            ext_err = exc  # binary absent — try domain fallback below
+
+        # Suppress ext_err: it is expected on postgres:16-alpine (no binary).
+        # Record it for the skip message in case the domain also fails.
+        _ = ext_err
+
+        # Check if a "vector" type already exists (e.g., prior test run on
+        # the same DB left the domain in place).
+        row = await conn.execute(text("SELECT 1 FROM pg_type WHERE typname = 'vector'"))
+        if row.fetchone():
+            return  # type already registered; create_all will work
+
+        # Register a domain alias so create_all can emit `embedding vector`.
+        try:
+            await conn.execute(text("CREATE DOMAIN vector AS TEXT"))
+        except Exception as domain_err:
+            pytest.skip(
+                f"pgvector extension unavailable and cannot register vector domain: {domain_err}"
+            )
+
+
 async def _make_session_factory(database_url: str) -> Any:
     """Build a real async_sessionmaker against the live Postgres.
 
@@ -125,9 +191,12 @@ async def _make_session_factory(database_url: str) -> Any:
         pool_pre_ping=True,
     )
 
-    # Bootstrap schema so tests pass in ANY postgres job (with or without
-    # a prior "alembic upgrade head" step).  create_all is idempotent
-    # (IF NOT EXISTS), so it is harmless when the schema already exists.
+    # Step 1: ensure the "vector" type exists so create_all can emit the
+    # nullable embedding column on the chunks table without erroring.
+    await _ensure_vector_type(engine)
+
+    # Step 2: bootstrap schema (idempotent IF NOT EXISTS — no-op when
+    # alembic has already run or a prior test invocation created the tables).
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
