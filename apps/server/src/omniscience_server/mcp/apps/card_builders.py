@@ -24,6 +24,12 @@ Critical invariants
 4. **Rendering is deterministic.**  Two identical inner responses
    produce byte-identical cards; rank order is stable; no datetime
    read goes through ``utcnow``.
+5. **AP4 compatibility.**  When ``resolution_confidence`` is ``None``
+   (uncalibrated — AP4 contract), the card builder uses 0.0 as the
+   numeric floor for scoring bars and reads the ``confidence_band``
+   field when available to set ``below_trust_threshold`` correctly.
+   The raw scoring heuristic that produced the ``confidence_band`` is
+   used as-is; the card still renders rather than failing silently.
 """
 
 from __future__ import annotations
@@ -47,6 +53,38 @@ from omniscience_server.mcp.apps.card_schemas import (
 #: Maximum number of ranked candidate rows the card carries.  Pinned
 #: per the issue spec ("top-3 ranked candidates").
 MAX_CANDIDATES: int = 3
+
+#: Mapping from AP4 ``confidence_band`` string values to a representative
+#: numeric mid-point used when ``resolution_confidence`` is suppressed
+#: (i.e. when ``calibrated=False``).  These values are **not** displayed
+#: as calibrated decimals; they drive only the bar bucket calculation so
+#: the card renders meaningful relative ranks between candidates.
+_BAND_MIDPOINTS: dict[str, float] = {
+    "high": 0.75,
+    "medium": 0.40,
+    "low": 0.15,
+}
+
+
+def _resolve_confidence(legacy: dict[str, Any]) -> float:
+    """Return a usable float confidence value from an AP4-aware response.
+
+    AP4 contract:
+    - ``calibrated=True``  → ``resolution_confidence`` is a float in [0, 1].
+    - ``calibrated=False`` → ``resolution_confidence`` is ``None``;
+      ``confidence_band`` carries "low" | "medium" | "high".
+
+    When ``resolution_confidence`` is None we fall back to the band midpoint
+    so the card builder always has a valid numeric score to work with.
+    """
+    raw = legacy.get("resolution_confidence")
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    # AP4 uncalibrated path: use the band midpoint.
+    band = legacy.get("confidence_band")
+    if isinstance(band, str) and band in _BAND_MIDPOINTS:
+        return _BAND_MIDPOINTS[band]
+    return 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +126,8 @@ def build_resolve_incident_card(legacy: dict[str, Any]) -> ResolveIncidentCard:
             f"got {type(alert_block).__name__}"
         )
 
-    confidence_value = float(legacy.get("resolution_confidence", 0.0))
+    # AP4-aware: resolution_confidence may be None when calibrated=False.
+    confidence_value = _resolve_confidence(legacy)
     meta_block = legacy.get("meta") or {}
     below_threshold = bool(meta_block.get("below_trust_threshold", False))
 

@@ -44,10 +44,12 @@ _SRC_A = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000001")
 def _make_settings(
     tick_seconds: int = 3600,
     orphan_limit: int = 200,
+    reemit_tick_cap: int = 1000,
 ) -> MagicMock:
     s = MagicMock()
     s.reconcile_tick_seconds = tick_seconds
     s.reconcile_orphan_delete_limit = orphan_limit
+    s.reemit_tick_cap = reemit_tick_cap
     return s
 
 
@@ -77,6 +79,15 @@ def _make_session_factory(
 
     update_result = MagicMock()
 
+    # AP2: _check_entity_drift and _check_edge_drift each open their own
+    # session and call session.execute(select(Entity/Edge)...) returning a
+    # result with .scalars().all() → [].  Provide empty-scalars mocks for
+    # these calls so existing run_once() tests don't break.
+    def _make_empty_scalars() -> MagicMock:
+        r = MagicMock()
+        r.scalars.return_value.all.return_value = []
+        return r
+
     session = AsyncMock()
     session.execute = AsyncMock(
         side_effect=[
@@ -84,6 +95,8 @@ def _make_session_factory(
             _make_rows(active_source_ids),  # _load_active_source_ids
             run_result,  # _mark_ingestion_run_partial SELECT
             update_result,  # _mark_ingestion_run_partial UPDATE
+            _make_empty_scalars(),  # _check_entity_drift: select(Entity)
+            _make_empty_scalars(),  # _check_edge_drift: select(Edge)
         ]
         * 10  # repeated so tests that call execute multiple times don't exhaust
     )
@@ -108,6 +121,10 @@ def _make_vector_store(
     store = AsyncMock()
     store.count_chunks_by_source = AsyncMock(return_value=chunks_by_source or {})
     store.collection_name = "omniscience"
+    # AP2 additions — return empty dicts so _check_entity_drift does not
+    # see unexpected mock objects from auto-mock.
+    store.get_entity_versions = AsyncMock(return_value={})
+    store.get_entity_content_hashes = AsyncMock(return_value={})
     # Internal Qdrant client mock used by _delete_qdrant_orphan_source
     qc = AsyncMock()
     count_result = MagicMock()
@@ -124,6 +141,12 @@ def _make_graph_store(
 ) -> AsyncMock:
     store = AsyncMock()
     store.count_entities_by_source = AsyncMock(return_value=entities_by_source or {})
+    # AP2 additions — provide sane defaults so _check_entity_drift and
+    # _check_edge_drift do not see unexpected mock objects from auto-mock.
+    store.get_entity_versions = AsyncMock(return_value={})
+    store.get_entity_content_hashes = AsyncMock(return_value={})
+    store.get_edge_versions = AsyncMock(return_value={})
+    store.end_date_source_orphans = AsyncMock(return_value=0)
     return store
 
 
@@ -362,8 +385,13 @@ async def test_neo4j_orphan_detected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_neo4j_orphan_no_deletion() -> None:
-    """Neo4j orphans must NOT trigger any Neo4j delete (deferred to retention)."""
+async def test_neo4j_orphan_active_heal() -> None:
+    """AP2: Neo4j orphans trigger active end-dating (not just detection).
+
+    The reconcile worker must call ``end_date_source_orphans`` on the graph
+    store for each orphaned source.  Hard deletion (``delete_by_source``) must
+    NOT be called — end-dating is the sanctioned path (ADR-0009 / ADR-0008 §3).
+    """
     worker, _vs, graph_store = _build_worker(
         active_source_ids=[],
         chunks_by_source={},
@@ -377,7 +405,13 @@ async def test_neo4j_orphan_no_deletion() -> None:
         mc.labels.return_value.inc = MagicMock()
         await worker.run_once()
 
-    # No mutation method should have been called on the graph store
+    # Active heal must have been called (end-dating, not deletion).
+    graph_store.end_date_source_orphans.assert_called_once()
+    call_kwargs = graph_store.end_date_source_orphans.call_args.kwargs
+    assert call_kwargs["workspace_id"] == _WS
+    assert call_kwargs["source_id"] == str(_SRC_A)
+
+    # Hard deletion must NOT be called.
     if hasattr(graph_store, "delete_by_source"):
         graph_store.delete_by_source.assert_not_called()
 
@@ -901,3 +935,223 @@ def test_entity_content_hash_round_trip() -> None:
 
     # Both must be identical — critical AP2 determinism guarantee
     assert ingestion_hash == event_hash
+
+
+# ---------------------------------------------------------------------------
+# AP2 — bounded re-emit + cursor + edge drift + Neo4j tombstone heal
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reemit_tick_cap_exported() -> None:
+    """AP2: REEMIT_TICK_CAP is exported from reconcile_worker as a positive int."""
+    from omniscience_server.reconcile_worker import REEMIT_TICK_CAP
+
+    assert isinstance(REEMIT_TICK_CAP, int)
+    assert REEMIT_TICK_CAP > 0
+
+
+@pytest.mark.asyncio
+async def test_entity_drift_bounded_by_cap() -> None:
+    """AP2: _check_entity_drift emits at most _reemit_cap entities per tick."""
+    from omniscience_core.db.models import Entity
+
+    ws_id = uuid.uuid4()
+    cap = 2
+
+    # 4 drifted entities (PG version=5, stores have version=0).
+    entities = []
+    for _ in range(4):
+        ent = MagicMock(spec=Entity)
+        ent.id = uuid.uuid4()
+        ent.source_id = uuid.uuid4()
+        ent.entity_type = "service"
+        ent.name = f"svc.{ent.id}"
+        ent.display_name = str(ent.id)
+        ent.entity_metadata = {}
+        ent.version = 5
+        ent.content_hash = None
+        entities.append(ent)
+
+    read_result = MagicMock()
+    read_result.scalars.return_value.all.return_value = entities
+    read_session = AsyncMock()
+    read_session.execute = AsyncMock(return_value=read_result)
+    read_cm = AsyncMock()
+    read_cm.__aenter__ = AsyncMock(return_value=read_session)
+    read_cm.__aexit__ = AsyncMock(return_value=False)
+
+    write_session = AsyncMock()
+    write_session.add = MagicMock()
+    write_tx = AsyncMock()
+    write_tx.__aenter__ = AsyncMock(return_value=None)
+    write_tx.__aexit__ = AsyncMock(return_value=False)
+    write_session.begin = MagicMock(return_value=write_tx)
+    write_cm = AsyncMock()
+    write_cm.__aenter__ = AsyncMock(return_value=write_session)
+    write_cm.__aexit__ = AsyncMock(return_value=False)
+
+    factory = MagicMock(side_effect=[read_cm, write_cm] * 10)
+
+    vs = _make_vector_store()
+    vs.get_entity_versions = AsyncMock(return_value={})  # all drifted
+    vs.get_entity_content_hashes = AsyncMock(return_value={})
+
+    gs = _make_graph_store()
+    gs.get_entity_versions = AsyncMock(return_value={})  # all drifted
+    gs.get_entity_content_hashes = AsyncMock(return_value={})
+
+    settings = _make_settings()
+    settings.reemit_tick_cap = cap
+
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=settings,
+    )
+    worker._reemit_cursor = 0
+
+    await worker._check_entity_drift(workspace_id=ws_id)
+
+    # Only cap events emitted.
+    assert write_session.add.call_count == cap
+    assert worker._reemit_cursor == cap
+
+    # Second call: cap exhausted → zero additional events.
+    worker._session_factory = MagicMock(side_effect=[read_cm, write_cm] * 10)
+    write_session.add.reset_mock()
+    await worker._check_entity_drift(workspace_id=ws_id)
+    write_session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_edge_drift_creates_edge_upsert_outbox_event() -> None:
+    """AP2: _check_edge_drift emits edge.upsert OutboxEvents for drifted edges."""
+    from omniscience_core.db.models import Edge, OutboxEvent
+
+    ws_id = uuid.uuid4()
+    src_id = uuid.uuid4()
+    tgt_id = uuid.uuid4()
+
+    edge = MagicMock(spec=Edge)
+    edge.id = uuid.uuid4()
+    edge.source_entity_id = src_id
+    edge.target_entity_id = tgt_id
+    edge.edge_type = "calls"
+    edge.edge_metadata = {"key": "val"}
+    edge.version = 3
+
+    edge_result = MagicMock()
+    edge_result.scalars.return_value.all.return_value = [edge]
+    edge_session = AsyncMock()
+    edge_session.execute = AsyncMock(return_value=edge_result)
+    edge_cm = AsyncMock()
+    edge_cm.__aenter__ = AsyncMock(return_value=edge_session)
+    edge_cm.__aexit__ = AsyncMock(return_value=False)
+
+    write_session = AsyncMock()
+    write_session.add = MagicMock()
+    write_tx = AsyncMock()
+    write_tx.__aenter__ = AsyncMock(return_value=None)
+    write_tx.__aexit__ = AsyncMock(return_value=False)
+    write_session.begin = MagicMock(return_value=write_tx)
+    write_cm = AsyncMock()
+    write_cm.__aenter__ = AsyncMock(return_value=write_session)
+    write_cm.__aexit__ = AsyncMock(return_value=False)
+
+    factory = MagicMock(side_effect=[edge_cm, write_cm] * 10)
+
+    gs = _make_graph_store()
+    # Neo4j has no edge version → 0 < PG version 3 → drift.
+    gs.get_edge_versions = AsyncMock(return_value={})
+
+    vs = _make_vector_store()
+
+    settings = _make_settings()
+
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=settings,
+    )
+    worker._reemit_cursor = 0
+
+    with patch("omniscience_server.reconcile_worker.RECONCILE_DRIFT_TOTAL") as mc:
+        mc.labels.return_value.inc = MagicMock()
+        await worker._check_edge_drift(workspace_id=ws_id)
+
+    assert write_session.add.call_count == 1
+    event = write_session.add.call_args_list[0][0][0]
+    assert isinstance(event, OutboxEvent)
+    assert event.event_type == "edge.upsert"
+    assert event.payload["source_entity_id"] == str(src_id)
+    assert event.payload["target_entity_id"] == str(tgt_id)
+    assert event.payload["edge_type"] == "calls"
+    assert event.payload["version"] == 3
+    assert event.payload["is_backfill"] is True
+
+
+@pytest.mark.asyncio
+async def test_entities_emitted_before_edges_causal_order() -> None:
+    """AP2: entity.upsert events are inserted before edge.upsert events in the DB.
+
+    The call order in _reconcile_workspace guarantees that _check_entity_drift
+    (entities) is called before _check_edge_drift (edges), enforcing causal order
+    so the outbox consumer sees entity definitions before edge references.
+    """
+    # We test that _reconcile_workspace calls entity drift before edge drift by
+    # patching both methods and tracking call order.
+    worker, _vs, _gs = _build_worker()
+    call_order: list[str] = []
+
+    async def _mock_entity_drift(*, workspace_id: uuid.UUID) -> None:
+        call_order.append("entity")
+
+    async def _mock_edge_drift(*, workspace_id: uuid.UUID) -> None:
+        call_order.append("edge")
+
+    worker._check_entity_drift = _mock_entity_drift  # type: ignore[method-assign]
+    worker._check_edge_drift = _mock_edge_drift  # type: ignore[method-assign]
+
+    # Also stub out the other checks to avoid side effects.
+    async def _noop_pg(*a: Any, **kw: Any) -> list[uuid.UUID]:
+        return []
+
+    async def _noop_qdrant(*a: Any, **kw: Any) -> tuple[list[str], int]:
+        return [], 0
+
+    async def _noop_neo4j(*a: Any, **kw: Any) -> list[str]:
+        return []
+
+    worker._check_pg_missing_qdrant = _noop_pg  # type: ignore[method-assign]
+    worker._check_qdrant_orphans = _noop_qdrant  # type: ignore[method-assign]
+    worker._check_neo4j_orphans = _noop_neo4j  # type: ignore[method-assign]
+
+    with (
+        patch("omniscience_server.reconcile_worker.RECONCILE_DRIFT_TOTAL"),
+        patch("omniscience_server.reconcile_worker.RECONCILE_WORKER_RUNS_TOTAL"),
+        patch("omniscience_server.reconcile_worker.RECONCILE_WORKER_DURATION_SECONDS"),
+    ):
+        await worker.run_once()
+
+    assert call_order == ["entity", "edge"], f"Expected entities before edges; got: {call_order}"
+
+
+@pytest.mark.asyncio
+async def test_reemit_cursor_resets_each_run() -> None:
+    """AP2: cursor resets to 0 at the start of each run_once() call."""
+    worker, _vs, _gs = _build_worker()
+    worker._reemit_cursor = 999  # simulate a previous run
+
+    with (
+        patch("omniscience_server.reconcile_worker.RECONCILE_DRIFT_TOTAL"),
+        patch("omniscience_server.reconcile_worker.RECONCILE_WORKER_RUNS_TOTAL"),
+        patch("omniscience_server.reconcile_worker.RECONCILE_WORKER_DURATION_SECONDS"),
+    ):
+        await worker.run_once()
+
+    # After run_once, cursor should have been reset to 0 at start, then advanced by 0
+    # (no drift in this run) → final value is 0.
+    assert worker._reemit_cursor == 0

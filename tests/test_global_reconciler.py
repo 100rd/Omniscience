@@ -8,6 +8,7 @@ Covers:
   - Read still returns results (degraded, not failed): composer serves data
     even when stores are behind.
   - Empty workspace (no documents): always converged.
+  - min_watermark: returned on both converged and timeout paths (AP3 PIN).
 """
 
 from __future__ import annotations
@@ -114,10 +115,12 @@ async def test_convergence_all_stores_at_watermark() -> None:
         qdrant_data={src: 5},
         neo4j_data={src: 5},
     )
-    converged, degraded, staleness = await reconciler.check_convergence(_WS)
+    converged, degraded, staleness, min_watermark = await reconciler.check_convergence(_WS)
     assert converged is True
     assert degraded == []
     assert staleness is None
+    # min_watermark: min(pg=5, qdrant=5, neo4j=5) = 5
+    assert min_watermark == 5
 
 
 @pytest.mark.asyncio
@@ -129,9 +132,11 @@ async def test_convergence_stores_ahead_of_watermark() -> None:
         qdrant_data={src: 7},  # ahead
         neo4j_data={src: 5},  # ahead
     )
-    converged, degraded, _staleness = await reconciler.check_convergence(_WS)
+    converged, degraded, _staleness, min_watermark = await reconciler.check_convergence(_WS)
     assert converged is True
     assert degraded == []
+    # min_watermark: min(pg=3, qdrant=7, neo4j=5) = 3
+    assert min_watermark == 3
 
 
 @pytest.mark.asyncio
@@ -143,11 +148,13 @@ async def test_qdrant_lagging_detected() -> None:
         qdrant_data={src: 7},  # 3 versions behind
         neo4j_data={src: 10},
     )
-    converged, degraded, staleness = await reconciler.check_convergence(_WS)
+    converged, degraded, staleness, min_watermark = await reconciler.check_convergence(_WS)
     assert converged is False
     assert "qdrant" in degraded
     assert "neo4j" not in degraded
     assert staleness == 3.0
+    # min_watermark: min(pg=10, qdrant=7, neo4j=10) = 7
+    assert min_watermark == 7
 
 
 @pytest.mark.asyncio
@@ -159,11 +166,13 @@ async def test_neo4j_lagging_detected() -> None:
         qdrant_data={src: 10},
         neo4j_data={src: 2},  # 8 versions behind
     )
-    converged, degraded, staleness = await reconciler.check_convergence(_WS)
+    converged, degraded, staleness, min_watermark = await reconciler.check_convergence(_WS)
     assert converged is False
     assert "neo4j" in degraded
     assert "qdrant" not in degraded
     assert staleness == 8.0
+    # min_watermark: min(pg=10, qdrant=10, neo4j=2) = 2
+    assert min_watermark == 2
 
 
 @pytest.mark.asyncio
@@ -175,10 +184,12 @@ async def test_both_stores_lagging_detected() -> None:
         qdrant_data={src: 8},  # lag = 2
         neo4j_data={src: 5},  # lag = 5
     )
-    converged, degraded, staleness = await reconciler.check_convergence(_WS)
+    converged, degraded, staleness, min_watermark = await reconciler.check_convergence(_WS)
     assert converged is False
     assert set(degraded) == {"qdrant", "neo4j"}
     assert staleness == 5.0  # worst-case lag
+    # min_watermark: min(pg=10, qdrant=8, neo4j=5) = 5
+    assert min_watermark == 5
 
 
 @pytest.mark.asyncio
@@ -189,10 +200,12 @@ async def test_empty_workspace_always_converged() -> None:
         qdrant_data={},
         neo4j_data={},
     )
-    converged, degraded, staleness = await reconciler.check_convergence(_WS)
+    converged, degraded, staleness, min_watermark = await reconciler.check_convergence(_WS)
     assert converged is True
     assert degraded == []
     assert staleness is None
+    # Empty workspace: min_watermark is None (no version data)
+    assert min_watermark is None
 
 
 @pytest.mark.asyncio
@@ -240,7 +253,7 @@ async def test_atomic_watermark_snapshot_used_for_both_stores() -> None:
     # With a single PG snapshot (v=5), both stores are at watermark → converged.
     # If PG were read twice, second read returns v=10 and both stores would
     # appear lagging — demonstrating the non-monotonic flap the fix prevents.
-    converged, _degraded, _staleness = await reconciler.check_convergence(_WS)
+    converged, _degraded, _staleness, _min_wm = await reconciler.check_convergence(_WS)
     assert converged is True, (
         "With atomic watermark snapshot, stores at v=5 match PG first-read v=5 → converged"
     )
@@ -261,9 +274,11 @@ async def test_wait_for_convergence_success() -> None:
         qdrant_data={src: 3},
         neo4j_data={src: 3},
     )
-    degraded, staleness = await reconciler.wait_for_convergence(_WS, timeout=5.0)
+    degraded, staleness, min_watermark = await reconciler.wait_for_convergence(_WS, timeout=5.0)
     assert degraded == []
     assert staleness is None
+    # min_watermark: min(pg=3, qdrant=3, neo4j=3) = 3
+    assert min_watermark == 3
 
 
 @pytest.mark.asyncio
@@ -280,10 +295,12 @@ async def test_wait_for_convergence_timeout_returns_degraded_subsystems() -> Non
         neo4j_data={src: 10},
     )
     # Very short timeout so the test runs fast
-    degraded, staleness = await reconciler.wait_for_convergence(_WS, timeout=0.1)
+    degraded, staleness, min_watermark = await reconciler.wait_for_convergence(_WS, timeout=0.1)
     assert "qdrant" in degraded, "Lagging Qdrant must be in degraded_subsystems on timeout"
     assert staleness is not None, "staleness_seconds must be set on timeout"
     assert staleness == 5.0
+    # min_watermark: min(pg=10, qdrant=5, neo4j=10) = 5
+    assert min_watermark == 5
 
 
 @pytest.mark.asyncio
@@ -297,10 +314,40 @@ async def test_wait_for_convergence_does_not_raise_on_timeout() -> None:
     )
     # Should complete without raising, even with very short timeout
     try:
-        degraded, _staleness = await reconciler.wait_for_convergence(_WS, timeout=0.05)
+        degraded, _staleness, _min_wm = await reconciler.wait_for_convergence(_WS, timeout=0.05)
     except Exception as exc:  # pragma: no cover
         pytest.fail(f"wait_for_convergence must not raise; got {exc!r}")
     assert isinstance(degraded, list)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_convergence_returns_min_watermark_on_converged() -> None:
+    """Converged path must return the correct min_watermark (AP3 PIN)."""
+    src = str(uuid.uuid4())
+    reconciler = _make_reconciler(
+        pg_data={src: 8},
+        qdrant_data={src: 8},
+        neo4j_data={src: 8},
+    )
+    degraded, staleness, min_watermark = await reconciler.wait_for_convergence(_WS, timeout=5.0)
+    assert degraded == []
+    assert staleness is None
+    assert min_watermark == 8
+
+
+@pytest.mark.asyncio
+async def test_wait_for_convergence_returns_min_watermark_on_timeout() -> None:
+    """Timeout path must also return the min_watermark so callers can pin (AP3 PIN)."""
+    src = str(uuid.uuid4())
+    reconciler = _make_reconciler(
+        pg_data={src: 15},
+        qdrant_data={src: 3},  # lagging — pinned to 3
+        neo4j_data={src: 15},
+    )
+    degraded, _staleness, min_watermark = await reconciler.wait_for_convergence(_WS, timeout=0.05)
+    assert "qdrant" in degraded
+    # min is min(pg=15, qdrant=3, neo4j=15) = 3
+    assert min_watermark == 3
 
 
 # ---------------------------------------------------------------------------
@@ -336,12 +383,13 @@ async def test_composer_serves_results_even_when_stores_degraded() -> None:
     workspace_id = _uuid.uuid4()
 
     # Mock reconciler that immediately reports qdrant as lagging (timeout-like signal)
+    # Now returns 3-tuple: (degraded, staleness, min_watermark)
     mock_reconciler = MagicMock()
     mock_reconciler.wait_for_convergence = AsyncMock(
-        return_value=(["qdrant"], 8.0)  # qdrant is 8 versions behind
+        return_value=(["qdrant"], 8.0, 7)  # qdrant is 8 versions behind; min_watermark=7
     )
 
-    # Fake vector store that always returns one hit
+    # Fake vector store that always returns one hit (applied_version=7, within watermark)
     class _FakeVS:
         async def search(
             self,
@@ -365,6 +413,7 @@ async def test_composer_serves_results_even_when_stores_degraded() -> None:
                     chunker_strategy="fixed",
                 ),
                 metadata={},
+                applied_version=7,  # at or below min_watermark=7 → passes filter
             )
             return SearchResult(
                 hits=[hit],
@@ -410,4 +459,8 @@ async def test_composer_serves_results_even_when_stores_degraded() -> None:
     )
     assert result.staleness_seconds == 8.0, (
         "staleness_seconds must match what the reconciler reported"
+    )
+    # AP3 PIN: pinned_watermark must be stamped on the result
+    assert result.pinned_watermark == 7, (
+        "pinned_watermark must match min_watermark from reconciler"
     )

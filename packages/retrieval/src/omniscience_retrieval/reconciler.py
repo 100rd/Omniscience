@@ -7,8 +7,9 @@ AP3 (consilium-v8): surfaces explicit staleness signals instead of
 silently serving stale data on timeout.  ``check_convergence`` now
 snapshots the Postgres watermark once per call to prevent non-monotonic
 flap when the three stores are read at different wall-clock instants.
-``wait_for_convergence`` returns ``(degraded_subsystems, staleness_seconds)``
-so the GraphRAG composer can attach them to ``SearchResult``.
+``wait_for_convergence`` returns ``(degraded_subsystems, staleness_seconds,
+min_watermark)`` so the GraphRAG composer can pin the read path to the
+minimum observed version across all stores (AP3 consistent-stale PIN).
 """
 
 from __future__ import annotations
@@ -32,11 +33,19 @@ class GlobalReconciler:
     AP3 contract
     ------------
     ``wait_for_convergence`` returns a tuple
-    ``(degraded_subsystems: list[str], staleness_seconds: float | None)``.
+    ``(degraded_subsystems: list[str], staleness_seconds: float | None,
+    min_watermark: int | None)``.
     An empty ``degraded_subsystems`` means all stores converged before the
     timeout; a non-empty list names the lagging stores and
     ``staleness_seconds`` quantifies the lag of the worst offender
     (as a version-delta — not wall-clock, but proportional to the drift).
+
+    ``min_watermark`` is the minimum version seen across all three stores
+    (Postgres, Neo4j, Qdrant) from the same atomic snapshot.  The GraphRAG
+    composer uses it to drop any hit whose ``applied_version > min_watermark``
+    so that no composed result contains evidence from a future epoch that
+    some stores have not yet applied.  ``None`` means no version information
+    was available (cold store or no documents) — no filter is applied.
 
     ``check_convergence`` snapshots the Postgres watermark **once** per
     call and compares both stores against the same snapshot, preventing
@@ -59,16 +68,21 @@ class GlobalReconciler:
         self,
         workspace_id: uuid.UUID,
         timeout: float = 10.0,
-    ) -> tuple[list[str], float | None]:
+    ) -> tuple[list[str], float | None, int | None]:
         """Wait until Neo4j and Qdrant checkpoints catch up to the Postgres SoT.
 
         Returns
         -------
-        ``(degraded_subsystems, staleness_seconds)``
+        ``(degraded_subsystems, staleness_seconds, min_watermark)``
             - ``degraded_subsystems``: empty on success; names the lagging
               stores on timeout (e.g. ``["neo4j"]``, ``["qdrant", "neo4j"]``).
             - ``staleness_seconds``: approximate lag in version units of the
               worst-lagging store; ``None`` when converged or unmeasurable.
+            - ``min_watermark``: minimum version across all stores from the
+              same snapshot.  ``None`` when no version information is available
+              (e.g. cold store or no documents in the workspace).  Callers
+              MUST use this to filter out hits whose ``applied_version`` exceeds
+              the watermark so no mixed-epoch evidence is served.
 
         Never raises — callers receive stale data with explicit signals rather
         than a hard failure.
@@ -76,9 +90,11 @@ class GlobalReconciler:
         start_time = asyncio.get_event_loop().time()
 
         while True:
-            converged, degraded, staleness = await self.check_convergence(workspace_id)
+            converged, degraded, staleness, min_watermark = await self.check_convergence(
+                workspace_id
+            )
             if converged:
-                return [], None
+                return [], None, min_watermark
             elapsed = asyncio.get_event_loop().time() - start_time
             if elapsed > timeout:
                 log.warning(
@@ -86,14 +102,15 @@ class GlobalReconciler:
                     workspace_id=str(workspace_id),
                     degraded_subsystems=degraded,
                     staleness_seconds=staleness,
+                    min_watermark=min_watermark,
                 )
-                return degraded, staleness
+                return degraded, staleness, min_watermark
             await asyncio.sleep(0.5)
 
     async def check_convergence(
         self,
         workspace_id: uuid.UUID,
-    ) -> tuple[bool, list[str], float | None]:
+    ) -> tuple[bool, list[str], float | None, int | None]:
         """Check whether all stores have reached the Postgres watermark.
 
         The Postgres watermark is snapshotted **once** at the start of this
@@ -103,16 +120,20 @@ class GlobalReconciler:
 
         Returns
         -------
-        ``(converged, degraded_subsystems, staleness_seconds)``
+        ``(converged, degraded_subsystems, staleness_seconds, min_watermark)``
             - ``converged``: True when all stores meet or exceed the PG watermark.
             - ``degraded_subsystems``: names of lagging stores (empty when converged).
             - ``staleness_seconds``: version-delta of the worst-lagging store;
               ``None`` when converged or the PG watermark is empty.
+            - ``min_watermark``: minimum version across Postgres, Neo4j, and
+              Qdrant from the same snapshot.  ``None`` when no version data
+              exists.  Used by the GraphRAG composer to pin the read path
+              (AP3 consistent-stale PIN).
         """
         # 1. Snapshot the Postgres watermark once — prevents epoch-skew flap.
         pg_watermarks = await self._snapshot_pg_watermark(workspace_id)
         if not pg_watermarks:
-            return True, [], None
+            return True, [], None, None
 
         # 2. Fetch store checkpoints concurrently against the same snapshot.
         qdrant_checkpoints, neo4j_checkpoints = await asyncio.gather(
@@ -125,11 +146,18 @@ class GlobalReconciler:
         neo4j_lagging = False
         max_lag: float = 0.0
 
+        # min_watermark: minimum version seen across all three stores for
+        # sources that appear in the PG watermark.  This is the "safe" epoch
+        # below which all stores agree — used to pin composed results.
+        all_versions: list[int] = []
+
         for source_id, pg_version in pg_watermarks.items():
             if pg_version == 0:
                 continue
             q_version = qdrant_checkpoints.get(source_id, 0)
             n_version = neo4j_checkpoints.get(source_id, 0)
+
+            all_versions.extend([pg_version, q_version, n_version])
 
             if q_version < pg_version:
                 qdrant_lagging = True
@@ -138,6 +166,8 @@ class GlobalReconciler:
                 neo4j_lagging = True
                 max_lag = max(max_lag, float(pg_version - n_version))
 
+        min_watermark: int | None = min(all_versions) if all_versions else None
+
         degraded: list[str] = []
         if qdrant_lagging:
             degraded.append("qdrant")
@@ -145,8 +175,8 @@ class GlobalReconciler:
             degraded.append("neo4j")
 
         if degraded:
-            return False, degraded, max_lag
-        return True, [], None
+            return False, degraded, max_lag, min_watermark
+        return True, [], None, min_watermark
 
     async def _snapshot_pg_watermark(
         self,

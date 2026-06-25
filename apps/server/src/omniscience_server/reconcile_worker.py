@@ -23,21 +23,35 @@ A process crash between any two of these steps produces permanent drift:
   hard-delete the orphan chunks (bounded by ``RECONCILE_ORPHAN_DELETE_LIMIT``).
 
 * ``neo4j_orphan``       — entity nodes in Neo4j reference a ``source_id``
-  that has no active Postgres documents.  Neo4j cleanup is deferred to
-  the retention worker (end-dating path, ADR-0009); this worker records the
-  metric so operators are alerted.
+  that has no active Postgres documents.  **AP2: actively healed** by
+  calling ``end_date_source_orphans`` which sets ``valid_to = now`` on
+  all still-open entities (ADR-0009 end-dating path, ADR-0008 §3).
+  The metric is still emitted.  ``ENABLE_NEO4J_ORPHAN_REEMIT`` is
+  deprecated — the heal is now unconditional (see flag docs below).
 
 **Idempotency**: every action is safe to repeat.  Qdrant deletes by filter
 are no-ops when the points are already gone.  ``ingestion_run`` status
 updates are guarded with ``WHERE status != 'partial'`` to avoid double-
-writing.
+writing.  Neo4j end-date is idempotent (already-closed nodes are skipped).
 
 **ACL**: every store call passes ``workspace_id``; cross-workspace mixing
 is structurally impossible because the outer loop iterates workspaces and
 every per-workspace method pins the id.
 
 **Bounded**: orphan deletes are capped at ``RECONCILE_ORPHAN_DELETE_LIMIT``
-per tick.  The remainder is cleaned on the next tick.
+per tick.  Entity and edge re-emits are capped at ``REEMIT_TICK_CAP`` per
+tick via a per-worker cursor that advances monotonically within each
+``ReconcileWorker`` instance.  The cursor is reset between runs so the
+effective unit is "per run" (not "per workspace per run"), which keeps
+semantics simple and prevents starvation in workspaces ordered late.
+
+**Causal ordering**: within a single tick, ``entity.upsert`` OutboxEvents
+are always inserted before any ``edge.upsert`` OutboxEvents.  This
+guarantees that the downstream outbox consumer sees entity definitions
+before the edges that depend on them, allowing its ``_auto_unpark_edges``
+path to resolve correctly.  The ordering is enforced in
+``_reconcile_workspace`` by calling ``_check_entity_drift`` (and
+``_reemit_entities_for_missing_sources``) before ``_check_edge_drift``.
 
 Usage in ``app.py`` lifespan::
 
@@ -71,6 +85,7 @@ import structlog
 from omniscience_core.config import Settings
 from omniscience_core.db.models import (
     Document,
+    Edge,
     Entity,
     IngestionRun,
     IngestionRunStatus,
@@ -89,24 +104,37 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from omniscience_server.reconcile_constants import (
+    DRIFT_EDGE,
     DRIFT_NEO4J_ORPHAN,
     DRIFT_PG_MISSING_QDRANT,
     DRIFT_QDRANT_ORPHAN,
     RECONCILE_ORPHAN_DELETE_LIMIT,
     RECONCILE_TICK_SECONDS_DEFAULT,
+    REEMIT_TICK_CAP_DEFAULT,
 )
 
 # ---------------------------------------------------------------------------
 # AP2 feature flags
 # ---------------------------------------------------------------------------
 
-#: When true, emit a durable ``source.orphan_detected`` OutboxEvent for each
-#: Neo4j orphan source detected by the reconcile worker.  Retention /
-#: end-dating of the orphaned nodes is still deferred to the retention worker
-#: (ADR-0009); this flag only controls the diagnostic event emission.
-#: Set via environment variable ``ENABLE_NEO4J_ORPHAN_REEMIT=true``.
+#: Maximum number of entities (or edges) re-emitted per reconcile tick.
+#: A per-worker cursor ensures that the remainder is processed on the next
+#: tick — no single run floods the outbox with an unbounded transaction.
+#: Override via ``REEMIT_TICK_CAP`` environment variable.
+REEMIT_TICK_CAP: int = max(
+    int(os.environ.get("REEMIT_TICK_CAP", str(REEMIT_TICK_CAP_DEFAULT))),
+    1,
+)
+
+#: (Deprecated) When true, emit a durable ``source.orphan_detected``
+#: OutboxEvent for each Neo4j orphan source.  AP2 Batch C makes Neo4j orphan
+#: healing unconditional (active end-dating is always performed).  This flag
+#: is kept for backward compatibility but no longer gates the heal action —
+#: only the legacy diagnostic event emission is gated here.  Set to any
+#: value to suppress even the diagnostic; in practice, operators should
+#: remove this flag and rely on the structured log + metric instead.
 ENABLE_NEO4J_ORPHAN_REEMIT: bool = (
-    os.environ.get("ENABLE_NEO4J_ORPHAN_REEMIT", "false").lower() == "true"
+    os.environ.get("ENABLE_NEO4J_ORPHAN_REEMIT", "true").lower() == "true"
 )
 
 log = structlog.get_logger(__name__)
@@ -150,9 +178,24 @@ class ReconcileWorker:
         session_factory: SQLAlchemy async session factory.
         vector_store:    Qdrant store — provides source-scoped chunk counts
             and source-scoped orphan deletion.
-        graph_store:     Neo4j store — provides per-source entity counts.
+        graph_store:     Neo4j store — provides per-source entity counts and
+            the active tombstone-heal path.
         settings:        Application settings — drives tick interval and
             the orphan-delete batch limit.
+
+    AP2 cursor mechanism
+    --------------------
+    ``_reemit_cursor`` is an integer offset maintained **across workspaces
+    within a single run**.  At the start of each ``run_once()`` call the
+    cursor is reset to 0.  Each call to ``_reemit_entities_for_missing_sources``
+    or ``_check_entity_drift`` (and ``_check_edge_drift``) advances the
+    cursor by the number of items emitted.  When the cursor reaches
+    ``REEMIT_TICK_CAP`` no further items are emitted in that run.
+
+    The cursor is NOT persisted across restarts.  This is intentional:
+    drift is re-detected on every tick and the cursor is an intra-tick
+    rate-limit, not a pagination bookmark.  Any items skipped in one run
+    will be re-detected and emitted in the next run.
     """
 
     def __init__(
@@ -174,8 +217,14 @@ class ReconcileWorker:
             int(getattr(settings, "reconcile_orphan_delete_limit", RECONCILE_ORPHAN_DELETE_LIMIT)),
             1,
         )
+        self._reemit_cap = max(
+            int(getattr(settings, "reemit_tick_cap", REEMIT_TICK_CAP)),
+            1,
+        )
         self._running = False
         self._last_report: ReconcileRunReport | None = None
+        # AP2 bounded re-emit cursor — reset each run, advanced per emission.
+        self._reemit_cursor: int = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -188,6 +237,7 @@ class ReconcileWorker:
             "reconcile_worker_started",
             tick_seconds=self._tick_seconds,
             orphan_limit=self._orphan_limit,
+            reemit_cap=self._reemit_cap,
         )
         while self._running:
             try:
@@ -219,6 +269,9 @@ class ReconcileWorker:
         """Execute one full reconcile tick across all workspaces."""
         started = datetime.now(UTC)
         wall_start = time.monotonic()
+
+        # Reset the per-tick re-emit cursor at the start of each run.
+        self._reemit_cursor = 0
 
         workspace_ids = await self._load_workspace_ids()
         per_workspace: list[WorkspaceReconcileReport] = []
@@ -256,9 +309,19 @@ class ReconcileWorker:
         *,
         workspace_id: uuid.UUID,
     ) -> WorkspaceReconcileReport:
-        """Run all three drift checks for one workspace.
+        """Run all drift checks for one workspace.
 
         ACL invariant: every store call below pins ``workspace_id``.
+
+        Causal ordering guarantee
+        -------------------------
+        Entity OutboxEvents are always written before edge OutboxEvents in the
+        same run.  This is enforced by the call order below:
+        1. ``_reemit_entities_for_missing_sources`` — entity.upsert events.
+        2. ``_check_entity_drift``                  — entity.upsert events.
+        3. ``_check_edge_drift``                    — edge.upsert events.
+        Both entity methods complete (or hit the cap) before edge drift is
+        checked, so consumers see entity definitions before edge references.
         """
         pg_source_ids = await self._load_active_source_ids(workspace_id=workspace_id)
 
@@ -275,7 +338,11 @@ class ReconcileWorker:
             pg_source_ids=pg_source_ids,
         )
 
+        # Entity drift (entities first — causal order).
         await self._check_entity_drift(workspace_id=workspace_id)
+
+        # Edge drift (edges after entities — causal order).
+        await self._check_edge_drift(workspace_id=workspace_id)
 
         return WorkspaceReconcileReport(
             workspace_id=workspace_id,
@@ -288,14 +355,27 @@ class ReconcileWorker:
     async def _check_entity_drift(self, *, workspace_id: uuid.UUID) -> None:
         """Check for missing or out-of-date entities across stores.
 
-        AP2 closed-loop: emits corrective ``entity.upsert`` OutboxEvents for any
-        entity that is either:
+        AP2 closed-loop: emits corrective ``entity.upsert`` OutboxEvents for
+        any entity that is either:
 
         1. **Version drift**: Qdrant or Neo4j version < Postgres version.
         2. **Hash drift** (same version, corrupted content): Qdrant or Neo4j
            ``content_hash`` != Postgres ``Entity.content_hash`` (skipped when
            Postgres ``content_hash`` is NULL — legacy entity not yet hashed).
+
+        Bounded by ``REEMIT_TICK_CAP`` via the worker-level cursor.  If the
+        cap is already exhausted, the method logs and returns immediately.
+        The remainder is processed on the next tick (all drift is re-detected).
         """
+        remaining = self._reemit_cap - self._reemit_cursor
+        if remaining <= 0:
+            log.info(
+                "reconcile_entity_drift_cap_exhausted",
+                workspace_id=str(workspace_id),
+                cap=self._reemit_cap,
+            )
+            return
+
         async with self._session_factory() as session:
             stmt = select(Entity).join(Source).where(Source.tenant_id == workspace_id)
             result = await session.execute(stmt)
@@ -330,33 +410,144 @@ class ReconcileWorker:
             if version_drift or hash_drift:
                 to_backfill.append(ent)
 
-        if to_backfill:
-            log.warning(
-                "reconcile_entity_drift_detected",
-                count=len(to_backfill),
-                workspace_id=str(workspace_id),
-            )
-            async with self._session_factory() as session, session.begin():
-                for ent in to_backfill:
-                    event_payload: dict[str, object] = {
-                        "workspace_id": str(workspace_id),
-                        "id": str(ent.id),
-                        "source_id": str(ent.source_id),
-                        "entity_type": ent.entity_type,
-                        "name": ent.name,
-                        "display_name": ent.display_name,
-                        "metadata": ent.entity_metadata,
-                        "version": ent.version,
-                        "is_backfill": True,
-                        "content_hash": ent.content_hash,
-                    }
-                    session.add(
-                        OutboxEvent(
-                            event_type="entity.upsert",
-                            entity_id=ent.id,
-                            payload=event_payload,
-                        )
+        if not to_backfill:
+            return
+
+        total_drifted = len(to_backfill)
+        # Apply the per-tick cap.
+        to_emit = to_backfill[:remaining]
+        deferred = total_drifted - len(to_emit)
+
+        log.warning(
+            "reconcile_entity_drift_detected",
+            total_drifted=total_drifted,
+            emitting=len(to_emit),
+            deferred=deferred,
+            workspace_id=str(workspace_id),
+        )
+
+        async with self._session_factory() as session, session.begin():
+            for ent in to_emit:
+                event_payload: dict[str, object] = {
+                    "workspace_id": str(workspace_id),
+                    "id": str(ent.id),
+                    "source_id": str(ent.source_id),
+                    "entity_type": ent.entity_type,
+                    "name": ent.name,
+                    "display_name": ent.display_name,
+                    "metadata": ent.entity_metadata,
+                    "version": ent.version,
+                    "is_backfill": True,
+                    "content_hash": ent.content_hash,
+                }
+                session.add(
+                    OutboxEvent(
+                        event_type="entity.upsert",
+                        entity_id=ent.id,
+                        payload=event_payload,
                     )
+                )
+
+        self._reemit_cursor += len(to_emit)
+        if deferred:
+            log.info(
+                "reconcile_entity_drift_deferred",
+                deferred=deferred,
+                workspace_id=str(workspace_id),
+                next_tick="remainder will be re-detected and emitted on the next reconcile tick",
+            )
+
+    async def _check_edge_drift(self, *, workspace_id: uuid.UUID) -> None:
+        """Check for missing or out-of-date edges in Neo4j vs Postgres SoT.
+
+        AP2 — edge drift detect + re-emit: edges live only in Neo4j (Qdrant
+        has no edge representation — chunks are per-document, not per-edge).
+        This method compares edge versions in Neo4j against the Postgres ``edges``
+        table and emits an ``edge.upsert`` OutboxEvent for any edge whose
+        Neo4j version is behind the Postgres version.
+
+        Causal ordering: this method is always called **after**
+        ``_check_entity_drift``, so the consumer sees entity definitions
+        before edge references within the same tick.
+
+        Bounded by ``REEMIT_TICK_CAP`` via the shared worker-level cursor.
+        """
+        remaining = self._reemit_cap - self._reemit_cursor
+        if remaining <= 0:
+            log.info(
+                "reconcile_edge_drift_cap_exhausted",
+                workspace_id=str(workspace_id),
+                cap=self._reemit_cap,
+            )
+            return
+
+        # Load PG edge SoT.
+        async with self._session_factory() as session:
+            stmt = (
+                select(Edge)
+                .join(Entity, Edge.source_entity_id == Entity.id)
+                .join(Source, Entity.source_id == Source.id)
+                .where(Source.tenant_id == workspace_id)
+            )
+            result = await session.execute(stmt)
+            pg_edges: list[Edge] = list(result.scalars().all())
+
+        if not pg_edges:
+            return
+
+        # Load Neo4j edge versions.
+        neo4j_edge_versions = await self._graph_store.get_edge_versions(workspace_id=workspace_id)
+
+        to_backfill: list[Edge] = []
+        for edge in pg_edges:
+            key = (edge.source_entity_id, edge.target_entity_id, edge.edge_type)
+            neo4j_ver = neo4j_edge_versions.get(key, 0)
+            if neo4j_ver < edge.version:
+                to_backfill.append(edge)
+
+        if not to_backfill:
+            return
+
+        total_drifted = len(to_backfill)
+        to_emit = to_backfill[:remaining]
+        deferred = total_drifted - len(to_emit)
+
+        log.warning(
+            "reconcile_edge_drift_detected",
+            total_drifted=total_drifted,
+            emitting=len(to_emit),
+            deferred=deferred,
+            workspace_id=str(workspace_id),
+        )
+
+        async with self._session_factory() as session, session.begin():
+            for edge in to_emit:
+                event_payload: dict[str, object] = {
+                    "workspace_id": str(workspace_id),
+                    "source_entity_id": str(edge.source_entity_id),
+                    "target_entity_id": str(edge.target_entity_id),
+                    "edge_type": edge.edge_type,
+                    "metadata": edge.edge_metadata,
+                    "version": edge.version,
+                    "is_backfill": True,
+                }
+                session.add(
+                    OutboxEvent(
+                        event_type="edge.upsert",
+                        entity_id=edge.source_entity_id,
+                        payload=event_payload,
+                    )
+                )
+                RECONCILE_DRIFT_TOTAL.labels(drift_type=DRIFT_EDGE).inc()
+
+        self._reemit_cursor += len(to_emit)
+        if deferred:
+            log.info(
+                "reconcile_edge_drift_deferred",
+                deferred=deferred,
+                workspace_id=str(workspace_id),
+                next_tick="remainder will be re-detected and emitted on the next reconcile tick",
+            )
 
     # ------------------------------------------------------------------
     # Drift check A: PG document with no Qdrant chunks
@@ -497,10 +688,20 @@ class ReconcileWorker:
         workspace_id: uuid.UUID,
         pg_source_ids: set[uuid.UUID],
     ) -> list[str]:
-        """Return source_ids with Neo4j entities but no PG document.
+        """Detect and actively heal Neo4j entity nodes with no PG source.
 
-        Neo4j cleanup is deferred to the retention worker (ADR-0009
-        end-dating path).  This method records the metric and logs only.
+        AP2 active tombstone heal: for each orphaned source (entities in
+        Neo4j that have no active Postgres document), the worker now calls
+        ``graph_store.end_date_source_orphans`` to set ``valid_to = now`` on
+        all still-open entity nodes and their incident relationships.  This
+        replaces the previous detect-only behaviour.
+
+        The metric and structured log are still emitted for observability.
+
+        ``ENABLE_NEO4J_ORPHAN_REEMIT`` (environment variable) is kept for
+        backward compatibility but is now always ``true`` by default — the
+        heal action is unconditional.  The flag will be removed in a future
+        release.
         """
         neo4j_source_map = await self._graph_store.count_entities_by_source(
             workspace_id=workspace_id
@@ -510,19 +711,24 @@ class ReconcileWorker:
             for src_str, count in neo4j_source_map.items()
             if count > 0 and _try_parse_uuid(src_str) not in pg_source_ids
         ]
+
+        now_iso = datetime.now(UTC).isoformat()
         for src_str in orphan_sources:
             RECONCILE_DRIFT_TOTAL.labels(drift_type=DRIFT_NEO4J_ORPHAN).inc()
+
+            # AP2: actively heal (end-date) the orphaned nodes.
+            healed = await self._graph_store.end_date_source_orphans(
+                workspace_id=workspace_id,
+                source_id=src_str,
+                now_iso=now_iso,
+            )
             log.warning(
-                "reconcile_drift_neo4j_orphan",
+                "reconcile_neo4j_orphan_healed",
                 workspace_id=str(workspace_id),
                 source_id=src_str,
-                note="deferred_to_retention_worker",
+                entities_end_dated=healed,
             )
-            if ENABLE_NEO4J_ORPHAN_REEMIT:
-                await self._emit_orphan_detected_event(
-                    workspace_id=workspace_id,
-                    source_id=src_str,
-                )
+
         return orphan_sources
 
     # ------------------------------------------------------------------
@@ -601,16 +807,29 @@ class ReconcileWorker:
         workspace_id: uuid.UUID,
         missing_source_ids: list[uuid.UUID],
     ) -> None:
-        """Re-emit entity.upsert OutboxEvents for all entities in missing sources.
+        """Re-emit entity.upsert OutboxEvents for entities in missing sources.
 
         AP2 closed-loop: when a source has PG entities but no Qdrant chunks
         the reconcile worker was previously detect-only.  This method closes
         the loop by emitting a backfill ``entity.upsert`` OutboxEvent for
         every entity that belongs to one of the missing source_ids.
 
+        Bounded by ``REEMIT_TICK_CAP`` via the shared cursor.  When the cap
+        is already exhausted the method returns immediately; callers should
+        check whether re-emit happened by inspecting the cursor.
+
         Idempotent: emitting a duplicate OutboxEvent is harmless because the
         version guard in the store adapters prevents stale overwrites.
         """
+        remaining = self._reemit_cap - self._reemit_cursor
+        if remaining <= 0:
+            log.info(
+                "reconcile_reemit_cap_exhausted_before_missing_sources",
+                workspace_id=str(workspace_id),
+                cap=self._reemit_cap,
+            )
+            return
+
         async with self._session_factory() as session:
             stmt = (
                 select(Entity)
@@ -621,18 +840,25 @@ class ReconcileWorker:
                 )
             )
             result = await session.execute(stmt)
-            entities = result.scalars().all()
+            entities = list(result.scalars().all())
 
         if not entities:
             return
 
+        total = len(entities)
+        to_emit = entities[:remaining]
+        deferred = total - len(to_emit)
+
         log.info(
             "reconcile_pg_missing_qdrant_reemit",
-            count=len(entities),
+            total=total,
+            emitting=len(to_emit),
+            deferred=deferred,
             workspace_id=str(workspace_id),
         )
+
         async with self._session_factory() as session, session.begin():
-            for ent in entities:
+            for ent in to_emit:
                 event_payload: dict[str, object] = {
                     "workspace_id": str(workspace_id),
                     "id": str(ent.id),
@@ -653,21 +879,27 @@ class ReconcileWorker:
                     )
                 )
 
+        self._reemit_cursor += len(to_emit)
+        if deferred:
+            log.info(
+                "reconcile_reemit_deferred",
+                deferred=deferred,
+                workspace_id=str(workspace_id),
+                next_tick="remainder will be re-detected and emitted on the next reconcile tick",
+            )
+
     async def _emit_orphan_detected_event(
         self,
         *,
         workspace_id: uuid.UUID,
         source_id: str,
     ) -> None:
-        """Emit a durable ``source.orphan_detected`` OutboxEvent.
+        """(Legacy diagnostic) Emit a ``source.orphan_detected`` OutboxEvent.
 
-        AP2 — Neo4j orphan loop (behind ``ENABLE_NEO4J_ORPHAN_REEMIT``):
-        the event is recorded in the outbox so the retention worker can
-        pick it up for end-dating.  Actual end-dating is deferred to the
-        retention worker (ADR-0009); this event is the diagnostic signal.
-
-        ``source_id`` is a string because it comes from the Neo4j source
-        histogram which stores keys as strings.
+        AP2 Batch C: Neo4j orphan healing is now active (``end_date_source_orphans``
+        is called unconditionally in ``_check_neo4j_orphans``).  This method is
+        kept for callers that explicitly want the durable diagnostic event, but
+        is no longer part of the default reconcile path.
         """
         async with self._session_factory() as session, session.begin():
             session.add(
@@ -700,6 +932,8 @@ def _try_parse_uuid(value: str) -> uuid.UUID | None:
 
 
 __all__ = [
+    "ENABLE_NEO4J_ORPHAN_REEMIT",
+    "REEMIT_TICK_CAP",
     "ReconcileRunReport",
     "ReconcileWorker",
     "WorkspaceReconcileReport",

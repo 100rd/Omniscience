@@ -28,11 +28,13 @@ AP4 changes
   (``30``), which allows the isotonic path when a fitted artifact is
   loaded.  Callers can override via the ``support_size`` parameter when
   real observation counts are available.
-- The response now carries an explicit ``calibrated: bool`` field.  It is
-  ``True`` when the fitted isotonic artifact is in use (loaded from disk),
-  ``False`` otherwise.  This is separate from ``uncalibrated`` (which
-  flags provisional / low-support scoring).  Both fields are surfaced to
-  MCP and REST consumers.
+- ``calibrated``, ``confidence_band`` are now first-class Pydantic fields
+  on ``ResolveIncidentResponse`` (not injected post-``model_dump``).
+- When ``calibrated=False`` (no fitted artifact loaded), ``resolution_confidence``
+  is suppressed (set to ``None``) and ``confidence_band`` carries the
+  qualitative tier derived from the heuristic score.
+- When ``calibrated=True``, ``resolution_confidence`` carries the decimal
+  and ``confidence_band`` is ``None``.
 """
 
 from __future__ import annotations
@@ -69,6 +71,7 @@ from omniscience_retrieval.incidents.resolution import (
     ResolveIncidentResponse,
     ResourceSummary,
     SlackThreadSummary,
+    _score_to_band,
 )
 from omniscience_retrieval.incidents.resolution import (
     build_meta as _build_meta,
@@ -152,9 +155,13 @@ async def mcp_resolve_incident(
     ---------------------
 
     The returned dict includes:
-    - ``resolution_confidence``: calibrated float in ``[0, 1]``.
-    - ``calibrated``: ``True`` when the fitted isotonic artifact is loaded,
-      ``False`` otherwise (cold start / no artifact yet).
+    - ``calibrated``: ``True`` when the fitted isotonic artifact is loaded;
+      ``False`` otherwise (cold start / no artifact yet).  This is a
+      first-class Pydantic field on ``ResolveIncidentResponse``.
+    - ``resolution_confidence``: calibrated float in ``[0, 1]`` ONLY when
+      ``calibrated=True``.  ``None`` when ``calibrated=False``.
+    - ``confidence_band``: ``"low"|"medium"|"high"`` ONLY when
+      ``calibrated=False``.  ``None`` when ``calibrated=True``.
     - ``uncalibrated``: ``True`` when the scoring is provisional (low support
       or any entity is parked).
     """
@@ -206,7 +213,7 @@ async def mcp_resolve_incident(
 
         classified = _classify_neighbours(graph_result)
         scoring_config = await _load_scoring_config(app, workspace_id)
-        confidence, is_provisional = _score_incident(
+        raw_confidence, is_provisional = _score_incident(
             alert=seed,
             classified=classified,
             max_depth=clamped_depth,
@@ -215,12 +222,23 @@ async def mcp_resolve_incident(
             support_size=effective_support,
         )
 
-        # AP4: flag whether the returned confidence number is backed by a
-        # fitted isotonic artifact (calibrated=True) or is Platt-only fallback.
+        # AP4: gate decimal confidence behind calibrated flag.
+        # ``is_fitted_map_loaded()`` returns True only when a real isotonic
+        # artifact has been loaded from disk — the v0.1 ladder constants are
+        # never served as calibrated numbers.
         is_calibrated: bool = is_fitted_map_loaded()
 
+        if is_calibrated:
+            # Fitted artifact present — surface the decimal, suppress the band.
+            conf_decimal: float | None = raw_confidence
+            band = None
+        else:
+            # No fitted artifact — suppress the decimal, surface the band.
+            conf_decimal = None
+            band = _score_to_band(raw_confidence)
+
         meta = _build_meta(
-            confidence=confidence, config=scoring_config, is_provisional=is_provisional
+            confidence=raw_confidence, config=scoring_config, is_provisional=is_provisional
         )
         similar_past = await _augment_with_similar_past(
             app=app,
@@ -231,10 +249,12 @@ async def mcp_resolve_incident(
         response = _build_response(
             alert=seed,
             classified=classified,
-            resolution_confidence=confidence,
+            resolution_confidence=conf_decimal,
             evidence_recency=1.0,
             inferential_confidence=1.0,
             uncalibrated=is_provisional,
+            calibrated=is_calibrated,
+            confidence_band=band,
             degraded_subsystems=[],
             snapshot_id=None,
             as_of=normalised_as_of,
@@ -242,10 +262,9 @@ async def mcp_resolve_incident(
             meta=meta,
             similar_past=similar_past,
         )
-        result = response.model_dump(mode="json")
-        # Inject calibrated flag — AP4 explicit contract field.
-        result["calibrated"] = is_calibrated
-        return result
+        # AP4: calibrated and confidence_band are first-class Pydantic fields —
+        # no post-model_dump injection needed.
+        return response.model_dump(mode="json")
 
 
 # ---------------------------------------------------------------------------

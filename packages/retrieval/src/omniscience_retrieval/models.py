@@ -170,6 +170,12 @@ class SearchResult(BaseModel):
     Callers MUST treat a non-empty ``degraded_subsystems`` as an indication
     that the result may be stale and should not be cached or used for
     time-sensitive decisions without a retry.
+
+    ``pinned_watermark`` is the minimum version across all three stores
+    (Postgres, Neo4j, Qdrant) at the time this response was composed.
+    All hits in this response have ``applied_version <= pinned_watermark``
+    (or ``applied_version is None``).  ``None`` means no version information
+    was available — no watermark filter was applied (AP3 consistent-stale PIN).
     """
 
     hits: list[SearchHit]
@@ -208,6 +214,15 @@ class SearchResult(BaseModel):
             "Age in wall-clock seconds of the lagging projection relative to the "
             "Postgres SoT watermark.  Set when degraded_subsystems is non-empty and "
             "the lag could be measured; None otherwise."
+        ),
+    )
+    pinned_watermark: int | None = Field(
+        default=None,
+        description=(
+            "Minimum version across Postgres, Neo4j, and Qdrant at composition time. "
+            "All hits have applied_version <= pinned_watermark (or applied_version is None). "
+            "None when no version information was available — no watermark filter applied. "
+            "AP3 consistent-stale PIN."
         ),
     )
     snapshot_id: str | None = Field(

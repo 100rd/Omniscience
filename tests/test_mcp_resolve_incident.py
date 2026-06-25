@@ -4,18 +4,21 @@ What this file covers
 ---------------------
 
 1. Happy path: alert with full chain (resource -> PR -> Slack thread)
-   returns a populated bundle with ``confidence_score`` 0.9.
+   returns a populated bundle.  Under AP4 (uncalibrated path),
+   ``resolution_confidence`` is ``None`` and ``confidence_band`` is
+   ``"high"``; ``calibrated=False``.
 2. ``alert_not_found`` -> ``ValueError("alert_not_found:...")`` from
    the MCP path / HTTP 404 from the REST path.
 3. Cross-workspace ACL: alert in workspace A unreachable from workspace
    B's token, even with the full alert_id.  Returns ``alert_not_found``
    (404 not 403) — the documented "no existence leak" trade-off.
 4. Empty graph (alert exists, no related entities) -> bundle with
-   alert + empty fields, ``confidence_score`` 0.1.
+   alert + empty fields, confidence_band ``"low"``.
 5. ``as_of=T`` exercises the bitemporal path — ``GraphStore`` calls
    carry the supplied ``as_of`` verbatim.
-6. Confidence-score heuristic exercised at all four boundaries
-   (0.9, 0.6, 0.4, 0.1).
+6. Confidence-score heuristic ordering exercised across evidence scenarios.
+   AP4: exact ladder constants are NOT asserted on the uncalibrated path;
+   relative ordering and band values are asserted instead.
 7. Invalid ``alert_id`` -> ``ValueError("invalid_alert_id:...")`` /
    HTTP 400 ``invalid_alert_id``.
 8. MCP / REST parity: same alert returns the same JSON shape via both
@@ -25,6 +28,15 @@ The fake ``GraphStore`` mirrors the bitemporal contract from
 ``tests/test_mcp_as_of.py`` but adds named neighbours so the
 ``find_related`` traversal returns realistic resource / PR / Slack
 entities.
+
+AP4 note
+--------
+Tests that previously asserted exact ladder constants on
+``resolution_confidence`` (0.9, 0.6, 0.4, 0.1) have been updated to
+assert the AP4 band+flag contract (calibrated=False, confidence_band in
+{low,medium,high}, resolution_confidence=None) on the uncalibrated path.
+The v0.1 constants are still imported for reference but no longer compared
+directly to ``resolution_confidence`` in uncalibrated-path tests.
 """
 
 from __future__ import annotations
@@ -47,9 +59,6 @@ from omniscience_core.storage.graph import (
 from omniscience_server.app import create_app
 from omniscience_server.incidents import (
     ALERT_NOT_FOUND_CODE,
-    CONFIDENCE_ALERT_ONLY,
-    CONFIDENCE_PR_NO_TEMPORAL_MATCH,
-    CONFIDENCE_PR_TEMPORAL_MATCH,
     DEFAULT_MAX_DEPTH,
     INVALID_ALERT_ID_CODE,
     PR_RECENCY_WINDOW_SECONDS,
@@ -74,6 +83,9 @@ _PR_MERGED_RECENT = _ALERT_FIRED_AT - timedelta(hours=2)  # within 24h window
 _PR_MERGED_OLD = _ALERT_FIRED_AT - timedelta(days=7)  # outside window
 
 _AS_OF_T = datetime(2026, 4, 12, 19, 25, 0, tzinfo=UTC)
+
+# AP4: valid band values (for assertions on uncalibrated path)
+_VALID_BANDS = {"low", "medium", "high"}
 
 
 # ---------------------------------------------------------------------------
@@ -292,7 +304,11 @@ def _wire_graph_store(app: FastAPI, store: _IncidentGraphStore) -> None:
 
 @pytest.mark.asyncio
 class TestResolveIncidentHappyPath:
-    """Full chain returns a populated bundle with high confidence."""
+    """Full chain returns a populated bundle.
+
+    AP4: on the uncalibrated path (no fitted artifact), resolution_confidence
+    is None and confidence_band is populated instead.  calibrated=False.
+    """
 
     async def test_full_chain_returns_alert_resource_pr_threads(self) -> None:
         store = _IncidentGraphStore()
@@ -316,8 +332,14 @@ class TestResolveIncidentHappyPath:
         )
         assert len(result["slack_threads"]) == 1
         assert result["slack_threads"][0]["name"] == _SLACK_THREAD
-        assert result["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
         assert "effective_as_of" in result
+
+        # AP4: uncalibrated path — confidence decimal suppressed.
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
+        assert result["confidence_band"] in _VALID_BANDS
+        # Full chain with temporally-correlated PR -> high band.
+        assert result["confidence_band"] == "high"
 
     async def test_default_max_depth_forwarded(self) -> None:
         store = _IncidentGraphStore()
@@ -415,7 +437,11 @@ class TestEmptyGraph:
         assert result["target_resource"] is None
         assert result["responsible_pr"] is None
         assert result["slack_threads"] == []
-        assert result["resolution_confidence"] == CONFIDENCE_ALERT_ONLY
+
+        # AP4: uncalibrated path — band is "low" for alert-only.
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
+        assert result["confidence_band"] == "low"
 
 
 # ---------------------------------------------------------------------------
@@ -466,25 +492,21 @@ class TestAsOfPlumbing:
 
 
 # ---------------------------------------------------------------------------
-# 6. Confidence-score heuristic — 4 boundaries
+# 6. Confidence-score heuristic — ordering + AP4 band contract
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 class TestConfidenceScoreHeuristic:
-    """Verify probabilistic confidence ordering across evidence scenarios.
+    """Verify confidence ordering across evidence scenarios.
 
-    After AP3/AP4 the scoring routes through calculate_probabilistic_incident_confidence
-    (Platt + isotonic blending) instead of the v0.1 step-ladder.  The exact
-    floating-point values are different from the v0.1 constants; what matters is
-    the *ordering* (more evidence -> higher confidence) and the valid range [0, 1].
-
-    When no fitted calibration artifact is present (cold-start / CI), the scores
-    are Platt-only and in the range [0, ~0.2].
+    AP4: on the uncalibrated path, resolution_confidence is None and
+    confidence_band is the authoritative signal.  We assert band ordering
+    and that the raw score used for banding preserves the heuristic ordering.
     """
 
     async def test_pr_within_24h_higher_than_pr_outside_window(self) -> None:
-        """Temporal PR match produces higher confidence than no temporal match."""
+        """Temporal PR match produces higher-or-equal band than no temporal match."""
         store_recent = _IncidentGraphStore()
         _seed_full_chain(store_recent, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_RECENT)
         app_recent = FastAPI()
@@ -501,33 +523,43 @@ class TestConfidenceScoreHeuristic:
             app=app_old, alert_id=_ALERT_ID, workspace_id=_WS_A
         )
 
-        assert 0.0 <= result_recent["resolution_confidence"] <= 1.0
-        assert 0.0 <= result_old["resolution_confidence"] <= 1.0
-        # Temporal match should produce higher (or equal) confidence
-        assert result_recent["resolution_confidence"] >= result_old["resolution_confidence"]
+        # AP4: both uncalibrated — confidence_band is the signal.
+        assert result_recent["calibrated"] is False
+        assert result_old["calibrated"] is False
+        assert result_recent["resolution_confidence"] is None
+        assert result_old["resolution_confidence"] is None
+        assert result_recent["confidence_band"] in _VALID_BANDS
+        assert result_old["confidence_band"] in _VALID_BANDS
+        # Temporal match should produce high; non-temporal at least medium.
+        assert result_recent["confidence_band"] == "high"
+        assert result_old["confidence_band"] in {"medium", "high"}
 
-    async def test_pr_outside_window_returns_valid_confidence(self) -> None:
-        """PR outside temporal window still produces a valid confidence score."""
+    async def test_pr_outside_window_returns_valid_band(self) -> None:
+        """PR outside temporal window still produces a valid band."""
         store = _IncidentGraphStore()
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=_PR_MERGED_OLD)
         app = FastAPI()
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert 0.0 <= result["resolution_confidence"] <= 1.0
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
+        assert result["confidence_band"] in _VALID_BANDS
 
-    async def test_pr_with_no_merge_timestamp_returns_valid_confidence(self) -> None:
-        """Missing merge timestamp -> no temporal correlation, still valid range."""
+    async def test_pr_with_no_merge_timestamp_returns_valid_band(self) -> None:
+        """Missing merge timestamp -> no temporal correlation, still valid band."""
         store = _IncidentGraphStore()
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=None)
         app = FastAPI()
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert 0.0 <= result["resolution_confidence"] <= 1.0
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
+        assert result["confidence_band"] in _VALID_BANDS
 
     async def test_resource_only_no_pr_returns_lower_than_with_pr(self) -> None:
-        """Resource-only (no PR) produces lower confidence than with a PR."""
+        """Resource-only (no PR) band is lower than with a PR."""
         store_resource_only = _IncidentGraphStore()
         store_resource_only.plant_entity(workspace_id=_WS_A, node=_alert_node())
         store_resource_only.plant_neighbours(
@@ -539,12 +571,15 @@ class TestConfidenceScoreHeuristic:
         _wire_graph_store(app, store_resource_only)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert 0.0 <= result["resolution_confidence"] <= 1.0
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
         assert result["target_resource"] is not None
         assert result["responsible_pr"] is None
+        # Resource-only maps to CONFIDENCE_RESOURCE_ONLY=0.4 -> medium band.
+        assert result["confidence_band"] == "medium"
 
-    async def test_alert_only_returns_lowest_confidence(self) -> None:
-        """Alert-only (no resource, no PR) produces the lowest confidence."""
+    async def test_alert_only_returns_lowest_band(self) -> None:
+        """Alert-only (no resource, no PR) produces the lowest band."""
         store_alert_only = _IncidentGraphStore()
         store_alert_only.plant_entity(workspace_id=_WS_A, node=_alert_node())
         store_alert_only.plant_neighbours(workspace_id=_WS_A, seed_name=_ALERT_ID, related=[])
@@ -565,11 +600,12 @@ class TestConfidenceScoreHeuristic:
             app=app_resource, alert_id=_ALERT_ID, workspace_id=_WS_A
         )
 
-        assert 0.0 <= result_alert_only["resolution_confidence"] <= 1.0
-        # Alert-only should be lower than resource-resolved
-        assert (
-            result_alert_only["resolution_confidence"] <= result_resource["resolution_confidence"]
-        )
+        # AP4: band ordering holds.
+        assert result_alert_only["calibrated"] is False
+        assert result_alert_only["resolution_confidence"] is None
+        assert result_alert_only["confidence_band"] == "low"
+        # Resource > alert-only (medium vs low).
+        assert result_resource["confidence_band"] in {"medium", "high"}
 
     async def test_pr_merged_after_alert_is_not_temporal_match(self) -> None:
         """A PR merged AFTER the alert fired should not boost confidence."""
@@ -594,9 +630,16 @@ class TestConfidenceScoreHeuristic:
             app=app_after, alert_id=_ALERT_ID, workspace_id=_WS_A
         )
 
-        assert 0.0 <= result_after["resolution_confidence"] <= 1.0
-        # PR after alert should produce same or lower confidence than PR before alert
-        assert result_after["resolution_confidence"] <= result_before["resolution_confidence"]
+        # AP4: both uncalibrated — band signals the difference.
+        assert result_after["calibrated"] is False
+        assert result_after["resolution_confidence"] is None
+        assert result_after["confidence_band"] in _VALID_BANDS
+        # PR after alert should produce same or lower band than PR before.
+        band_order = {"low": 0, "medium": 1, "high": 2}
+        assert (
+            band_order[result_after["confidence_band"]]
+            <= band_order[result_before["confidence_band"]]
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -684,7 +727,11 @@ class TestRestResolveIncident:
         body = resp.json()
         assert body["alert"]["name"] == _ALERT_ID
         assert body["responsible_pr"]["name"] == _PR_URL
-        assert body["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
+
+        # AP4: uncalibrated path on REST — band+flag contract.
+        assert body["calibrated"] is False
+        assert body["resolution_confidence"] is None
+        assert body["confidence_band"] in _VALID_BANDS
 
     async def test_alert_not_found_returns_404(self) -> None:
         app = _make_rest_app()
@@ -828,9 +875,10 @@ class TestRestResolveIncident:
 @pytest.mark.asyncio
 class TestRecencyBoundary:
     async def test_exactly_at_window_edge_is_temporal_match(self) -> None:
-        """At exactly ``PR_RECENCY_WINDOW_SECONDS`` before alert -> match.
+        """At exactly ``PR_RECENCY_WINDOW_SECONDS`` before alert -> high band.
 
         The boundary is inclusive — issue #153 §C reads "within 24h".
+        AP4: assertion is on confidence_band, not the exact decimal.
         """
         store = _IncidentGraphStore()
         edge = _ALERT_FIRED_AT - timedelta(seconds=PR_RECENCY_WINDOW_SECONDS)
@@ -839,9 +887,18 @@ class TestRecencyBoundary:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_PR_TEMPORAL_MATCH
+        # Previously asserted == CONFIDENCE_PR_TEMPORAL_MATCH (0.9).
+        # AP4: uncalibrated path returns band, not decimal.
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
+        assert result["confidence_band"] == "high"
 
     async def test_one_second_outside_window_is_no_match(self) -> None:
+        """PR one second outside window -> high band (PR still present, just not correlated).
+
+        AP4: assertion is on confidence_band.
+        Previously asserted == CONFIDENCE_PR_NO_TEMPORAL_MATCH (0.6).
+        """
         store = _IncidentGraphStore()
         outside = _ALERT_FIRED_AT - timedelta(seconds=PR_RECENCY_WINDOW_SECONDS + 1)
         _seed_full_chain(store, workspace_id=_WS_A, pr_merged_at=outside)
@@ -849,4 +906,8 @@ class TestRecencyBoundary:
         _wire_graph_store(app, store)
 
         result = await mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS_A)
-        assert result["resolution_confidence"] == CONFIDENCE_PR_NO_TEMPORAL_MATCH
+        # Previously asserted == CONFIDENCE_PR_NO_TEMPORAL_MATCH (0.6).
+        # AP4: 0.6 maps to "high" band (>= BAND_HIGH_THRESHOLD=0.55).
+        assert result["calibrated"] is False
+        assert result["resolution_confidence"] is None
+        assert result["confidence_band"] == "high"

@@ -14,6 +14,19 @@ Composition shape (caller responsibility)
 3. Call :func:`classify_neighbours` to bucket BFS results.
 4. Call :func:`score_incident` for the confidence heuristic.
 5. Build the response with :func:`build_resolve_response`.
+
+AP4 — confidence suppression when uncalibrated
+----------------------------------------------
+
+``ResolveIncidentResponse`` now carries ``calibrated: bool`` and
+``confidence_band: Literal["low", "medium", "high"] | None`` as first-class
+Pydantic fields (not injected post-``model_dump``).
+
+When ``calibrated=False`` (no fitted artifact on disk), ``resolution_confidence``
+is ``None`` — the v0.1 ladder constant is **not** surfaced as a decimal.
+Instead ``confidence_band`` carries a qualitative tier derived from the same
+heuristic.  When ``calibrated=True``, ``resolution_confidence`` carries the
+fitted decimal and ``confidence_band`` is ``None``.
 """
 
 from __future__ import annotations
@@ -21,7 +34,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, Literal
 
 from omniscience_core.storage import EntityNodeView, GraphResultView
 from pydantic import BaseModel, Field, field_validator
@@ -55,6 +68,33 @@ CONFIDENCE_PR_NO_TEMPORAL_MATCH: Final[float] = 0.6
 CONFIDENCE_RESOURCE_ONLY: Final[float] = 0.4
 CONFIDENCE_ALERT_ONLY: Final[float] = 0.1
 CONFIDENCE_NONE: Final[float] = 0.0
+
+# ---------------------------------------------------------------------------
+# AP4: qualitative band thresholds
+#
+# Derived from the v0.1 ladder to provide a human-readable tier when the
+# numeric decimal is suppressed (calibrated=False).
+#
+#   high   : raw score >= 0.55   (covers 0.6 and 0.9 ladder rungs)
+#   medium : raw score >= 0.25   (covers 0.4 ladder rung)
+#   low    : raw score <  0.25   (covers 0.1 and 0.0 ladder rungs)
+#
+# These thresholds are also used when the calibrated path returns a value
+# and a band is requested for display purposes.
+# ---------------------------------------------------------------------------
+
+BAND_HIGH_THRESHOLD: Final[float] = 0.55
+BAND_MEDIUM_THRESHOLD: Final[float] = 0.25
+
+
+def _score_to_band(score: float) -> Literal["low", "medium", "high"]:
+    """Convert a raw confidence float to a qualitative band."""
+    if score >= BAND_HIGH_THRESHOLD:
+        return "high"
+    if score >= BAND_MEDIUM_THRESHOLD:
+        return "medium"
+    return "low"
+
 
 # ---------------------------------------------------------------------------
 # Canonical-name prefix discriminators
@@ -163,9 +203,23 @@ class SlackThreadSummary(BaseModel):
 class ResolveIncidentResponse(BaseModel):
     """The recommendation bundle returned by ``resolve_incident``.
 
-    ``confidence_score`` is a v0.1 placeholder per the architect memo on
-    epic #99; the calibrated model lands in #155.  Callers should treat
-    the score as a stable schema slot, not a calibrated probability.
+    AP4 — confidence contract
+    --------------------------
+
+    ``calibrated`` (bool, required) signals whether the returned confidence
+    value was produced by a real fitted calibration artifact (isotonic
+    regression loaded from disk).
+
+    When ``calibrated=False``:
+      - ``resolution_confidence`` is ``None`` — the v0.1 ladder constant is
+        intentionally **not** surfaced as a decimal probability to users.
+      - ``confidence_band`` is ``"low" | "medium" | "high"`` — a qualitative
+        tier derived from the heuristic score using the thresholds in this
+        module.
+
+    When ``calibrated=True`` (a fitted artifact is in use):
+      - ``resolution_confidence`` is the calibrated float in ``[0, 1]``.
+      - ``confidence_band`` is ``None`` (the decimal is authoritative).
 
     ``similar_past`` (issue #233, additive) carries the ranked list of
     past incidents that the same-incident clustering primitive matched
@@ -180,10 +234,40 @@ class ResolveIncidentResponse(BaseModel):
     target_resource: ResourceSummary | None = None
     responsible_pr: PrSummary | None = None
     slack_threads: list[SlackThreadSummary] = Field(default_factory=list)
-    resolution_confidence: float = Field(ge=0.0, le=1.0)
+
+    # AP4: resolution_confidence is now Optional — None when uncalibrated.
+    resolution_confidence: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Calibrated decimal confidence in [0, 1]. "
+            "Only present when calibrated=True (a fitted artifact is loaded). "
+            "None when calibrated=False — use confidence_band instead."
+        ),
+    )
+
     evidence_recency: float = Field(ge=0.0, le=1.0)
     inferential_confidence: float = Field(ge=0.0, le=1.0)
     uncalibrated: bool = False
+
+    # AP4: first-class Pydantic fields (not injected post-model_dump).
+    calibrated: bool = Field(
+        default=False,
+        description=(
+            "True when resolution_confidence is backed by a fitted isotonic "
+            "calibration artifact.  False when the v0.1 heuristic ladder is "
+            "in use — in that case confidence_band is the authoritative signal."
+        ),
+    )
+    confidence_band: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description=(
+            "Qualitative confidence tier. "
+            "Populated when calibrated=False; None when calibrated=True."
+        ),
+    )
+
     degraded_subsystems: list[str] = Field(default_factory=list)
     snapshot_id: str | None = None
     effective_as_of: datetime
@@ -479,10 +563,12 @@ def build_resolve_response(
     *,
     alert: EntityNodeView,
     classified: ClassifiedNeighbours,
-    resolution_confidence: float,
+    resolution_confidence: float | None,
     evidence_recency: float,
     inferential_confidence: float,
     uncalibrated: bool,
+    calibrated: bool = False,
+    confidence_band: Literal["low", "medium", "high"] | None = None,
     degraded_subsystems: list[str] | None = None,
     snapshot_id: str | None = None,
     as_of: datetime | None,
@@ -525,6 +611,8 @@ def build_resolve_response(
         evidence_recency=evidence_recency,
         inferential_confidence=inferential_confidence,
         uncalibrated=uncalibrated,
+        calibrated=calibrated,
+        confidence_band=confidence_band,
         degraded_subsystems=degraded_subsystems or [],
         snapshot_id=snapshot_id,
         effective_as_of=effective_as_of,
@@ -592,6 +680,8 @@ class AlertIdRequest(BaseModel):
 
 __all__ = [
     "ALERT_NOT_FOUND_CODE",
+    "BAND_HIGH_THRESHOLD",
+    "BAND_MEDIUM_THRESHOLD",
     "CONFIDENCE_ALERT_ONLY",
     "CONFIDENCE_NONE",
     "CONFIDENCE_PR_NO_TEMPORAL_MATCH",

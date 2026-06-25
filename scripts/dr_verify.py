@@ -13,10 +13,13 @@ DRVerificationResult       — structured summary of a verification run
 RtoResult                  — budget vs elapsed; .exceeded is the gate flag
 verify_projections         — async: compare SoT vs projections, return result
 check_rto                  — sync: compute elapsed vs budget, log, exit-non-zero
+verify_hash_equivalence    — AP5: assert stored vectors match SoT-recomputed ones
+ChunkHashRecord            — (chunk_id, content_hash, vector_digest) triple
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sys
 import time
@@ -183,6 +186,108 @@ class RtoResult:
 
 class DRVerificationError(RuntimeError):
     """Raised when verify_projections detects a mismatch."""
+
+
+# ---------------------------------------------------------------------------
+# AP5: hash-equivalence primitives
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ChunkHashRecord:
+    """Content + vector digest for one chunk (AP5 hash-equivalence assertion).
+
+    Attributes
+    ----------
+    chunk_id:
+        Postgres UUID of the chunk.
+    text_hash:
+        SHA-256 hex digest of ``chunk.text`` (source-of-truth content key).
+    vector_digest:
+        SHA-256 hex digest of the embedding vector bytes (little-endian
+        float32 representation, 4 bytes per dimension).
+    """
+
+    chunk_id: uuid.UUID
+    text_hash: str
+    vector_digest: str
+
+
+def compute_vector_digest(vector: list[float]) -> str:
+    """Return a stable SHA-256 hex digest for an embedding vector.
+
+    Encodes each float as a little-endian 4-byte IEEE 754 value so the
+    digest is independent of Python version and platform (as long as the
+    embedding provider is deterministic on the same hardware).
+    """
+    import struct
+
+    packed = struct.pack(f"<{len(vector)}f", *vector)
+    return hashlib.sha256(packed).hexdigest()
+
+
+def compute_text_hash(text: str) -> str:
+    """Return a stable SHA-256 hex digest of the chunk text (UTF-8 encoded)."""
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def verify_hash_equivalence(
+    *,
+    stored: list[ChunkHashRecord],
+    recomputed: list[ChunkHashRecord],
+) -> list[str]:
+    """Compare stored chunk records against freshly-recomputed ones.
+
+    AP5 invariant: for every chunk, the vector digest produced by rebuilding
+    from SoT text must equal the vector digest stored in the projection.
+    This proves that the rebuild path is recomputing from text (not restoring
+    from a cached backup vector).
+
+    Parameters
+    ----------
+    stored:
+        Records pulled from the rebuilt projection (Qdrant vectors read back
+        after upsert).
+    recomputed:
+        Records produced by calling the embedding provider on ``chunk.text``
+        for each chunk in the SoT Postgres table.
+
+    Returns
+    -------
+    list[str]
+        List of human-readable mismatch descriptions.  Empty list = PASS.
+    """
+    mismatches: list[str] = []
+
+    stored_map = {r.chunk_id: r for r in stored}
+    recomputed_map = {r.chunk_id: r for r in recomputed}
+
+    # Check every recomputed chunk appears in stored and matches.
+    for chunk_id, recomp in recomputed_map.items():
+        if chunk_id not in stored_map:
+            mismatches.append(f"chunk {chunk_id}: missing from stored projection")
+            continue
+        stored_rec = stored_map[chunk_id]
+        if stored_rec.text_hash != recomp.text_hash:
+            mismatches.append(
+                f"chunk {chunk_id}: text_hash mismatch "
+                f"(stored={stored_rec.text_hash[:8]}… "
+                f"recomputed={recomp.text_hash[:8]}…)"
+            )
+        if stored_rec.vector_digest != recomp.vector_digest:
+            mismatches.append(
+                f"chunk {chunk_id}: vector_digest mismatch — "
+                "rebuild did not recompute from SoT text "
+                f"(stored={stored_rec.vector_digest[:8]}… "
+                f"recomputed={recomp.vector_digest[:8]}…)"
+            )
+
+    # Check for chunks present in stored but absent from recomputed.
+    for chunk_id in stored_map:
+        if chunk_id not in recomputed_map:
+            mismatches.append(f"chunk {chunk_id}: present in stored but not in recomputed set")
+
+    return mismatches
 
 
 # ---------------------------------------------------------------------------

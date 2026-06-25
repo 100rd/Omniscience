@@ -380,6 +380,9 @@ class GraphRAGComposer:
         ``degraded_subsystems`` lists any stores that lagged behind the
         Postgres SoT watermark at query time; ``staleness_seconds``
         quantifies that lag so callers can decide whether to retry.
+        ``pinned_watermark`` is the minimum version across all three
+        stores — all returned hits satisfy
+        ``applied_version <= pinned_watermark`` (AP3 consistent-stale PIN).
         """
         # ``request.as_of`` is the SearchRequest field; the keyword
         # ``as_of`` wins when both are supplied so server-side overrides
@@ -394,13 +397,16 @@ class GraphRAGComposer:
         _COMPOSED_QUERIES_TOTAL.labels(path="graphrag").inc()
         start = time.monotonic()
 
-        # AP3: capture convergence signals; do NOT discard on timeout.
+        # AP3: capture convergence signals including min_watermark for the PIN.
+        # Do NOT discard on timeout — the watermark is what pins the read path.
         convergence_degraded: list[str] = []
         convergence_staleness: float | None = None
+        min_watermark: int | None = None
         if self._global_reconciler is not None:
             (
                 convergence_degraded,
                 convergence_staleness,
+                min_watermark,
             ) = await self._global_reconciler.wait_for_convergence(workspace_id)
 
         anchor = await self._run_anchor_stage(
@@ -419,6 +425,7 @@ class GraphRAGComposer:
             vector_result=vector_result,
             anchor=anchor,
             as_of=effective,
+            min_watermark=min_watermark,
         )
 
         valid_hits = await self._validate_hits(merged.hits, workspace_id)
@@ -437,6 +444,7 @@ class GraphRAGComposer:
             as_of=effective.isoformat() if effective else None,
             degraded_subsystems=convergence_degraded,
             staleness_seconds=convergence_staleness,
+            min_watermark=min_watermark,
         )
         # Pre-history detection: caller supplied an explicit ``as_of``,
         # graph anchor returned no hits AND zero merged hits remain.
@@ -470,6 +478,7 @@ class GraphRAGComposer:
             degraded=degraded,
             degraded_subsystems=convergence_degraded,
             staleness_seconds=convergence_staleness,
+            min_watermark=min_watermark,
         )
 
     # ------------------------------------------------------------------
@@ -603,6 +612,7 @@ class GraphRAGComposer:
         vector_result: SearchResult,
         anchor: _AnchorStageResult,
         as_of: datetime | None = None,
+        min_watermark: int | None = None,
     ) -> SearchResult:
         from omniscience_retrieval.probabilistic_scoring import (
             calculate_probabilistic_confidence,
@@ -610,6 +620,11 @@ class GraphRAGComposer:
         )
 
         stage_start = time.monotonic()
+
+        # AP3 consistent-stale PIN: drop any hit whose applied_version exceeds
+        # the min_watermark so the composed result never contains evidence from
+        # an epoch that some stores have not yet applied.
+        filtered_hits = _apply_watermark_filter(vector_result.hits, min_watermark)
 
         # Unpack anchor results for O(1) lookup
         if anchor.candidate_source_ids:
@@ -636,7 +651,7 @@ class GraphRAGComposer:
             anchor.candidate_centralities if anchor.candidate_centralities else {}
         )
 
-        for idx, hit in enumerate(vector_result.hits):
+        for idx, hit in enumerate(filtered_hits):
             if hit.chunk_id in seen_chunks:
                 continue
             seen_chunks.add(hit.chunk_id)
@@ -773,6 +788,32 @@ class GraphRAGComposer:
 # ---------------------------------------------------------------------------
 # Pure helpers (module-level, easy to unit-test)
 # ---------------------------------------------------------------------------
+
+
+def _apply_watermark_filter(
+    hits: list[SearchHit],
+    min_watermark: int | None,
+) -> list[SearchHit]:
+    """Drop hits whose ``applied_version`` exceeds ``min_watermark``.
+
+    AP3 consistent-stale PIN: ensures no composed result contains evidence
+    from a future epoch that some stores have not yet applied.
+
+    Rules:
+    - When ``min_watermark is None``: no filter applied — all hits pass.
+      This handles cold stores (no version info) and the no-reconciler path.
+    - When ``min_watermark == 0``: all hits with a non-None ``applied_version``
+      are dropped (empty result), because even version 1 is "future" relative
+      to a cold store.  Hits with ``applied_version is None`` pass through.
+    - Otherwise: keep hits where ``applied_version is None`` or
+      ``applied_version <= min_watermark``.
+
+    INVARIANT: after this filter, no retained hit has
+    ``applied_version > min_watermark`` (when watermark is not None).
+    """
+    if min_watermark is None:
+        return hits
+    return [h for h in hits if h.applied_version is None or h.applied_version <= min_watermark]
 
 
 def _extract_anchor(request: SearchRequest) -> str:
@@ -941,8 +982,9 @@ def _stamp_envelope(
     degraded: bool,
     degraded_subsystems: list[str] | None = None,
     staleness_seconds: float | None = None,
+    min_watermark: int | None = None,
 ) -> SearchResult:
-    """Attach ``effective_as_of``, optional ``meta`` block, and AP3 staleness fields.
+    """Attach ``effective_as_of``, optional ``meta`` block, and AP3 staleness/pin fields.
 
     Issue #133 contract: explicit ``as_of`` echoes back; ``None`` is
     replaced with response generation time.  When ``degraded`` is true
@@ -952,9 +994,11 @@ def _stamp_envelope(
 
     AP3 contract: ``degraded_subsystems`` and ``staleness_seconds`` are
     set when any store lagged behind the Postgres SoT watermark at query
-    time, regardless of whether ``degraded`` is true.  Callers MUST treat
-    a non-empty ``degraded_subsystems`` as a staleness signal and may
-    choose to retry or surface a freshness warning.
+    time, regardless of whether ``degraded`` is true.  ``pinned_watermark``
+    is the min version across all stores — it is stamped here regardless
+    of convergence state so callers always know the epoch of the response.
+    Callers MUST treat a non-empty ``degraded_subsystems`` as a staleness
+    signal and may choose to retry or surface a freshness warning.
     """
     effective_as_of = as_of if as_of is not None else datetime.now(UTC)
     meta: dict[str, Any] | None = None
@@ -963,6 +1007,7 @@ def _stamp_envelope(
     update: dict[str, Any] = {
         "effective_as_of": effective_as_of,
         "meta": meta,
+        "pinned_watermark": min_watermark,
     }
     if degraded_subsystems:
         update["degraded_subsystems"] = degraded_subsystems
@@ -979,4 +1024,5 @@ __all__ = [
     "MAX_ANCHOR_DEPTH",
     "MERGE_ALPHA",
     "GraphRAGComposer",
+    "_apply_watermark_filter",
 ]

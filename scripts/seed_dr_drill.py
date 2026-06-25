@@ -7,8 +7,24 @@ Inserts:
   - 3 documents with deterministic IDs and doc_version values
   - 3 chunks per document (9 chunks total)
 
-No real embeddings are generated — a fixed-dimension zero vector is stored
-directly so the drill runs without an embedding service.
+AP5 change (consilium-v9 Batch D)
+----------------------------------
+The zero-vector bypass has been REMOVED.  Previously the seed stored
+``embedding=[0.0] * 384`` directly, which meant the rebuild path that
+checks ``if not chunk.embedding`` would always call the provider — but
+the *value* stored was fake and did not test the real recompute-from-SoT
+path.
+
+Now the seed stores NO embedding (``embedding=None``/empty).  When the
+drill runs ``rebuild_all_projections.py --recompute-embeddings``, every
+chunk will be re-embedded from its ``chunk.text`` via the live provider.
+When ``OMNISCIENCE_EMBEDDING_PROVIDER=local`` is set (the DR drill CI
+env), the local model produces deterministic 384-dim vectors from the
+text, exercising the true rebuild-from-SoT path.
+
+The ``dr_verify.py --hash-assert`` step then compares the stored vectors
+against fresh embeddings produced from the same SoT text, proving
+hash-equivalence (AP5 invariant).
 
 Controlled by env var OMNISCIENCE_DR_DRILL=1 to prevent accidental
 execution in a non-drill environment.
@@ -41,12 +57,31 @@ DOC_IDS = [
 # 3 chunks per document; 9 total
 CHUNKS_PER_DOC = 3
 
-# Zero vector: must match the embedding dimension expected by Qdrant.
-# The embedding provider in DR drill mode (OMNISCIENCE_EMBEDDING_PROVIDER=local)
-# uses a 384-dim model; we supply the vector directly to Postgres so the
-# rebuild script reads it from chunk.embedding instead of re-embedding.
-EMBEDDING_DIM = 384
-ZERO_EMBEDDING = [0.0] * EMBEDDING_DIM
+
+# AP5: chunk text templates.  Each chunk gets a deterministic text string
+# derived from its document and ordinal index so the embedding provider
+# produces the same vector on every rebuild from the same SoT text.
+#
+# The text must be non-empty and meaningful enough for the local embedding
+# model to produce a stable non-zero vector.
+def _chunk_text(doc_idx: int, ord_idx: int) -> str:
+    """Return a deterministic, non-trivial text for the given chunk position.
+
+    The text is long enough (~20 tokens) so that the local/sentence-transformer
+    model produces a non-trivial embedding.  Using a fixed template guarantees
+    that two rebuilds from the same Postgres SoT produce bit-identical vectors
+    (the AP5 hash-equivalence invariant).
+    """
+    topics = [
+        "database migration strategy for distributed systems",
+        "kubernetes deployment configuration and rollout policy",
+        "observability and alerting for microservice infrastructure",
+    ]
+    return (
+        f"DR drill document {doc_idx + 1}, chunk {ord_idx}: "
+        f"{topics[doc_idx % len(topics)]}. "
+        f"This chunk exists to verify the rebuild-from-SoT path (AP5)."
+    )
 
 
 async def seed() -> None:
@@ -86,8 +121,11 @@ async def seed() -> None:
                     id=uuid.uuid5(doc_id, f"chunk-{ord_idx}"),
                     document_id=doc_id,
                     ord=ord_idx,
-                    text=f"Chunk text {idx + 1}.{ord_idx}",
-                    embedding=ZERO_EMBEDDING,
+                    text=_chunk_text(idx, ord_idx),
+                    # AP5: NO pre-stored embedding.  The rebuild script will
+                    # recompute from chunk.text via the live provider.
+                    # This is the correct rebuild-from-SoT pattern.
+                    embedding=None,
                     embedding_model="local-384",
                     embedding_provider="local",
                     parser_version="1.0",
@@ -99,6 +137,7 @@ async def seed() -> None:
     print(
         f"DR drill seed complete: workspace={WORKSPACE_ID} source={SOURCE_ID}"
         f" docs={len(DOC_IDS)} chunks={len(DOC_IDS) * CHUNKS_PER_DOC}"
+        " (no pre-stored embeddings; rebuild will recompute from SoT text)"
     )
     await engine.dispose()
 

@@ -1,0 +1,144 @@
+name: Conformance Gates
+
+# PR-blocking conformance jobs — one named job per P0 Action Point.
+# Each job must stay green for a PR to merge.  Stub/xfail tests start
+# green (xfail is not a failure); they flip to fully-green once the
+# corresponding Batch implements the invariant.
+#
+# AP1: per-entity CAS (Batch B)
+# AP2: bounded re-emit + tombstone heal (Batch C)
+# AP3: no mixed-epoch in composed results (Batch A — REAL tests, must pass now)
+# AP4: confidence decimal suppression (Batch D)
+# AP5: DR-drill rebuild-from-SoT + hash-assert (Batch E, Postgres service)
+# AP7: arch invariants — single-writer + MCP retrieval-only (Batch F)
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # AP1 — per-entity conditional apply (CAS)
+  # Stub tests: xfail until Batch B implements CAS Cyphers + store.py wiring.
+  # ---------------------------------------------------------------------------
+  ap1-per-entity-cas:
+    name: "AP1 per-entity CAS"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/conformance/test_ap1_per_entity_cas.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # AP2 — bounded re-emit + tombstone heal + edge re-emit
+  # Stub tests: xfail until Batch C implements the bounded reconciler.
+  # ---------------------------------------------------------------------------
+  ap2-reconcile-convergence:
+    name: "AP2 bounded re-emit + tombstone"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/conformance/test_ap2_bounded_reemit.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # AP3 — no mixed-epoch in composed results (REAL tests — must be green now)
+  # ---------------------------------------------------------------------------
+  ap3-no-mixed-epoch:
+    name: "AP3 no mixed-epoch"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/conformance/test_ap3_no_mixed_epoch.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # AP4 — confidence decimal suppression when uncalibrated
+  # Stub tests: xfail until Batch D implements band suppression in schema.
+  # ---------------------------------------------------------------------------
+  ap4-confidence-suppression:
+    name: "AP4 confidence suppression"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/conformance/test_ap4_confidence_suppression.py -v --tb=short
+
+  # ---------------------------------------------------------------------------
+  # AP5 — DR-drill rebuild-from-SoT + hash-assert (Postgres service required)
+  # Stub tests: xfail until Batch E implements --recompute-embeddings + hash assert.
+  # ---------------------------------------------------------------------------
+  ap5-dr-smoke:
+    name: "AP5 DR smoke (rebuild-from-SoT)"
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: omniscience_test
+          POSTGRES_USER: omniscience
+          POSTGRES_PASSWORD: test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/conformance/test_ap5_dr_hash_assert.py -v --tb=short
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:test@localhost:5432/omniscience_test
+
+  # ---------------------------------------------------------------------------
+  # AP7 — arch invariants: single-writer boundary + MCP retrieval-only
+  # Stub tests: xfail until Batch F implements AST walker + tool registry.
+  # ---------------------------------------------------------------------------
+  ap7-arch-invariants:
+    name: "AP7 arch invariants"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+      - run: uv run pytest tests/conformance/test_ap7_arch_invariants.py -v --tb=short

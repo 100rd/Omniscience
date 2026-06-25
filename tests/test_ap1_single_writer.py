@@ -14,6 +14,7 @@ Covers:
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -518,3 +519,91 @@ def test_entity_merge_event_model_fields() -> None:
     assert unmerge_evt.merged_node_id == merged_id
     assert unmerge_evt.source_id is None
     assert unmerge_evt.target_id is None
+
+
+# ---------------------------------------------------------------------------
+# AP1 CAS live integration assertion
+# (gated by OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1 — same gate as bitemporal
+#  contract tests in test_neo4j_store_bitemporal_writer.py)
+# ---------------------------------------------------------------------------
+
+_CONTRACT = pytest.mark.skipif(
+    not os.environ.get("OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS"),
+    reason="set OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1 to run live Neo4j contract tests",
+)
+
+
+@_CONTRACT
+@pytest.mark.asyncio
+async def test_live_cas_stale_write_does_not_regress_entity_version() -> None:
+    """AP1 live contract: write entity v5 to live Neo4j, attempt v3, read back version==5.
+
+    Authoritative end-to-end guard that the CAS Cypher fires correctly
+    against a real Neo4j node property.  Uses the URI/password from env
+    vars, defaulting to the local docker-compose service.
+    """
+    import os as _os
+
+    from omniscience_core.storage.graph import EntityUpsert
+    from omniscience_index.stores.neo4j.store import Neo4jGraphStore, Neo4jStoreConfig
+
+    neo4j_uri = _os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user = _os.environ.get("NEO4J_USERNAME", "neo4j")
+    neo4j_pw = _os.environ.get("NEO4J_PASSWORD", "neo4j")
+
+    config = Neo4jStoreConfig(
+        uri=neo4j_uri,
+        username=neo4j_user,
+        password=neo4j_pw,
+        database="neo4j",
+        max_connection_pool_size=5,
+        connection_acquisition_timeout_seconds=10.0,
+        max_transaction_retry_time_seconds=10.0,
+        default_max_depth=3,
+        bitemporal_enabled=False,
+    )
+    store = Neo4jGraphStore(config=config)
+    await store.connect()
+
+    ws_id = uuid.uuid4()
+    entity_id = uuid.uuid4()
+    source_id = uuid.uuid4()
+
+    try:
+        # Step 1: write entity at version 5
+        e5 = EntityUpsert(
+            id=entity_id,
+            source_id=source_id,
+            entity_type="service",
+            name="svc.ap1-live-cas",
+            display_name="svc.ap1-live-cas",
+            chunk_id=None,
+            metadata={},
+            version=5,
+        )
+        await store.upsert_entity(entity=e5, workspace_id=ws_id)
+
+        # Step 2: attempt stale re-delivery at version 3
+        e3 = EntityUpsert(
+            id=entity_id,
+            source_id=source_id,
+            entity_type="service",
+            name="svc.ap1-live-cas",
+            display_name="svc.ap1-live-cas",
+            chunk_id=None,
+            metadata={},
+            version=3,
+        )
+        await store.upsert_entity(entity=e3, workspace_id=ws_id)
+
+        # Step 3: read back — entity must still be at version 5
+        versions = await store.get_entity_versions(workspace_id=ws_id)
+        assert entity_id in versions, (
+            f"AP1 live: entity {entity_id} not found in versions map for workspace {ws_id}"
+        )
+        assert versions[entity_id] == 5, (
+            f"AP1 live CAS violation: entity.version should be 5 after stale v3 redelivery, "
+            f"got {versions[entity_id]}.  The per-entity CAS guard is not working."
+        )
+    finally:
+        await store.close()
