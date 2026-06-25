@@ -915,7 +915,7 @@ RETURN count(DISTINCT stub) AS resolved
 # Reference: Neo4j 5.x MERGE locking semantics — "MERGE acquires a write lock
 # on the node or relationship being merged, preventing other transactions from
 # concurrently creating or modifying it." (Neo4j Operations Manual §Locking).
-# See also ADR-0018 §CAS Atomicity and ADR-0012 §AP1.
+# See also ADR-0017 §CAS Atomicity and ADR-0012 §AP1.
 # ---------------------------------------------------------------------------
 
 _UPSERT_ENTITY_CAS_CYPHER: Final[str] = f"""

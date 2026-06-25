@@ -107,7 +107,14 @@ def _make_qdrant_config() -> Any:
 
 
 async def _make_session_factory(database_url: str) -> Any:
-    """Build a real async_sessionmaker against the live Postgres."""
+    """Build a real async_sessionmaker against the live Postgres.
+
+    This function also bootstraps the schema via SQLAlchemy metadata
+    (Base.metadata.create_all) so the test is self-contained in any
+    Postgres job that does NOT pre-run alembic migrations.  This matches
+    the convention established in tests/test_store_contract.py.
+    """
+    from omniscience_core.db.models import Base
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
     from sqlalchemy.ext.asyncio import create_async_engine as _sa_create_async_engine
 
@@ -117,6 +124,13 @@ async def _make_session_factory(database_url: str) -> Any:
         max_overflow=5,
         pool_pre_ping=True,
     )
+
+    # Bootstrap schema so tests pass in ANY postgres job (with or without
+    # a prior "alembic upgrade head" step).  create_all is idempotent
+    # (IF NOT EXISTS), so it is harmless when the schema already exists.
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
     return async_sessionmaker(
         bind=engine,
         class_=AsyncSession,
