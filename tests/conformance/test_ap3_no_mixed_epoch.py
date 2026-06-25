@@ -1,4 +1,4 @@
-"""AP3 / v10-AP1 / v10-AP2 conformance tests — no mixed-epoch evidence.
+"""AP3 / v10-AP1 / v10-AP2 / v11-AP1 conformance tests — no mixed-epoch evidence.
 
 AP3 invariant: every hit in a SearchResult must have
 ``applied_version <= watermark[its_source]`` (or ``applied_version is None``).
@@ -14,6 +14,13 @@ node/edge with ``version > watermark[its_source]`` with evidence pinned
 to that watermark.  The graph VIEW is pinned to the same per-source epoch
 as the vector evidence.
 
+v11-AP1 invariant (fail-closed epoch policy): a hit whose source has NO
+entry in the per_source_watermark map and has a non-None applied_version is
+DROPPED (strict_epoch=True, the default).  Only applied_version=None hits
+from unmapped sources pass through.  The old fail-open behaviour (pass-through
+for unmapped sources) is available via strict_epoch=False (not recommended
+for production — see ADR-0017).
+
 These tests are REAL (not xfail) and must remain green throughout the
 codebase lifetime.  They use mocks only — no containers required.
 
@@ -28,7 +35,9 @@ Test cases
 5. ``_apply_watermark_filter`` pure-function boundary test (per-source map).
 6. [v10-AP1] multi-source: source A@v10 healthy + source B@v0 cold →
    source A hits still returned; only source B hits dropped.
-7. [v10-AP1] hit from source not in watermark map → passes (no blackout).
+7. [v11-AP1 INVERTED from v10] unmapped-source hit with applied_version=100
+   MUST be DROPPED (fail-closed, strict_epoch=True).  Only applied_version=None
+   from unmapped sources passes through.
 8. [v10-AP2] anchor node version > source watermark → excluded from anchor result
    (graph-ahead mixed-epoch prevented).
 9. [v10-AP2] anchor seed node version > source watermark → treated as anchor miss.
@@ -110,12 +119,17 @@ def _make_composer_with_reconciler(
     min_watermark: int | None,
     hits: list[SearchHit],
     per_source_watermark: dict[str, int] | None = None,
+    *,
+    strict_epoch: bool = True,
 ) -> GraphRAGComposer:
     """Build a GraphRAGComposer whose reconciler returns the given watermark.
 
     v10-AP1: per_source_watermark is passed to the reconciler mock.
     If None, a default per-source map is built from min_watermark and
     the hit source IDs (for backwards compatibility with single-source tests).
+
+    v11-AP1: strict_epoch (default True) is forwarded to the composer so
+    tests can assert both fail-closed (default) and fail-open behaviour.
     """
     # Build default per-source map if not provided
     if per_source_watermark is None:
@@ -149,6 +163,7 @@ def _make_composer_with_reconciler(
     composer._global_reconciler = mock_reconciler  # type: ignore[attr-defined]
     composer._session_factory = None  # type: ignore[attr-defined]
     composer._is_entity_parked_fn = None  # type: ignore[attr-defined]
+    composer._strict_epoch = strict_epoch  # type: ignore[attr-defined]
     composer._vector_store = _FakeVS()  # type: ignore[attr-defined]
     composer._graph_store = MagicMock()  # type: ignore[attr-defined]
     composer._graph_store.traverse = AsyncMock(side_effect=ValueError("entity_not_found"))
@@ -370,10 +385,23 @@ def test_apply_watermark_filter_pure_function() -> None:
     assert _apply_watermark_filter([], {str(src_x): 5}) == []
     assert _apply_watermark_filter([], None) == []
 
-    # --- source not in map: hit passes (no blackout) ---
+    # --- source not in map, strict_epoch=True (default): versioned hit DROPPED (fail-closed) ---
     h_unknown = _make_hit(applied_version=999, source_id=src_unknown)
-    result = _apply_watermark_filter([h_unknown], {str(src_x): 7})
-    assert len(result) == 1, "Hit from source not in watermark map must pass (no blackout)"
+    result_strict = _apply_watermark_filter([h_unknown], {str(src_x): 7}, strict_epoch=True)
+    assert result_strict == [], (
+        "v11-AP1 fail-closed: versioned hit from unmapped source must be dropped"
+    )
+
+    # --- source not in map, applied_version=None: always passes (no version info) ---
+    h_unknown_none = _make_hit(applied_version=None, source_id=src_unknown)
+    result_none = _apply_watermark_filter([h_unknown_none], {str(src_x): 7}, strict_epoch=True)
+    assert len(result_none) == 1, "applied_version=None from unmapped source must always pass"
+
+    # --- source not in map, strict_epoch=False (legacy fail-open): versioned hit passes ---
+    result_open = _apply_watermark_filter([h_unknown], {str(src_x): 7}, strict_epoch=False)
+    assert len(result_open) == 1, (
+        "strict_epoch=False (legacy): versioned hit from unmapped source must pass"
+    )
 
     # --- two-source independence: src_x@wm=7, src_y@wm=3 ---
     h_y_v2 = _make_hit(applied_version=2, source_id=src_y)
@@ -443,12 +471,18 @@ async def test_multi_source_cold_source_does_not_blackout_healthy_source() -> No
 
 
 @pytest.mark.asyncio
-async def test_multi_source_unknown_source_not_blacked_out() -> None:
-    """A hit from a source not in the watermark map passes through (no blackout).
+async def test_unmapped_source_versioned_hit_dropped_fail_closed() -> None:
+    """v11-AP1 fail-closed: an unmapped-source hit with applied_version=100 MUST be DROPPED.
 
-    This handles the case where a new source ingested data but the reconciler
-    has not yet seen its checkpoint.  We must not drop the hit — only sources
-    with an explicit watermark entry are filtered.
+    Intent (v11-AP1 inversion of old test 7): the old behaviour allowed a
+    versioned hit from a source absent from the per_source_watermark map to
+    pass through (fail-open).  v11-AP1 closes this leak — with strict_epoch=True
+    (the default), a versioned hit from an unmapped source is DROP-ed to prevent
+    mixed-epoch evidence.  Only applied_version=None hits from unmapped sources
+    are allowed through (no version info → no ceiling to enforce).
+
+    Regression guard: this test MUST remain green.  Reverting to fail-open
+    (strict_epoch=False) is a deliberate opt-in — not the default.
     """
     src_known = uuid.uuid4()
     src_new = uuid.uuid4()
@@ -456,19 +490,34 @@ async def test_multi_source_unknown_source_not_blacked_out() -> None:
     hits = [
         _make_hit(applied_version=5, text="known-v5", source_id=src_known),
         _make_hit(applied_version=100, text="new-v100", source_id=src_new),  # no map entry
+        _make_hit(applied_version=None, text="new-unversioned", source_id=src_new),  # must pass
     ]
     per_source_wm = {str(src_known): 7}  # src_new is NOT in the map
     composer = _make_composer_with_reconciler(
         min_watermark=7,
         hits=hits,
         per_source_watermark=per_source_wm,
+        strict_epoch=True,  # v11-AP1 default: fail-closed
     )
     req = SearchRequest(query="test", top_k=10)
     result = await composer.search(req, workspace_id=_WS)
 
-    new_src_hits = [h for h in result.hits if h.source.id == src_new]
-    assert len(new_src_hits) == 1, "Hit from source not in watermark map must pass through"
-    assert new_src_hits[0].applied_version == 100
+    # The versioned hit at v=100 from an unmapped source MUST be DROPPED (fail-closed).
+    new_src_versioned_hits = [
+        h for h in result.hits if h.source.id == src_new and h.applied_version is not None
+    ]
+    assert new_src_versioned_hits == [], (
+        "v11-AP1 fail-closed: versioned hit from unmapped source (applied_version=100) "
+        f"must be DROPPED; got {[(h.applied_version,) for h in new_src_versioned_hits]}"
+    )
+
+    # Unversioned hit from unmapped source MUST still pass (no version → no ceiling).
+    new_src_none_hits = [
+        h for h in result.hits if h.source.id == src_new and h.applied_version is None
+    ]
+    assert len(new_src_none_hits) == 1, (
+        "applied_version=None from unmapped source must pass through (no version to pin)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -534,7 +583,9 @@ def test_apply_graph_watermark_filter_excludes_graph_ahead_related_nodes() -> No
     )
 
     per_source_wm = {src_a: 10, src_b: 5, src_c: 5}
-    filtered = _apply_graph_watermark_filter(graph_result, per_source_wm)
+    # v11-AP2: _apply_graph_watermark_filter now returns (filtered_result, seed_excluded)
+    filtered, seed_excluded = _apply_graph_watermark_filter(graph_result, per_source_wm)
+    assert not seed_excluded, "Seed is within watermark (v5 <= wm=10); must not be excluded"
 
     # OkEntity (v3 <= src_b wm=5) must remain
     remaining_names = [n.name for n in filtered.related]
@@ -576,7 +627,9 @@ def test_apply_graph_watermark_filter_node_version_none_passes() -> None:
     )
     graph_result = GraphResultView(seed=seed, related=[node], edges=[])
     per_source_wm = {src: 0}  # even ceiling=0 must not drop None-versioned nodes
-    filtered = _apply_graph_watermark_filter(graph_result, per_source_wm)
+    # v11-AP2: returns (filtered_result, seed_excluded)
+    filtered, seed_excluded = _apply_graph_watermark_filter(graph_result, per_source_wm)
+    assert not seed_excluded, "version=None seed must not be excluded"
     assert len(filtered.related) == 1, "version=None node must not be excluded"
 
 
@@ -605,8 +658,13 @@ def test_apply_graph_watermark_filter_source_not_in_map_passes() -> None:
     )
     graph_result = GraphResultView(seed=seed, related=[node_unmapped], edges=[])
     per_source_wm = {src_mapped: 10}  # src_unmapped not in map
-    filtered = _apply_graph_watermark_filter(graph_result, per_source_wm)
-    assert len(filtered.related) == 1, "Unmapped source node must not be excluded"
+    # v11-AP2: returns (filtered_result, seed_excluded)
+    # Note: _apply_graph_watermark_filter (graph-node filter) does not drop unmapped
+    # graph nodes — only _apply_watermark_filter (vector-hit filter) does the strict_epoch
+    # drop.  Graph nodes from unmapped sources pass through (no ceiling info for them).
+    filtered, seed_excluded = _apply_graph_watermark_filter(graph_result, per_source_wm)
+    assert not seed_excluded, "Seed source is in map and within watermark"
+    assert len(filtered.related) == 1, "Unmapped source graph node must not be excluded"
 
 
 # ---------------------------------------------------------------------------
@@ -663,6 +721,7 @@ async def test_graph_ahead_seed_node_treated_as_anchor_miss() -> None:
     composer._global_reconciler = mock_reconciler  # type: ignore[attr-defined]
     composer._session_factory = None  # type: ignore[attr-defined]
     composer._is_entity_parked_fn = None  # type: ignore[attr-defined]
+    composer._strict_epoch = True  # type: ignore[attr-defined]
     composer._vector_store = _FakeVS()  # type: ignore[attr-defined]
     # graph_store.traverse returns the graph-ahead seed
     graph_store_mock = MagicMock()

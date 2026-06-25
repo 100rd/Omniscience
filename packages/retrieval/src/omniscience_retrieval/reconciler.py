@@ -18,6 +18,13 @@ convenience but callers SHOULD use ``per_source_watermark`` for filtering.
 
 ``wait_for_convergence`` returns
 ``(degraded_subsystems, staleness_seconds, min_watermark, per_source_watermark)``.
+
+v11-AP1 (consilium-v11): ``check_convergence`` now populates
+``per_source_watermark`` for EVERY source known to ANY store (union of
+pg/neo4j/qdrant source ids).  A cold source (pg==0 or present only in a
+projection) receives an explicit ``0`` entry — never omission.  This
+closes the mixed-epoch leak where a source absent from the map was
+treated as "pass-through" (fail-open) by the retrieval layer.
 """
 
 from __future__ import annotations
@@ -36,10 +43,10 @@ log = structlog.get_logger(__name__)
 
 
 class GlobalReconciler:
-    """Blocks until Qdrant and Neo4j checkpoints reach the Postgres watermark.
+    """Blocks until Qdrant and Neo4j checkpoints reach the Postgres SoT.
 
-    AP3 / v10-AP1 contract
-    ----------------------
+    AP3 / v10-AP1 / v11-AP1 contract
+    ----------------------------------
     ``wait_for_convergence`` returns a tuple
     ``(degraded_subsystems: list[str], staleness_seconds: float | None,
     min_watermark: int | None, per_source_watermark: dict[str, int])``.
@@ -49,6 +56,11 @@ class GlobalReconciler:
     computed independently for each source.  A cold source (version 0) only
     blackouts ITS OWN hits; healthy sources in the same workspace are unaffected.
     When the map is empty (no documents in workspace) no filtering is applied.
+
+    v11-AP1 guarantee: EVERY source known to ANY store (union of pg/neo4j/qdrant
+    source ids) appears in ``per_source_watermark`` with an explicit value.
+    A source that has no pg documents gets ``0`` — never omission — so the
+    retrieval layer's fail-closed policy can rely on the map being complete.
 
     ``min_watermark`` is the global minimum across ALL sources — retained for
     backwards compatibility and observability.  Callers MUST use
@@ -101,6 +113,8 @@ class GlobalReconciler:
               is filtered only against ``per_source_watermark[A]``; a cold
               source B does NOT decimate hits from healthy source A.  Empty
               dict means no documents in the workspace — no filtering applied.
+              v11-AP1: every source known to ANY store has an explicit entry
+              (cold sources receive ``0``, not omission).
 
         Never raises — callers receive stale data with explicit signals rather
         than a hard failure.
@@ -141,6 +155,14 @@ class GlobalReconciler:
         against the same snapshot, preventing non-monotonic flap caused by
         interleaved reads.
 
+        v11-AP1: ``per_source_watermark`` is populated for the UNION of source
+        ids known to any store (pg, neo4j, qdrant).  A cold source (pg==0, or
+        present in a projection but absent in pg) receives an explicit ``0``
+        entry rather than omission.  This ensures the retrieval layer's
+        fail-closed policy (``_apply_watermark_filter`` with ``strict_epoch=True``)
+        always has an authoritative entry for every source that has ever been
+        indexed.
+
         Returns
         -------
         ``(converged, degraded_subsystems, staleness_seconds, min_watermark,
@@ -151,21 +173,31 @@ class GlobalReconciler:
               ``None`` when converged or the PG watermark is empty.
             - ``min_watermark``: global minimum version across all sources and
               all stores.  ``None`` when no version data exists.
-            - ``per_source_watermark``: per-source ceiling map (v10-AP1).
+            - ``per_source_watermark``: per-source ceiling map (v10-AP1 / v11-AP1).
               ``min(pg_v, neo4j_v, qdrant_v)`` computed independently per source.
-              Used by the GraphRAG composer to filter a hit only against its own
-              source's watermark — NOT a global min (v10-AP1 fix).
+              Every source known to ANY store appears here.
         """
         # 1. Snapshot the Postgres watermark once — prevents epoch-skew flap.
         pg_watermarks = await self._snapshot_pg_watermark(workspace_id)
-        if not pg_watermarks:
-            return True, [], None, None, {}
 
         # 2. Fetch store checkpoints concurrently against the same snapshot.
         qdrant_checkpoints, neo4j_checkpoints = await asyncio.gather(
             self._get_qdrant_checkpoints(workspace_id),
             self._get_neo4j_checkpoints(workspace_id),
         )
+
+        # v11-AP1: build the union of ALL source ids known to any store.
+        # A source absent from pg (cold or projection-only) still gets an
+        # explicit entry — the retrieval layer must never see an omission.
+        all_source_ids: set[str] = (
+            set(pg_watermarks.keys())
+            | set(qdrant_checkpoints.keys())
+            | set(neo4j_checkpoints.keys())
+        )
+
+        if not all_source_ids:
+            # Workspace has no documents anywhere — no filtering needed.
+            return True, [], None, None, {}
 
         # 3. Compare each store against the snapshot; collect lagging stores.
         qdrant_lagging = False
@@ -175,28 +207,30 @@ class GlobalReconciler:
         # Global version list for backwards-compatible min_watermark scalar.
         all_versions: list[int] = []
 
-        # Per-source watermark map (v10-AP1): each source gets its own ceiling.
+        # Per-source watermark map (v10-AP1 / v11-AP1): each source gets its
+        # own ceiling.  Cold sources (pg==0 / absent from pg) get explicit 0.
         per_source_watermark: dict[str, int] = {}
 
-        for source_id, pg_version in pg_watermarks.items():
-            if pg_version == 0:
-                continue
+        for source_id in all_source_ids:
+            pg_version = pg_watermarks.get(source_id, 0)
             q_version = qdrant_checkpoints.get(source_id, 0)
             n_version = neo4j_checkpoints.get(source_id, 0)
 
-            # Per-source ceiling: hits from this source are pinned to the
-            # minimum version that ALL three stores agree on for it.
+            # Per-source ceiling: the minimum version all three stores agree on.
+            # A cold pg source (pg_version==0) pins the ceiling to 0 so any
+            # versioned hit from this source is dropped by the retrieval layer.
             source_min = min(pg_version, q_version, n_version)
             per_source_watermark[source_id] = source_min
 
-            all_versions.extend([pg_version, q_version, n_version])
-
-            if q_version < pg_version:
-                qdrant_lagging = True
-                max_lag = max(max_lag, float(pg_version - q_version))
-            if n_version < pg_version:
-                neo4j_lagging = True
-                max_lag = max(max_lag, float(pg_version - n_version))
+            # Convergence tracking: only meaningful when pg knows about the source.
+            if pg_version > 0:
+                all_versions.extend([pg_version, q_version, n_version])
+                if q_version < pg_version:
+                    qdrant_lagging = True
+                    max_lag = max(max_lag, float(pg_version - q_version))
+                if n_version < pg_version:
+                    neo4j_lagging = True
+                    max_lag = max(max_lag, float(pg_version - n_version))
 
         min_watermark: int | None = min(all_versions) if all_versions else None
 

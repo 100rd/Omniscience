@@ -581,6 +581,7 @@ async def test_composer_serves_results_even_when_stores_degraded() -> None:
     composer._global_reconciler = mock_reconciler  # type: ignore[attr-defined]
     composer._session_factory = None  # type: ignore[attr-defined]
     composer._is_entity_parked_fn = None  # type: ignore[attr-defined]
+    composer._strict_epoch = True  # type: ignore[attr-defined]
     composer._vector_store = _FakeVS()  # type: ignore[attr-defined]
     composer._graph_store = MagicMock()  # type: ignore[attr-defined]
     composer._graph_store.traverse = AsyncMock(side_effect=ValueError("entity_not_found"))

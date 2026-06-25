@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Retrieval: fail-closed epoch policy and per-source watermark observability
+  (consilium-v11 AP1/AP2/AP5/AP6, ADR-0017).**
+
+  *Mixed-epoch leak (AP1 — P0)*: `GlobalReconciler.check_convergence` now
+  populates `per_source_watermark` for the **union** of source ids known to any
+  store (pg ∪ neo4j ∪ qdrant).  A cold source (pg==0 or projection-only) receives
+  an explicit `0` entry — never omission.  The retrieval layer now defaults to
+  **fail-closed** (`strict_epoch=True`): a vector hit whose source is absent from
+  the watermark map AND has a non-`None` `applied_version` is dropped, preventing
+  future-epoch evidence from slipping through a reconciler race window.  The legacy
+  fail-open behaviour is available via `GraphRAGComposer(strict_epoch=False)`.
+
+  A new Prometheus counter `omniscience_graphrag_epoch_dropped_unmapped_total`
+  tracks hits dropped by the fail-closed policy so the leak-rate is observable.
+
+  *Explicit anchor-miss, no control-flow-by-exception (AP2 — P0)*:
+  `_apply_graph_watermark_filter` no longer raises `ValueError` to signal a
+  graph-ahead seed.  It now returns `(filtered_result, seed_excluded: bool)`.
+  `_run_anchor_stage` maps `seed_excluded=True` → `anchor_hit=False`
+  deterministically.  The `try/except` around `graph_store.traverse()` is
+  narrowed to only catch `ValueError` (entity-not-found semantics); genuine
+  traverse errors (network failures, schema errors) propagate rather than being
+  silently swallowed as anchor-misses.
+
+  *Graph reachability recompute (AP5 — P1)*: after `_apply_graph_watermark_filter`
+  excludes ahead nodes and their edges, a BFS re-derives which related nodes are
+  reachable from the seed over surviving edges.  Nodes reachable ONLY through
+  excluded ahead-edges (phantom paths) are dropped before they can feed
+  graph-affinity scoring.
+
+  *Documentation and observability (AP6 — P2)*: ADR-0017 documents the per-source
+  epoch semantics, the causal-temporal implication of mixing epochs across sources,
+  the `version is None` pass-through policy, and the `strict_epoch` knob.  The
+  composed answer legitimately mixes epochs ACROSS sources (each source is pinned
+  to its own watermark) — this is intentional and now explicitly documented.
+  The nullable-confidence break (consilium-v9-AP4) is noted in ADR-0017.
+
+  See `docs/decisions/0017-per-source-epoch-pin.md` for the full decision record.
+
 - **Deployment: 'lite' profile to reduce ops-burden (issue #319).** A new
   `docker-compose.lite.yml` override trims the first-run / evaluation stack
   from nine containers to six: embeddings run in-process via
