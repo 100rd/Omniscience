@@ -455,11 +455,17 @@ class Neo4jGraphStore:
         async def _run(tx: Any) -> None:
             entity_version = getattr(entity, "version", None)
             forced_replay = getattr(entity, "forced_replay", False)
+            bypass_source_checkpoint = getattr(entity, "bypass_source_checkpoint", False)
             if entity_version is not None:
                 # ----------------------------------------------------------------
                 # Source-level checkpoint fast-path (coarse guard).
                 # Skip if the source checkpoint is already at or beyond this version
-                # (unless epoch supersedes or forced_replay bypasses).
+                # (unless epoch supersedes, forced_replay, or
+                # bypass_source_checkpoint bypasses).
+                # v10-AP3: bypass_source_checkpoint is set on backfill upserts so
+                # the per-entity CAS below can still heal a node that is stale
+                # relative to the SoT even when the source checkpoint is current.
+                # Unlike forced_replay, the per-entity CAS monotonic guard is kept.
                 # ----------------------------------------------------------------
                 res = await tx.run(
                     (
@@ -482,7 +488,7 @@ class Neo4jGraphStore:
                 if ep is not None and existing_epoch is not None and ep > existing_epoch:
                     should_skip = False
 
-                if forced_replay:
+                if forced_replay or bypass_source_checkpoint:
                     should_skip = False
 
                 if should_skip:
@@ -576,7 +582,8 @@ class Neo4jGraphStore:
                     should_skip = False
 
                 fr = getattr(edge, "forced_replay", False)
-                if fr:
+                bypass_edge = getattr(edge, "bypass_source_checkpoint", False)
+                if fr or bypass_edge:
                     should_skip = False
 
                 if should_skip:
