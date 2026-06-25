@@ -152,3 +152,86 @@ Operators who require strict cross-source consistency (rare) should:
 - ADR-0008: Bitemporal schema for Neo4j (source of `version` field semantics)
 - consilium-v9-AP4: nullable confidence introduction (superseded confidence
   propagation for None-versioned nodes)
+- ADR-0012: Per-entity CAS monotonic guard (source of `_UPSERT_ENTITY_CAS_CYPHER`)
+
+---
+
+## Addendum: CAS Atomicity Under Concurrent Writes (v11-AP4)
+
+**Date**: 2026-06-25  
+**Closes**: consilium-v11-AP4 (root-cause — CAS atomicity unproven under concurrency)
+
+### Background
+
+The per-entity CAS is implemented as a single Cypher statement:
+
+```cypher
+MERGE (n:Entity {workspace_id: $workspace_id, id: $id})
+WITH n,
+     CASE WHEN $forced THEN TRUE
+          ELSE $incoming_version > coalesce(n.version, -1)
+     END AS should_write
+FOREACH (_ IN CASE WHEN should_write THEN [1] ELSE [] END |
+    SET n.version = $incoming_version, ...
+)
+RETURN n.id AS id, should_write AS applied
+```
+
+The v11-AP4 concern was whether concurrent backfill writes (`bypass_source_checkpoint=True`)
+and live upserts for the **same entity** could race and produce a lost update —
+e.g. a lower version overwriting a higher one.
+
+### Atomicity Guarantee
+
+**Neo4j MERGE acquires a per-node write lock** on the matched (or newly created)
+node for the entire duration of the enclosing transaction.  This means:
+
+1. The `MERGE … WITH … CASE … FOREACH SET` sequence is **atomic per entity**:
+   no concurrent transaction can read or modify `n.version` between the `MERGE`
+   and the `FOREACH SET`.
+
+2. Concurrent writers for the **same entity** are serialised by Neo4j's
+   node-level write lock.  One writer acquires the lock, evaluates `n.version`,
+   sets it if the predicate passes, and releases the lock.  The next writer then
+   sees the updated `n.version`.
+
+3. **No lost update is possible** via the CAS path: if writer A sets `n.version=8`
+   and writer B (at version=3) arrives concurrently, B's CAS predicate evaluates
+   `3 > 8 → False` after A releases the lock, so B's FOREACH is a no-op.
+
+Reference: Neo4j Operations Manual §Locking — "MERGE acquires a write lock on
+the node or relationship being merged, preventing other transactions from
+concurrently creating or modifying it."
+
+### Source-Checkpoint Race (Not Applicable Here)
+
+The concern about "separate source-checkpoint read+advance statements racing"
+does not apply to the per-entity version (`n.version`): the version read and
+the version write are inside the **same atomic MERGE statement**.  The
+source-checkpoint (a separate `StoreCheckpoint` node in Neo4j) is managed by a
+separate Cypher call, but the per-entity CAS does not depend on it — the
+`bypass_source_checkpoint` flag only controls whether the Python code skips the
+source-checkpoint read before calling the CAS Cypher.  The CAS Cypher itself
+always reads `n.version` atomically inside the MERGE.
+
+### Empirical Verification
+
+The concurrency guarantee is proven by `tests/integration/test_ap4_cas_concurrency.py`
+(v11-AP4), which contains three tests:
+
+1. **`test_live_ap4_concurrent_upserts_final_version_is_max`**: fires all versions
+   in `[2, 4, 6, 8]` concurrently via `asyncio.gather` across all permutations
+   (24 → capped at 20); asserts final `n.version == 8` for every permutation.
+
+2. **`test_live_ap4_backfill_interleaved_with_live_writes`**: interleaves a
+   backfill at v=3 (`bypass_source_checkpoint=True`) with live writes at [4,5,6,7,8]
+   in 10 concurrent trials; asserts final `n.version == 8` (backfill does NOT
+   regress the entity).
+
+3. **`test_live_ap4_no_lost_update_random_permutations`**: runs 20 seeded-random
+   permutations of versions [1..8] concurrently; asserts final `n.version == 8`
+   in every trial.  Equivalent to a Hypothesis `@given(st.permutations(range(1,9)))`
+   property test over the chosen permutations (seed=42).
+
+All three tests pass against a live Neo4j 5.19 instance.  No lost-update was
+detected — the MERGE lock guarantee holds in practice.

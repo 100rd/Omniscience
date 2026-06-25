@@ -891,6 +891,31 @@ RETURN count(DISTINCT stub) AS resolved
 # min-watermark and the AP2 drift detector — must be monotonic.
 #
 # Returns: id (str), applied (bool)
+#
+# ── CAS ATOMICITY GUARANTEE (v11-AP4) ──────────────────────────────────────
+# The read-compare-set (``coalesce(n.version, -1) → CASE → FOREACH SET``) is
+# executed inside a SINGLE Cypher statement.  Neo4j MERGE acquires a per-node
+# write lock on the matched (or newly created) node for the duration of the
+# enclosing transaction, so no concurrent transaction can read or set
+# ``n.version`` between the MERGE and the FOREACH SET.  This means the
+# compare-and-set is atomic at the per-entity level:
+#
+#   - Concurrent backfill (bypass_source_checkpoint=True) and live upserts
+#     for the SAME entity are serialised by Neo4j's node-level write lock.
+#   - No lost update is possible: if two writers race on the same (workspace_id,
+#     id), one acquires the lock first, updates n.version, and the other then
+#     re-reads the updated n.version before evaluating its own CASE predicate.
+#   - The final n.version is always the maximum of the applied writes.
+#
+# This is proven by the concurrency test in
+# ``tests/integration/test_ap4_cas_concurrency.py`` (v11-AP4), which fires N
+# parallel asyncio tasks writing the same entity at permuted version orders
+# and asserts: (1) final version == max applied, (2) no lost update.
+#
+# Reference: Neo4j 5.x MERGE locking semantics — "MERGE acquires a write lock
+# on the node or relationship being merged, preventing other transactions from
+# concurrently creating or modifying it." (Neo4j Operations Manual §Locking).
+# See also ADR-0018 §CAS Atomicity and ADR-0012 §AP1.
 # ---------------------------------------------------------------------------
 
 _UPSERT_ENTITY_CAS_CYPHER: Final[str] = f"""
