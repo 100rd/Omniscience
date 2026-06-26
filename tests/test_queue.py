@@ -44,6 +44,7 @@ def _make_js_mock() -> MagicMock:
     js = MagicMock()
     js.publish = AsyncMock()
     js.add_stream = AsyncMock()
+    js.update_stream = AsyncMock()
     return js
 
 

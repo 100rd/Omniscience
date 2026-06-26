@@ -295,8 +295,12 @@ jobs:
       #   AP1:  live CAS (single-writer stale redelivery rejected)
       #   AP2:  backfill heal (bypass_source_checkpoint → CAS heals stale node)
       #   AP3a: mock-reconciler watermark + graph-anchor pin (unchanged from v10-AP6)
-      #   AP3b: REAL-reconciler cold-source + fail-closed gate (v11-AP3 NEW)
-      #   AP4:  CAS concurrency — no lost update under parallel writes (v11-AP4 NEW)
+      #   AP3b: REAL-reconciler cold-source + fail-closed gate (v11-AP3)
+      #   AP3c: REAL-reconciler via consumer→NATS→store path (v12-AP4 NEW)
+      #         test_live_ap3_v12_consumer_path_fail_closed — exercises the full
+      #         OutboxConsumerWorker→NATS→Neo4j/Qdrant ingest pipeline before
+      #         running GlobalReconciler + composer fail-closed assertion.
+      #   AP4:  CAS concurrency — no lost update under parallel writes (v11-AP4)
       - name: Run live P0 behavioral assertions
         run: |
           uv run pytest \

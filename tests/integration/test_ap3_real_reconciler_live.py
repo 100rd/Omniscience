@@ -767,3 +767,280 @@ async def test_live_ap3_v11_real_reconciler_healthy_source_unaffected_by_cold() 
         await neo4j_store.close()
         await qdrant_store.close()
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# AP4 consumer-path variant (v12-AP4): exercise outbox→NATS→consumer→store path
+# ---------------------------------------------------------------------------
+
+_NATS_URL = os.environ.get("NATS_URL", "")
+
+_LIVE_RECONCILER_CONSUMER = pytest.mark.skipif(
+    not (_NEO4J and _QDRANT and _PG_URL and _NATS_URL),
+    reason=(
+        "set OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1, "
+        "OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS=1, DATABASE_URL, "
+        "and NATS_URL to run the consumer-path AP3 live gate (v12-AP4)"
+    ),
+)
+
+
+@_LIVE_RECONCILER_CONSUMER
+@pytest.mark.asyncio
+async def test_live_ap3_v12_consumer_path_fail_closed() -> None:
+    """v12-AP4: AP3 real-reconciler test exercised via outbox→NATS→consumer→store path.
+
+    This mirrors test_live_ap3_v11_real_reconciler_cold_source_explicit_zero but
+    ingests entities and chunks via the REAL OutboxConsumerWorker + NATS JetStream
+    pipeline instead of calling upsert_entity/upsert_chunks directly.  This
+    exercises the full consumer→NATS→store path (AP4 fidelity requirement).
+
+    Setup
+    -----
+    Two sources in workspace W:
+    - src_a: HEALTHY — EntityUpsertEvent at version=5 published to NATS outbox,
+      consumed by OutboxConsumerWorker which writes Neo4j entity + Qdrant chunk.
+      Postgres Source+Document inserted directly (as the real ingest pipeline does).
+    - src_b: COLD — EntityUpsertEvent at version=1 published to NATS outbox,
+      consumed by OutboxConsumerWorker → Neo4j + Qdrant.  NO Postgres doc for src_b.
+
+    After consumer drains:
+    1. REAL GlobalReconciler.check_convergence asserts cold source has explicit 0
+       in per_source_watermark (v11-AP1a).
+    2. Composer end-to-end asserts cold-source hits are DROPPED (v11-AP1b,
+       fail-closed), exactly as in the direct-upsert variant.
+
+    Gate: OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1 AND
+          OMNISCIENCE_RUN_QDRANT_CONTRACT_TESTS=1 AND
+          DATABASE_URL AND NATS_URL.
+    """
+    import asyncio
+
+    from omniscience_core.config import Settings
+    from omniscience_core.queue.connection import NatsConnection
+    from omniscience_core.queue.messages import EntityUpsertEvent
+    from omniscience_core.queue.producer import QueueProducer
+    from omniscience_core.queue.streams import ensure_streams
+    from omniscience_index.stores.neo4j.store import Neo4jGraphStore
+    from omniscience_index.stores.qdrant_store import QdrantVectorStore
+    from omniscience_retrieval.reconciler import GlobalReconciler
+    from omniscience_server.outbox_consumer import OutboxConsumerWorker
+
+    neo4j_uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user = os.environ.get("NEO4J_USERNAME", "neo4j")
+    neo4j_pw = os.environ.get("NEO4J_PASSWORD", "neo4j")
+    database_url = os.environ["DATABASE_URL"]
+    nats_url = os.environ["NATS_URL"]
+
+    embedding_provider = _DeterministicEmbeddingProvider()
+    neo4j_config = _make_neo4j_config(uri=neo4j_uri, user=neo4j_user, pw=neo4j_pw)
+    qdrant_config = _make_qdrant_config()
+
+    neo4j_store = Neo4jGraphStore(config=neo4j_config)
+    qdrant_store = QdrantVectorStore(config=qdrant_config, embedding_provider=embedding_provider)
+
+    await neo4j_store.connect()
+    await qdrant_store.connect()
+
+    session_factory, engine = await _make_session_factory(database_url)
+
+    # Connect to REAL NATS for the consumer path
+    settings = Settings(nats_url=nats_url)
+    nats_conn = NatsConnection()
+    await nats_conn.connect(settings)
+    await ensure_streams(nats_conn.jetstream)
+
+    ws_id = uuid.uuid4()
+    src_a = uuid.uuid4()  # healthy — Postgres doc at v5
+    src_b = uuid.uuid4()  # cold — no Postgres docs
+
+    try:
+        # ------------------------------------------------------------------
+        # Step 1: Insert Postgres Source + Document for src_a only.
+        # src_b intentionally has NO Postgres documents (cold source).
+        # ------------------------------------------------------------------
+        await _insert_source_and_document(
+            session_factory,
+            workspace_id=ws_id,
+            source_id=src_a,
+            doc_version=5,
+        )
+        # src_b NOT inserted into Postgres — it is cold.
+
+        # ------------------------------------------------------------------
+        # Step 2: Publish EntityUpsertEvents to NATS outbox for both sources.
+        # The OutboxConsumerWorker will consume these and write to Neo4j + Qdrant.
+        # ------------------------------------------------------------------
+        producer = QueueProducer(nats_conn.jetstream)
+
+        entity_id_a = uuid.uuid4()
+        entity_id_b = uuid.uuid4()
+
+        event_a = EntityUpsertEvent(
+            id=str(entity_id_a),
+            source_id=str(src_a),
+            workspace_id=str(ws_id),
+            entity_type="service",
+            name=f"svc.ap4-consumer-src-a-{str(ws_id)[:8]}",
+            display_name=f"svc.ap4-consumer-src-a-{str(ws_id)[:8]}",
+            metadata={},
+            version=5,
+            is_backfill=False,
+            content_hash=hashlib.sha256(f"src-a-{ws_id}".encode()).hexdigest(),
+        )
+        event_b = EntityUpsertEvent(
+            id=str(entity_id_b),
+            source_id=str(src_b),
+            workspace_id=str(ws_id),
+            entity_type="service",
+            name=f"svc.ap4-consumer-src-b-cold-{str(ws_id)[:8]}",
+            display_name=f"svc.ap4-consumer-src-b-cold-{str(ws_id)[:8]}",
+            metadata={},
+            version=1,
+            is_backfill=False,
+            content_hash=hashlib.sha256(f"src-b-{ws_id}".encode()).hexdigest(),
+        )
+
+        await producer.publish("outbox.entity.upsert", event_a)
+        await producer.publish("outbox.entity.upsert", event_b)
+
+        # ------------------------------------------------------------------
+        # Step 3: Start OutboxConsumerWorker and drain the two events.
+        # Use a short-lived consumer: start it, wait for both events to land
+        # in Neo4j + Qdrant (poll until present), then stop the consumer.
+        # ------------------------------------------------------------------
+        consumer = OutboxConsumerWorker(
+            nats_conn=nats_conn,
+            graph_store=neo4j_store,
+            vector_store=qdrant_store,
+            embedding_provider=embedding_provider,
+            session_factory=session_factory,
+        )
+        await consumer.start()
+
+        # Poll until both entities appear in Neo4j by entity UUID (max 15 s).
+        # get_entity_versions returns {uuid: version} for all entities in workspace.
+        deadline = asyncio.get_event_loop().time() + 15.0
+        found_versions: dict[uuid.UUID, int] = {}
+        while asyncio.get_event_loop().time() < deadline:
+            found_versions = await neo4j_store.get_entity_versions(workspace_id=ws_id)
+            if entity_id_a in found_versions and entity_id_b in found_versions:
+                break
+            await asyncio.sleep(0.3)
+        else:
+            await consumer.stop()
+            raise AssertionError(
+                f"v12-AP4: OutboxConsumerWorker did not process both entities within 15s.  "
+                f"Entity UUIDs in Neo4j: {list(found_versions.keys())[:5]}.  "
+                f"Expected entity_a={entity_id_a} and entity_b={entity_id_b}"
+            )
+
+        await consumer.stop()
+
+        # ------------------------------------------------------------------
+        # Step 4: Construct REAL GlobalReconciler and run check_convergence.
+        # ------------------------------------------------------------------
+        real_reconciler = GlobalReconciler(
+            session_factory=session_factory,
+            vector_store=qdrant_store,
+            graph_store=neo4j_store,
+        )
+
+        (
+            _converged,
+            _degraded,
+            _staleness,
+            _min_watermark,
+            per_source_wm,
+        ) = await real_reconciler.check_convergence(workspace_id=ws_id)
+
+        # ------------------------------------------------------------------
+        # v11-AP1a assertion: cold source (src_b, pg==0) must be EXPLICITLY
+        # present in per_source_watermark with value 0.
+        # ------------------------------------------------------------------
+        src_a_key = str(src_a)
+        src_b_key = str(src_b)
+
+        assert src_b_key in per_source_wm, (
+            f"v12-AP4 consumer-path: cold source {src_b_key[:8]} is MISSING from "
+            f"per_source_watermark.  The consumer→NATS→store path wrote src_b to "
+            f"Neo4j/Qdrant but check_convergence did not include it in the union.  "
+            f"Map keys: {list(per_source_wm.keys())[:5]}"
+        )
+        assert per_source_wm[src_b_key] == 0, (
+            f"v12-AP4 consumer-path: cold source {src_b_key[:8]} has "
+            f"per_source_watermark={per_source_wm[src_b_key]}, expected 0.  "
+            f"A source with no pg documents must get explicit value 0."
+        )
+        assert src_a_key in per_source_wm, (
+            f"v12-AP4: healthy source {src_a_key[:8]} is missing from per_source_watermark."
+        )
+
+        # ------------------------------------------------------------------
+        # v11-AP1b assertion: end-to-end composer drops cold-source hits.
+        # ------------------------------------------------------------------
+        from omniscience_retrieval.graph_rag import GraphRAGComposer
+        from omniscience_retrieval.models import SearchRequest
+
+        class _FakeLegacy:
+            async def search(self, request: SearchRequest) -> Any:
+                from omniscience_retrieval.models import QueryStats, SearchResult
+
+                return SearchResult(
+                    hits=[],
+                    query_stats=QueryStats(
+                        total_matches_before_filters=0,
+                        vector_matches=0,
+                        text_matches=0,
+                        duration_ms=0.0,
+                    ),
+                )
+
+        composer = GraphRAGComposer(
+            graph_store=neo4j_store,
+            vector_store=qdrant_store,
+            legacy_service=_FakeLegacy(),
+            global_reconciler=real_reconciler,
+        )
+
+        req = SearchRequest(
+            query=f"ap4-consumer-path {ws_id}",
+            top_k=20,
+        )
+        result = await composer.search(req, workspace_id=ws_id)
+
+        # Cold source hits must be dropped by fail-closed filter.
+        src_b_hits_versioned = [
+            h
+            for h in result.hits
+            if h.source.id == src_b and h.applied_version is not None and h.applied_version > 0
+        ]
+        assert src_b_hits_versioned == [], (
+            f"v12-AP4 consumer-path: cold source {src_b_key[:8]} (wm=0) has versioned "
+            f"hits passing the fail-closed filter: "
+            f"{[h.applied_version for h in src_b_hits_versioned]}.  "
+            "The consumer-path wrote versioned evidence that was not dropped."
+        )
+
+        # All surviving versioned hits must respect their per-source watermark.
+        for hit in result.hits:
+            if hit.applied_version is None:
+                continue
+            src_key = str(hit.source.id)
+            if src_key in per_source_wm:
+                wm = per_source_wm[src_key]
+                assert hit.applied_version <= wm, (
+                    f"v12-AP4 consumer-path: source {src_key[:8]} hit "
+                    f"applied_version={hit.applied_version} > wm={wm} — "
+                    "mixed-epoch violation."
+                )
+
+    finally:
+        import contextlib
+
+        async with contextlib.AsyncExitStack() as _:
+            with contextlib.suppress(Exception):
+                await nats_conn.disconnect()
+        await neo4j_store.close()
+        await qdrant_store.close()
+        await engine.dispose()

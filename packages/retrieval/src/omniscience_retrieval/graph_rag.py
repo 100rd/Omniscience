@@ -60,6 +60,27 @@ BFS over the surviving edges re-derives which nodes are reachable from
 the seed.  Nodes reachable only through excluded edges are removed so
 phantom paths do not feed graph-affinity scoring.
 
+v12-AP1 — empty-map fail-closed bypass fix
+-------------------------------------------
+``_apply_watermark_filter`` previously used ``if not per_source_watermark:``
+to short-circuit both ``None`` (no reconciler) AND ``{}`` (reconciler ran,
+no sources found).  This meant a cold-start with an empty map passed ALL
+versioned hits unconditionally, defeating the strict_epoch=True fail-closed
+contract.  Fixed: ``per_source_watermark is None`` is the only bypass; an
+empty dict flows into the per-hit logic so versioned hits from unrecognised
+sources are still dropped when strict_epoch=True.
+
+v12-AP3 — directed reachability BFS verdict (undirected by design)
+--------------------------------------------------------------------
+The Neo4j ``traverse()`` Cypher uses an undirected pattern
+``(seed)-[rels*]-( neighbour)`` (no arrowhead), so edges are followed in
+BOTH directions by design.  The ``_recompute_reachability`` BFS correctly
+builds an undirected adjacency to match this traversal semantics.  Making the
+BFS directed would produce a reachability set INCONSISTENT with what
+``traverse()`` returned: nodes reachable against edge direction would be
+pruned here but were included by the graph query.  The undirected BFS is the
+correct behaviour; this is documented (not changed) as the AP3 verdict.
+
 Backwards-compatibility
 -----------------------
 
@@ -947,8 +968,15 @@ def _apply_watermark_filter(
     the fail-closed policy so the leak-rate is observable.
 
     Rules (strict_epoch=True, the default):
-    - When ``per_source_watermark is None`` or empty: no filter applied —
-      all hits pass.  This handles the no-reconciler path.
+    - When ``per_source_watermark is None``: no reconciler is wired → pass
+      all hits unchanged.  This is the no-reconciler path (legitimate).
+    - When ``per_source_watermark == {}`` (empty dict): the reconciler RAN
+      but found no sources in any store.  Under strict_epoch=True this is
+      a cold-start scenario — every versioned hit is from a source the
+      reconciler has not yet seen, so ALL versioned hits are DROPPED
+      (fail-closed).  Under strict_epoch=False all hits pass (legacy).
+      This is the v12-AP1 fix: an empty map MUST flow through the per-hit
+      logic instead of short-circuiting, to prevent cold-start bypass.
     - For a hit whose source has no entry in the map:
       - ``applied_version is None``: pass through (no version info).
       - ``applied_version is not None``: DROP (fail-closed) and increment
@@ -967,7 +995,8 @@ def _apply_watermark_filter(
     ``applied_version > per_source_watermark[hit.source.id]`` for sources
     present in the map.
     """
-    if not per_source_watermark:
+    if per_source_watermark is None:
+        # No reconciler wired — pass all hits unchanged.
         return hits
 
     result: list[SearchHit] = []
@@ -1095,13 +1124,27 @@ def _recompute_reachability(graph_result: Any) -> Any:
     were already pinned to their original BFS depths by ``traverse()``.  The
     important invariant is that nodes with phantom paths (only reachable via
     excluded edges) are REMOVED entirely rather than getting a stale depth.
+
+    Directed vs undirected (v12-AP3 verdict):
+    Neo4j ``traverse()`` uses the Cypher pattern
+    ``(seed)-[rels*1..N]-(neighbour)`` WITHOUT an arrowhead — this is
+    intentionally UNDIRECTED so that all graph neighbours (regardless of
+    whether the edge points away from or toward the seed) contribute to the
+    candidate subgraph.  The BFS here MUST mirror this undirected semantics;
+    building a directed adjacency (from_entity → to_entity only) would cause
+    nodes that ``traverse()`` included via reverse-edge paths to be incorrectly
+    pruned.  The undirected adjacency below is therefore CORRECT by design.
     """
     if not graph_result.related and not graph_result.edges:
         return graph_result
 
     seed_name = graph_result.seed.name
 
-    # Build adjacency list from surviving edges (undirected for reachability).
+    # Build undirected adjacency from surviving edges.
+    # Rationale: Neo4j traverse() uses an undirected Cypher pattern
+    # (seed)-[rels*]-(neighbour) so both directions are followed by the
+    # graph query.  This BFS must use the same undirected semantics to avoid
+    # pruning nodes that traverse() legitimately returned via reverse edges.
     adjacency: dict[str, set[str]] = {}
     for edge in graph_result.edges:
         adjacency.setdefault(edge.from_entity, set()).add(edge.to_entity)

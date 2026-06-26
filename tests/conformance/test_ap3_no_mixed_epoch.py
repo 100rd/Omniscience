@@ -115,24 +115,33 @@ def _make_result(hits: list[SearchHit]) -> SearchResult:
     )
 
 
+_SENTINEL: object = object()  # sentinel object for "not provided" default
+
+
 def _make_composer_with_reconciler(
     min_watermark: int | None,
     hits: list[SearchHit],
-    per_source_watermark: dict[str, int] | None = None,
+    per_source_watermark: dict[str, int] | None = _SENTINEL,  # type: ignore[arg-type,assignment]
     *,
     strict_epoch: bool = True,
 ) -> GraphRAGComposer:
     """Build a GraphRAGComposer whose reconciler returns the given watermark.
 
     v10-AP1: per_source_watermark is passed to the reconciler mock.
-    If None, a default per-source map is built from min_watermark and
-    the hit source IDs (for backwards compatibility with single-source tests).
+    If not explicitly provided (sentinel), a default per-source map is built
+    from min_watermark and the hit source IDs (for backwards compatibility
+    with single-source tests).
 
     v11-AP1: strict_epoch (default True) is forwarded to the composer so
     tests can assert both fail-closed (default) and fail-open behaviour.
+
+    v12-AP1: per_source_watermark=None is now a valid explicit value meaning
+    "no reconciler" (pass None to the mock).  The sentinel distinguishes
+    "not provided" from explicit None.
     """
-    # Build default per-source map if not provided
-    if per_source_watermark is None:
+    # Build default per-source map only when per_source_watermark was not
+    # explicitly provided by the caller (sentinel detection).
+    if per_source_watermark is _SENTINEL:
         if min_watermark is not None:
             per_source_watermark = {str(h.source.id): min_watermark for h in hits}
         else:
@@ -225,7 +234,15 @@ async def test_watermark_filters_future_epoch_hits() -> None:
 
 @pytest.mark.asyncio
 async def test_none_watermark_passes_all_hits() -> None:
-    """When watermark is None (cold store or no reconciler), no filtering occurs."""
+    """per_source_watermark=None (no reconciler wired) passes all hits unchanged.
+
+    v12-AP1 clarification: this test uses per_source_watermark=None, which is the
+    legitimate "no reconciler" sentinel.  The old test used per_source_watermark={}
+    (empty dict) — that was the AP1 bug: an empty map silently bypassed the fail-closed
+    filter, allowing all versioned hits to pass even when the reconciler had run but
+    found no sources.  The empty-map case is now covered by
+    test_empty_map_fail_closed_drops_versioned_hits (v12-AP1 regression test).
+    """
     hits = [
         _make_hit(applied_version=1),
         _make_hit(applied_version=100),
@@ -234,14 +251,14 @@ async def test_none_watermark_passes_all_hits() -> None:
     composer = _make_composer_with_reconciler(
         min_watermark=None,
         hits=hits,
-        per_source_watermark={},
+        per_source_watermark=None,  # v12-AP1: None = no reconciler wired; {} ≠ None
     )
     req = SearchRequest(query="test", top_k=10)
     result = await composer.search(req, workspace_id=_WS)
 
     # All 3 hits must be present (order may differ after scoring)
     assert len(result.hits) == 3, (
-        f"All 3 hits must pass when watermark is None; got {len(result.hits)}"
+        f"All 3 hits must pass when per_source_watermark is None; got {len(result.hits)}"
     )
     assert result.pinned_watermark is None, (
         "pinned_watermark must be None when no watermark available"
@@ -348,13 +365,26 @@ def test_apply_watermark_filter_pure_function() -> None:
 
     all_hits_x = [h_none, h_v0, h_v5, h_v7, h_v8, h_v10]
 
-    # --- watermark map None: no filter ---
+    # --- watermark map None: no filter (no reconciler wired) ---
     result = _apply_watermark_filter(all_hits_x, None)
     assert result == all_hits_x, "watermark=None must return all hits unchanged"
 
-    # --- watermark map empty: no filter ---
-    result = _apply_watermark_filter(all_hits_x, {})
-    assert result == all_hits_x, "empty watermark map must return all hits unchanged"
+    # --- watermark map empty (v12-AP1 fix): strict_epoch=True → only None-versioned pass ---
+    # Empty dict means "reconciler ran but found no sources in any store".  Under
+    # strict_epoch=True (default), every versioned hit is from an unmapped source and
+    # must be DROPPED fail-closed.  Only applied_version=None hits pass through.
+    # (Old behavior: all hits passed — this was the AP1 empty-map bypass bug.)
+    result_strict_empty = _apply_watermark_filter(all_hits_x, {}, strict_epoch=True)
+    surviving_strict = {h.applied_version for h in result_strict_empty}
+    assert surviving_strict == {None}, (
+        f"v12-AP1: empty map + strict_epoch=True must only pass None-versioned hits; "
+        f"got {surviving_strict}"
+    )
+    # Under strict_epoch=False (legacy): all hits pass (no ceiling for unmapped sources)
+    result_open_empty = _apply_watermark_filter(all_hits_x, {}, strict_epoch=False)
+    assert result_open_empty == all_hits_x, (
+        "empty map + strict_epoch=False (legacy) must return all hits unchanged"
+    )
 
     # --- single source watermark = 7: drop v8 and v10 ---
     wm = {str(src_x): 7}
@@ -745,4 +775,251 @@ async def test_graph_ahead_seed_node_treated_as_anchor_miss() -> None:
     assert all(v is None or v <= 7 for v in surviving_versions), (
         "No hit should exceed watermark=7 after graph-ahead anchor rejection: "
         f"{surviving_versions}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v12-AP1 regression: empty map + strict_epoch=True → versioned hits DROPPED
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_empty_map_fail_closed_drops_versioned_hits() -> None:
+    """v12-AP1 regression: empty per_source_watermark + strict_epoch=True is FAIL-CLOSED.
+
+    An empty dict ({}) means the reconciler RAN but found no sources in any store
+    (cold start / no data yet).  Before the v12-AP1 fix, ``if not per_source_watermark``
+    short-circuited on both None AND {} identically, allowing ALL versioned hits to
+    pass — bypassing the fail-closed contract silently on cold start.
+
+    After the fix, ``per_source_watermark is None`` is the only bypass.  An empty
+    map flows through the per-hit logic: every hit from a source not in the map
+    (i.e., every hit, since the map is empty) is evaluated:
+    - applied_version is None → passes (no version info, no ceiling to enforce).
+    - applied_version is not None → DROPPED (fail-closed: source unmapped).
+
+    Variants tested:
+    1. empty map + strict_epoch=True + versioned hit → DROPPED.
+    2. empty map + strict_epoch=True + None-versioned hit → passes.
+    3. per_source_watermark=None (no reconciler) + versioned hit → passes.
+    """
+    src_id = uuid.uuid4()
+    hit_versioned = _make_hit(applied_version=42, source_id=src_id)
+    hit_none_versioned = _make_hit(applied_version=None, source_id=src_id)
+
+    # --- Variant 1: empty map + strict_epoch=True + versioned hit → DROPPED ---
+    result = _apply_watermark_filter([hit_versioned], {}, strict_epoch=True)
+    assert result == [], (
+        "v12-AP1 regression: empty per_source_watermark + strict_epoch=True + "
+        "versioned hit must be DROPPED (fail-closed cold-start bypass was the bug)"
+    )
+
+    # --- Variant 2: empty map + strict_epoch=True + None-versioned hit → passes ---
+    result = _apply_watermark_filter([hit_none_versioned], {}, strict_epoch=True)
+    assert len(result) == 1, (
+        "v12-AP1: applied_version=None from unmapped source must always pass "
+        "(no version info → no ceiling to enforce)"
+    )
+
+    # --- Variant 3: None map (no reconciler) + versioned hit → passes ---
+    result = _apply_watermark_filter([hit_versioned], None)
+    assert len(result) == 1, (
+        "per_source_watermark=None (no reconciler wired) must pass all hits unchanged — "
+        "this is the legitimate no-reconciler path"
+    )
+
+
+@pytest.mark.asyncio
+async def test_empty_map_fail_closed_end_to_end() -> None:
+    """v12-AP1 end-to-end: composer with empty per_source_watermark drops versioned hits.
+
+    Exercises the full composer path (not just the pure function) to verify the
+    empty-map fix propagates correctly through _run_merge_stage.
+
+    Setup: reconciler returns per_source_watermark={} (empty map), strict_epoch=True.
+    Three hits: versioned from src_a, versioned from src_b, None-versioned from src_a.
+
+    Expected: both versioned hits DROPPED; None-versioned hit passes.
+    """
+    src_a = uuid.uuid4()
+    src_b = uuid.uuid4()
+
+    hits = [
+        _make_hit(applied_version=5, text="versioned-a", source_id=src_a),
+        _make_hit(applied_version=10, text="versioned-b", source_id=src_b),
+        _make_hit(applied_version=None, text="unversioned-a", source_id=src_a),
+    ]
+    composer = _make_composer_with_reconciler(
+        min_watermark=None,
+        hits=hits,
+        per_source_watermark={},  # reconciler ran, no sources found
+        strict_epoch=True,
+    )
+    req = SearchRequest(query="test", top_k=10)
+    result = await composer.search(req, workspace_id=_WS)
+
+    # All versioned hits must be dropped (fail-closed, empty map).
+    versioned_hits = [h for h in result.hits if h.applied_version is not None]
+    assert versioned_hits == [], (
+        f"v12-AP1 end-to-end: empty map + strict_epoch=True must drop ALL versioned hits; "
+        f"got {[(h.applied_version, h.text) for h in versioned_hits]}"
+    )
+    # None-versioned hit must still pass.
+    none_versioned = [h for h in result.hits if h.applied_version is None]
+    assert len(none_versioned) == 1, (
+        f"v12-AP1: None-versioned hit must pass through empty-map fail-closed filter; "
+        f"got {none_versioned}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v12-AP3 regression: undirected BFS matches undirected Neo4j traverse semantics
+# ---------------------------------------------------------------------------
+
+
+def test_recompute_reachability_undirected_keeps_reverse_edge_nodes() -> None:
+    """v12-AP3: _recompute_reachability BFS is undirected — matches Neo4j traverse.
+
+    Neo4j traverse() uses the Cypher pattern (seed)-[rels*]-(neighbour) WITHOUT
+    an arrowhead, so it follows edges in BOTH directions.  The BFS in
+    _recompute_reachability must therefore also be undirected, or nodes
+    reachable only via reverse-direction edges would be incorrectly pruned here
+    after being legitimately included by traverse().
+
+    This test verifies: a node reachable ONLY via a reverse edge (i.e., the
+    stored edge direction is B→Seed, but BFS from Seed follows it backwards to B)
+    IS retained when the BFS is undirected, as required.
+
+    Topology:
+        Seed → A  (forward edge: from_entity=Seed, to_entity=A)
+        B → Seed  (reverse edge: from_entity=B, to_entity=Seed; only reachable
+                   from Seed by following edge in reverse — undirected BFS does this)
+
+    Expected after _recompute_reachability: both A and B are retained.
+
+    If BFS were directed (only Seed→A, not Seed←B), B would be incorrectly pruned.
+    This is the AP3 directed-vs-undirected scenario; we verify the correct
+    undirected behavior matches what traverse() would return.
+    """
+    from omniscience_core.storage.graph import EntityNodeView, GraphEdgeView, GraphResultView
+    from omniscience_retrieval.graph_rag import _recompute_reachability
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Seed",
+        kind="service",
+        source=str(uuid.uuid4()),
+        chunk_text=None,
+        depth=0,
+        version=None,
+    )
+    node_a = EntityNodeView(
+        id=uuid.uuid4(),
+        name="A",
+        kind="repo",
+        source=str(uuid.uuid4()),
+        chunk_text=None,
+        depth=1,
+        version=None,
+    )
+    node_b = EntityNodeView(
+        id=uuid.uuid4(),
+        name="B",
+        kind="team",
+        source=str(uuid.uuid4()),
+        chunk_text=None,
+        depth=1,
+        version=None,
+    )
+    # Forward edge: Seed → A
+    edge_forward = GraphEdgeView(from_entity="Seed", to_entity="A", edge_type="USES")
+    # Reverse edge: B → Seed (B is only reachable from Seed via reverse direction)
+    edge_reverse = GraphEdgeView(from_entity="B", to_entity="Seed", edge_type="OWNED_BY")
+
+    graph_result = GraphResultView(
+        seed=seed,
+        related=[node_a, node_b],
+        edges=[edge_forward, edge_reverse],
+    )
+
+    result = _recompute_reachability(graph_result)
+
+    remaining_names = {n.name for n in result.related}
+    assert "A" in remaining_names, "Node A (forward-edge neighbour of Seed) must be retained"
+    assert "B" in remaining_names, (
+        "v12-AP3: Node B (reachable only via reverse edge B→Seed) must be retained "
+        "because _recompute_reachability uses undirected BFS to match Neo4j traverse() "
+        "undirected semantics.  If this fails, BFS became directed and would produce "
+        "a reachability set inconsistent with traverse()."
+    )
+
+
+def test_recompute_reachability_directed_would_drop_reverse_edge_node() -> None:
+    """v12-AP3 negative: a DIRECTED BFS would incorrectly drop reverse-edge nodes.
+
+    This test documents the AP3 failure mode: if _recompute_reachability used a
+    directed adjacency (only from_entity → to_entity), then node B (reachable
+    only via the reverse edge B→Seed) would NOT appear in the adjacency of Seed
+    and would be pruned — inconsistent with what traverse() returned.
+
+    We verify the CURRENT implementation (undirected) correctly retains B,
+    and also verify that a hypothetical DIRECTED adjacency would NOT retain B
+    (so we know the test is testing the right thing).
+
+    This is the proof that the undirected BFS is necessary and correct.
+    """
+    from omniscience_core.storage.graph import EntityNodeView, GraphEdgeView, GraphResultView
+    from omniscience_retrieval.graph_rag import _recompute_reachability
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Seed",
+        kind="service",
+        source=str(uuid.uuid4()),
+        chunk_text=None,
+        depth=0,
+        version=None,
+    )
+    node_b = EntityNodeView(
+        id=uuid.uuid4(),
+        name="B",
+        kind="team",
+        source=str(uuid.uuid4()),
+        chunk_text=None,
+        depth=1,
+        version=None,
+    )
+    # ONLY reverse edge: B → Seed (no forward edge from Seed to B)
+    edge_reverse = GraphEdgeView(from_entity="B", to_entity="Seed", edge_type="OWNED_BY")
+
+    graph_result = GraphResultView(seed=seed, related=[node_b], edges=[edge_reverse])
+
+    result = _recompute_reachability(graph_result)
+
+    # With undirected BFS: B is reachable (Seed → B via reverse traversal of B→Seed)
+    remaining_names = {n.name for n in result.related}
+    assert "B" in remaining_names, (
+        "v12-AP3: with undirected BFS, B must be reachable from Seed via the "
+        "reverse of the B→Seed edge (matching Neo4j undirected traverse behavior)"
+    )
+
+    # Verify: a DIRECTED adjacency (from_entity→to_entity only) would NOT find B.
+    # Build the directed adjacency and check that B is NOT reachable from Seed.
+    directed_adj: dict[str, set[str]] = {}
+    for edge in [edge_reverse]:
+        directed_adj.setdefault(edge.from_entity, set()).add(edge.to_entity)
+    # BFS from Seed using directed adjacency
+    directed_reachable: set[str] = {"Seed"}
+    frontier = ["Seed"]
+    while frontier:
+        nxt = []
+        for n in frontier:
+            for nb in directed_adj.get(n, set()):
+                if nb not in directed_reachable:
+                    directed_reachable.add(nb)
+                    nxt.append(nb)
+        frontier = nxt
+    assert "B" not in directed_reachable, (
+        "v12-AP3 proof: directed BFS from Seed via B→Seed edge does NOT reach B — "
+        "this confirms why undirected BFS is required to match traverse() semantics"
     )
