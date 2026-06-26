@@ -407,6 +407,17 @@ class TestEnsureStreams:
             f"expected {expected_names}.  The config passed to update_stream "
             "must match the desired stream config (subjects, retention, etc.)."
         )
+        # v13-AP5 adversarial-review hardening: assert the FULL config is passed,
+        # not just the name — a regression that stripped subjects (e.g. passing
+        # StreamConfig(name=...) only) would pass the name check above but silently
+        # lose the outbox.> subject widening.  Compare subjects per stream.
+        expected_subjects = {cfg.name: cfg.subjects for cfg in _STREAM_CONFIGS}
+        for call in js.update_stream.call_args_list:
+            actual_cfg = call.kwargs["config"]
+            assert actual_cfg.subjects == expected_subjects[actual_cfg.name], (
+                f"AP5: update_stream config for {actual_cfg.name} has subjects "
+                f"{actual_cfg.subjects}, expected {expected_subjects[actual_cfg.name]}."
+            )
 
     @pytest.mark.asyncio
     async def test_update_stream_propagates_error_fail_loud(self) -> None:
