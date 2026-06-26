@@ -232,6 +232,14 @@ def _build_composer(store: QdrantVectorStore, monkeypatch: pytest.MonkeyPatch) -
     The type-check that normally requires Neo4j+Qdrant is bypassed so we
     can test the composed pipeline against the real vector store without
     spinning up a Neo4j container.
+
+    strict_epoch=False: these tests exercise hybrid text-matching mechanics,
+    NOT epoch pinning.  No global_reconciler is wired, so per_source_watermark
+    stays {} (empty dict).  Under strict_epoch=True (default), an empty map
+    drops ALL versioned hits — defeating the purpose of these retrieval tests.
+    strict_epoch=False restores the pass-through behaviour for unmapped sources.
+    The AP1 fail-closed invariant (strict_epoch=True with a real reconciler) is
+    covered by tests/conformance/test_ap3_no_mixed_epoch.py.
     """
     import omniscience_retrieval.graph_rag as gr_module
 
@@ -241,6 +249,9 @@ def _build_composer(store: QdrantVectorStore, monkeypatch: pytest.MonkeyPatch) -
         graph_store=graph_store,
         vector_store=store,
         legacy_service=_NullLegacyService(),
+        # strict_epoch=False: tests retrieval mechanics only, not epoch pinning;
+        # AP1 fail-closed invariant covered in tests/conformance/test_ap3_no_mixed_epoch.py
+        strict_epoch=False,
     )
 
 
