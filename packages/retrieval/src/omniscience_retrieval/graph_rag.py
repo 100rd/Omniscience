@@ -108,11 +108,30 @@ Both ``_apply_watermark_filter`` (vector hits, ``filter="hit"``) and
 this counter at every drop site.  The ``empty_map_blackout`` label fires once
 per ``search()`` call when the map is empty under ``strict_epoch=True``.
 
-Graph nodes from UNMAPPED sources intentionally PASS through
-``_apply_graph_watermark_filter`` (no ``unmapped`` counter for nodes) — the
-graph filter only applies version ceilings for sources whose watermark IS
-known.  This is by design: the vector-hit filter handles unmapped-source
-drops for evidence; the graph filter handles graph-ahead nodes.
+v14-D4 — symmetric fail-closed for unmapped graph nodes
+--------------------------------------------------------
+Under the old design, a graph node whose source was absent from the watermark
+map passed ``_apply_graph_watermark_filter`` unconditionally (fail-open), even
+under ``strict_epoch=True``.  This was asymmetric with the hit filter, which IS
+fail-closed on unmapped sources.  The consequence: a future-epoch node from an
+unmapped source (e.g. src_b@v999) survived the graph filter, contributed to the
+candidate set, and caused an ``av=None`` hit from src_b to receive a
+graph-affinity boost derived from v999 topology — a topology-epoch leak even
+though no versioned future content was returned.
+
+Fix (v14-D4): ``strict_epoch`` is threaded into
+``_apply_graph_watermark_filter``.  Under ``strict_epoch=True`` (the default),
+a related node whose source is absent from the watermark map (and the map is
+non-empty) is EXCLUDED — exactly like an unmapped versioned hit — and
+``_EPOCH_DROPS.labels(reason="unmapped", filter="node")`` is incremented.
+The ``unmapped/node`` label now fires by design (it never fired before).
+After exclusion, ``_recompute_reachability`` BFS prunes nodes reachable only
+via the excluded unmapped node (no phantom paths).
+Under ``strict_epoch=False`` (legacy), unmapped nodes pass unchanged.
+
+Legitimate cross-source links (e.g. AWS↔K8s correlation where the other
+source IS in the watermark map) are NOT affected — only sources absent from
+the map are dropped.
 
 Backwards-compatibility
 -----------------------
@@ -153,9 +172,9 @@ incremented at every drop site in both ``_apply_watermark_filter``
 (``filter="hit"``) and ``_apply_graph_watermark_filter``
 (``filter="node"``).  Reasons:
 
-- ``unmapped`` — hit from a source absent from the watermark map
-  (strict_epoch=True, ``filter="hit"`` only; graph nodes from unmapped
-  sources pass by design).
+- ``unmapped`` — hit (``filter="hit"``) or graph node (``filter="node"``) from
+  a source absent from the watermark map under ``strict_epoch=True``.  For
+  vector hits this has always fired; for graph nodes it fires as of v14-D4.
 - ``lag`` — hit/node whose ``applied_version > watermark`` (source is in
   the map but lagging).
 - ``cold_zero`` — hit/node whose source has watermark=0 and
@@ -311,8 +330,10 @@ _COMPOSED_QUERIES_TOTAL: Counter = Counter(
 #: _apply_graph_watermark_filter (filter="node") at every drop site.
 #:
 #: reason labels:
-#:   unmapped      — hit from a source not in the watermark map (strict_epoch=True).
-#:                   NOT used for graph nodes (unmapped-source graph nodes pass by design).
+#:   unmapped      — hit or graph node from a source not in the watermark map
+#:                   (strict_epoch=True).  Fires for filter="hit" since v11-AP1;
+#:                   fires for filter="node" as of v14-D4 (graph nodes from unmapped
+#:                   sources are now EXCLUDED under strict_epoch=True, not passed).
 #:   lag           — hit/node with applied_version > watermark (source in map, lagging).
 #:   cold_zero     — hit/node with watermark=0 and applied_version >= 1 (not yet applied).
 #:   empty_map_blackout — fired once per search() call when map == {} under strict_epoch=True.
@@ -326,8 +347,9 @@ _EPOCH_DROPS: Counter = Counter(
         "Number of vector hits or graph nodes dropped by the epoch pinning policy. "
         "Labels: reason ∈ {unmapped, lag, cold_zero, empty_map_blackout}, "
         "filter ∈ {hit, node}. "
-        "'unmapped' fires when a vector hit's source is absent from the watermark map "
-        "(strict_epoch=True); graph nodes from unmapped sources pass by design. "
+        "'unmapped' fires when a vector hit or graph node source is absent from the watermark "
+        "map (strict_epoch=True); graph nodes from unmapped sources are EXCLUDED under "
+        "strict_epoch=True as of v14-D4 (previously they passed — topology-epoch leak D4). "
         "'lag' fires when applied_version > watermark for a mapped source. "
         "'cold_zero' fires when watermark==0 and applied_version>=1 (source not yet applied). "
         "'empty_map_blackout' fires once per request when the map is {} under strict_epoch=True "
@@ -745,7 +767,9 @@ class GraphRAGComposer:
         # instead of raising ValueError — explicit signal, no control-flow-by-exception.
         if per_source_watermark:
             graph_result, seed_excluded = _apply_graph_watermark_filter(
-                graph_result, per_source_watermark
+                graph_result,
+                per_source_watermark,
+                strict_epoch=self._strict_epoch,
             )
             if seed_excluded:
                 log.info(
@@ -1145,6 +1169,7 @@ def _apply_watermark_filter(
 def _apply_graph_watermark_filter(
     graph_result: Any,
     per_source_watermark: dict[str, int],
+    strict_epoch: bool = False,
 ) -> tuple[Any, bool]:
     """Remove graph-ahead nodes (and their edges) from a traversal result.
 
@@ -1169,8 +1194,15 @@ def _apply_graph_watermark_filter(
     v13-AP1: ``_EPOCH_DROPS(filter="node")`` is incremented at both drop
     sites (seed-excluded path returns True, so the caller handles that case;
     related-node drops are incremented here with reason="cold_zero" or
-    reason="lag").  Graph nodes from UNMAPPED sources intentionally PASS
-    (no ``unmapped`` counter for nodes — see module docstring).
+    reason="lag").
+
+    v14-D4: ``strict_epoch`` is threaded in from ``_run_anchor_stage`` (mirrors
+    ``self._strict_epoch`` used by the hit filter).  Under ``strict_epoch=True``
+    a related node whose source is absent from the watermark map (AND the map is
+    non-empty) is EXCLUDED and ``_EPOCH_DROPS(reason="unmapped", filter="node")``
+    is incremented — making the graph-node filter SYMMETRIC with the hit filter.
+    Under ``strict_epoch=False`` (legacy), unmapped-source nodes pass through.
+    The ``unmapped/node`` label now fires by design.
 
     Rules:
     - Seed node version-ceiling is checked; if the seed is graph-ahead,
@@ -1178,12 +1210,17 @@ def _apply_graph_watermark_filter(
       The seed exclusion is NOT counted here — it is the caller's signal.
     - Related nodes whose version exceeds the watermark are removed.
       reason="cold_zero" when wm==0; reason="lag" otherwise.
+    - Under strict_epoch=True: related nodes whose source is NOT in the map
+      (and the map is non-empty) are also removed with reason="unmapped".
+      Under strict_epoch=False: such nodes pass through (legacy behaviour).
     - Edges between removed nodes are pruned.
-    - Nodes with ``version is None`` pass through (no ceiling info).
-    - Sources not in the watermark map pass through (no ceiling for them —
-      by design; the vector-hit filter handles unmapped-source drops).
-    - After pruning, BFS reachability is recomputed from the seed over
-      surviving edges; unreachable nodes are dropped.
+    - Nodes with ``version is None`` pass through (no ceiling info) IF their
+      source is in the map.  If their source is unmapped under strict_epoch=True,
+      they are still excluded (topology-epoch safety takes precedence).
+    - After ANY exclusion (version-ceiling OR unmapped), BFS reachability is
+      recomputed from the seed over surviving edges; unreachable nodes are
+      dropped (no phantom paths via excluded unmapped nodes).
+    - Cross-source links where the related source IS in the map are unaffected.
 
     Returns
     -------
@@ -1212,34 +1249,53 @@ def _apply_graph_watermark_filter(
     kept_related = []
     for node in graph_result.related:
         node_src = str(node.source)
-        if node_src in per_source_watermark and node.version is not None:
-            wm = per_source_watermark[node_src]
-            if node.version > wm:
-                excluded_names.add(node.name)
-                # v13-AP1: count the drop with the appropriate reason.
-                if wm == 0:
-                    _EPOCH_DROPS.labels(reason="cold_zero", filter="node").inc()
-                    log.debug(
-                        "graphrag_epoch_dropped",
-                        reason="cold_zero",
-                        filter="node",
-                        node_name=node.name,
-                        source=node_src,
-                        version=node.version,
-                        watermark=wm,
-                    )
-                else:
-                    _EPOCH_DROPS.labels(reason="lag", filter="node").inc()
-                    log.debug(
-                        "graphrag_epoch_dropped",
-                        reason="lag",
-                        filter="node",
-                        node_name=node.name,
-                        source=node_src,
-                        version=node.version,
-                        watermark=wm,
-                    )
-                continue
+        if node_src in per_source_watermark:
+            # Source is known — apply version ceiling.
+            if node.version is not None:
+                wm = per_source_watermark[node_src]
+                if node.version > wm:
+                    excluded_names.add(node.name)
+                    # v13-AP1: count the drop with the appropriate reason.
+                    if wm == 0:
+                        _EPOCH_DROPS.labels(reason="cold_zero", filter="node").inc()
+                        log.debug(
+                            "graphrag_epoch_dropped",
+                            reason="cold_zero",
+                            filter="node",
+                            node_name=node.name,
+                            source=node_src,
+                            version=node.version,
+                            watermark=wm,
+                        )
+                    else:
+                        _EPOCH_DROPS.labels(reason="lag", filter="node").inc()
+                        log.debug(
+                            "graphrag_epoch_dropped",
+                            reason="lag",
+                            filter="node",
+                            node_name=node.name,
+                            source=node_src,
+                            version=node.version,
+                            watermark=wm,
+                        )
+                    continue
+        elif strict_epoch and per_source_watermark:
+            # v14-D4: source absent from a non-empty map under strict_epoch=True.
+            # Symmetric with the hit filter: fail-closed for unmapped sources.
+            # Only fires when the map is populated (non-empty) — an empty map
+            # means the reconciler found no sources, which is handled at the
+            # search() level (empty_map_blackout); we do not double-drop here.
+            excluded_names.add(node.name)
+            _EPOCH_DROPS.labels(reason="unmapped", filter="node").inc()
+            log.debug(
+                "graphrag_epoch_dropped",
+                reason="unmapped",
+                filter="node",
+                node_name=node.name,
+                source=node_src,
+                version=node.version,
+            )
+            continue
         kept_related.append(node)
     graph_result.related = kept_related
 
@@ -1251,10 +1307,10 @@ def _apply_graph_watermark_filter(
             if e.from_entity not in excluded_names and e.to_entity not in excluded_names
         ]
 
-        # v11-AP5: recompute reachability from seed over surviving edges via BFS.
-        # Only needed when nodes were actually excluded — if nothing was excluded, the
-        # reachability set is identical to what traverse() computed.
-        # Nodes reachable only through excluded edges are phantom paths — drop them.
+        # v11-AP5 / v14-D4: recompute reachability from seed over surviving edges via BFS.
+        # Triggered whenever ANY node was excluded — version-ceiling drops (v11) OR
+        # unmapped-source drops (v14-D4).  Nodes reachable only via an excluded node
+        # (phantom paths) are removed so they cannot feed graph-affinity scoring.
         graph_result = _recompute_reachability(graph_result)
 
     return graph_result, False

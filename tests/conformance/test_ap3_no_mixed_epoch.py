@@ -404,12 +404,22 @@ def test_apply_watermark_filter_pure_function() -> None:
     - Hits with applied_version == watermark → retained.
     - Hits with applied_version < watermark → retained.
     - Hits with applied_version is None → always retained.
-    - Per-source map None or empty → all hits retained (no filter).
-    - Source not in map → hit passes (no blackout for unknown sources).
+    - Per-source map None → all hits retained (no reconciler wired — live mode).
+    - Per-source map empty ({}) + strict_epoch=True → only av=None hits pass
+      (fail-closed; all versioned hits from unmapped sources are DROPPED).
+    - Per-source map empty ({}) + strict_epoch=False → all hits pass (legacy).
+    - Source not in map + strict_epoch=True → versioned hit DROPPED (fail-closed).
+    - Source not in map + applied_version=None → always passes (no version claim).
+    - Source not in map + strict_epoch=False → hit passes (legacy fail-open).
     - Two sources with different watermarks are evaluated independently.
 
     v13-AP1 additions: delta-assert that _EPOCH_DROPS fires on unmapped-drop
     and does NOT fire on pass-through or None-watermark paths.
+
+    Semantics summary (v11/v12/v13 fail-closed):
+    - None map → all hits pass (bypass: no reconciler).
+    - Empty map ({}) + strict → only av=None passes (cold workspace fail-closed).
+    - Source not in map + versioned + strict → DROPPED (unmapped fail-closed).
     """
     src_x = uuid.uuid4()
     src_y = uuid.uuid4()
