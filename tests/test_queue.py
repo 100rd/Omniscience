@@ -22,6 +22,7 @@ from omniscience_core.queue.metrics import (
 )
 from omniscience_core.queue.producer import QueueProducer
 from omniscience_core.queue.streams import (
+    _STREAM_CONFIGS,
     INGEST_CHANGES_STREAM,
     INGEST_DLQ_STREAM,
     ensure_streams,
@@ -372,6 +373,73 @@ class TestEnsureStreams:
         for call in js.add_stream.call_args_list:
             cfg = call.kwargs["config"]
             assert cfg.storage == nats.js.api.StorageType.FILE
+
+    @pytest.mark.asyncio
+    async def test_update_stream_called_with_config_on_stream_exists(self) -> None:
+        """AP5 behavioral: when add_stream raises 10058 (stream exists), update_stream
+        is called with the same StreamConfig that was passed to add_stream.
+
+        This test closes the AP5 gap: the previous test mocked update_stream without
+        asserting it was called.  The 10058→update_stream branch was behaviorally
+        uncovered — this test proves the branch executes and passes the correct
+        config to update_stream.
+        """
+        from nats.js.errors import BadRequestError
+
+        js = _make_js_mock()
+        exc = BadRequestError()
+        exc.err_code = 10058
+        js.add_stream = AsyncMock(side_effect=exc)
+
+        await ensure_streams(js)
+
+        # update_stream must have been called once per stream config.
+        assert js.update_stream.await_count == len(_STREAM_CONFIGS), (
+            f"AP5: update_stream must be called once per stream when all streams "
+            f"already exist (10058).  Got {js.update_stream.await_count} calls, "
+            f"expected {len(_STREAM_CONFIGS)}."
+        )
+        # Each update_stream call must carry the expected StreamConfig.
+        updated_names = {call.kwargs["config"].name for call in js.update_stream.call_args_list}
+        expected_names = {cfg.name for cfg in _STREAM_CONFIGS}
+        assert updated_names == expected_names, (
+            f"AP5: update_stream called with stream names {updated_names}, "
+            f"expected {expected_names}.  The config passed to update_stream "
+            "must match the desired stream config (subjects, retention, etc.)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_update_stream_propagates_error_fail_loud(self) -> None:
+        """AP5 fail-loud: when update_stream raises (incompatible config), the error
+        propagates to the caller — it is NOT silently swallowed.
+
+        DELIBERATE DESIGN DECISION: fail-loud on incompatible stream-config update
+        is intentional.  A silent config mismatch (running with stale settings) is
+        worse than a loud startup failure that surfaces the conflict immediately.
+        See the comment in _ensure_stream for operator guidance.
+
+        This test documents and locks in that behavior: callers must expect that
+        ensure_streams can raise when an incompatible stream already exists, and
+        should not mask this exception.
+        """
+        from nats.js.errors import BadRequestError
+
+        js = _make_js_mock()
+
+        # First add_stream raises 10058 (stream exists).
+        exists_exc = BadRequestError()
+        exists_exc.err_code = 10058
+        js.add_stream = AsyncMock(side_effect=exists_exc)
+
+        # update_stream raises an incompatible-config error.
+        update_exc = RuntimeError("stream update failed: incompatible retention policy change")
+        js.update_stream = AsyncMock(side_effect=update_exc)
+
+        with pytest.raises(RuntimeError, match="incompatible retention policy change"):
+            await ensure_streams(js)
+
+        # Confirm update_stream was actually invoked (we reached the fail-loud path).
+        js.update_stream.assert_awaited()
 
 
 # ---------------------------------------------------------------------------

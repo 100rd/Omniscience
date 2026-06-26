@@ -59,6 +59,7 @@ Test cases
 
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
@@ -1285,3 +1286,216 @@ async def test_cold_workspace_empty_map_is_fail_closed_and_counted() -> None:
     assert (
         _EPOCH_DROPS.labels(reason="unmapped", filter="hit")._value.get() == before_unmapped + 1
     ), "v13-AP1: unmapped must fire once for the dropped versioned hit"
+
+
+# ---------------------------------------------------------------------------
+# v13-AP4: Real traverse() + _recompute_reachability consistency — PROVEN test
+# (gated: OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1)
+#
+# The previous v12-AP3 "undirected is correct" verdict rested on a comment
+# plus a test that re-implemented directed adjacency inline (tautological:
+# it tested the test's own reimplementation, not production code).
+#
+# This test replaces that tautological verification with a proof against
+# production code: it builds a fixture graph in live Neo4j, calls the REAL
+# graph_store.traverse() on it, then calls _recompute_reachability() on the
+# result, and asserts that the reachable set returned by _recompute_reachability
+# MATCHES the set traverse() returned (i.e., the BFS does not drop or add
+# nodes vs the production traversal semantics).
+#
+# Fixture topology:
+#   Seed  --[USES]-->  NodeA        (forward edge, seed→A)
+#   NodeB --[OWNED_BY]--> Seed      (reverse edge, B→seed; B only reachable
+#                                    from Seed via undirected traversal)
+#
+# If traverse() uses undirected Cypher (confirmed: (seed)-[*]-(neighbour))
+# and _recompute_reachability uses undirected BFS (confirmed), then:
+# - traverse() returns {Seed, NodeA, NodeB}
+# - _recompute_reachability(traverse_result) retains both NodeA and NodeB
+# - The sets match → verdict PROVEN
+#
+# If there is a mismatch (traverse drops B but recompute keeps it, or vice
+# versa), this test reports a REAL gap and FAILS rather than hiding it.
+# ---------------------------------------------------------------------------
+
+_RUN_NEO4J = os.environ.get("OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS") == "1"
+
+_LIVE_NEO4J = pytest.mark.skipif(
+    not _RUN_NEO4J,
+    reason=(
+        "set OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1 to run the real "
+        "traverse()+_recompute_reachability consistency proof (v13-AP4)"
+    ),
+)
+
+
+@_LIVE_NEO4J
+@pytest.mark.asyncio
+async def test_real_traverse_recompute_reachability_consistent() -> None:
+    """v13-AP4: real traverse() and _recompute_reachability return consistent sets.
+
+    Builds a fixture graph in live Neo4j, calls the REAL traverse(), then
+    applies _recompute_reachability to the result, and verifies the reachable
+    node set is identical.
+
+    Topology
+    --------
+    Seed  --[USES]-->  NodeA          (forward edge)
+    NodeB --[OWNED_BY]--> Seed        (reverse edge; NodeB only reachable
+                                       from Seed via undirected traversal)
+
+    Expected after traverse(max_depth=2):
+        related = {NodeA, NodeB}  (both reachable in undirected Neo4j BFS)
+
+    Expected after _recompute_reachability (undirected BFS, no exclusions):
+        related still = {NodeA, NodeB}  (no nodes dropped — sets must match)
+
+    If traverse() excluded NodeB (directed semantics) but _recompute_reachability
+    kept it (undirected), or vice versa, the verdict "undirected is consistent"
+    would be DISPROVEN and this test would fail with an explicit gap report.
+
+    Gate: OMNISCIENCE_RUN_NEO4J_CONTRACT_TESTS=1 + live Neo4j on bolt://localhost:7687
+    """
+    from omniscience_core.storage.graph import EntityUpsert
+    from omniscience_index.stores.neo4j.store import Neo4jGraphStore, Neo4jStoreConfig
+    from omniscience_retrieval.graph_rag import _recompute_reachability
+
+    neo4j_uri = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
+    neo4j_user = os.environ.get("NEO4J_USERNAME", "neo4j")
+    neo4j_pw = os.environ.get("NEO4J_PASSWORD", "neo4j")
+
+    config = Neo4jStoreConfig(
+        uri=neo4j_uri,
+        username=neo4j_user,
+        password=neo4j_pw,
+        database="neo4j",
+        max_connection_pool_size=3,
+        connection_acquisition_timeout_seconds=10.0,
+        max_transaction_retry_time_seconds=10.0,
+        default_max_depth=3,
+        bitemporal_enabled=False,
+    )
+    store = Neo4jGraphStore(config=config)
+    await store.connect()
+
+    ws_id = uuid.uuid4()
+    # Use workspace-scoped unique names to avoid cross-test interference.
+    ws_suffix = str(ws_id)[:8]
+    seed_name = f"ap4-seed-{ws_suffix}"
+    node_a_name = f"ap4-nodeA-{ws_suffix}"
+    node_b_name = f"ap4-nodeB-{ws_suffix}"
+
+    try:
+        # ----------------------------------------------------------------
+        # Insert fixture graph: Seed, NodeA, NodeB
+        # ----------------------------------------------------------------
+        seed_id = uuid.uuid4()
+        a_id = uuid.uuid4()
+        b_id = uuid.uuid4()
+        src_id = uuid.uuid4()
+
+        # bypass_source_checkpoint=True: skip the per-source version checkpoint
+        # so all three entities are written even though they share the same src_id.
+        # Without bypass, the second/third inserts would be skipped by the
+        # checkpoint check (existing_version >= version).
+        for eid, ename, ekind in [
+            (seed_id, seed_name, "service"),
+            (a_id, node_a_name, "repo"),
+            (b_id, node_b_name, "team"),
+        ]:
+            await store.upsert_entity(
+                entity=EntityUpsert(
+                    id=eid,
+                    source_id=src_id,
+                    entity_type=ekind,
+                    name=ename,
+                    display_name=ename,
+                    chunk_id=None,
+                    metadata={},
+                    version=None,  # no version → no checkpoint gate → always written
+                ),
+                workspace_id=ws_id,
+            )
+
+        # Forward edge: Seed → NodeA  (source_entity_id=seed_id, target=a_id)
+        # version=None: skip the per-source checkpoint check so edges are always written.
+        from omniscience_core.storage.graph import EdgeUpsert
+
+        await store.upsert_edge(
+            edge=EdgeUpsert(
+                source_entity_id=seed_id,
+                target_entity_id=a_id,
+                edge_type="USES",
+                metadata={},  # no source_id in metadata → no checkpoint gate
+                version=None,
+            ),
+            workspace_id=ws_id,
+        )
+        # Reverse edge: NodeB → Seed  (B only reachable from Seed undirectedly)
+        await store.upsert_edge(
+            edge=EdgeUpsert(
+                source_entity_id=b_id,
+                target_entity_id=seed_id,
+                edge_type="OWNED_BY",
+                metadata={},
+                version=None,
+            ),
+            workspace_id=ws_id,
+        )
+
+        # ----------------------------------------------------------------
+        # Call REAL graph_store.traverse() from Seed (max_depth=2).
+        # ----------------------------------------------------------------
+        traverse_result = await store.traverse(
+            entity_name=seed_name,
+            workspace_id=ws_id,
+            max_depth=2,
+        )
+
+        traverse_related_names = {n.name for n in traverse_result.related}
+
+        # ----------------------------------------------------------------
+        # Apply _recompute_reachability with NO exclusions (no nodes
+        # were dropped by the watermark filter).  With no exclusions the
+        # edge set is unchanged, so the BFS should return the same set
+        # that traverse() returned.
+        # ----------------------------------------------------------------
+        recomputed = _recompute_reachability(traverse_result)
+        recomputed_names = {n.name for n in recomputed.related}
+
+        # ----------------------------------------------------------------
+        # Assert: reachable sets match — verdict PROVEN (or DISPROVEN).
+        # If traverse() uses undirected Cypher and _recompute_reachability
+        # uses undirected BFS, the sets must be identical.
+        # A mismatch is a REAL gap, not a force-pass.
+        # ----------------------------------------------------------------
+        assert recomputed_names == traverse_related_names, (
+            f"v13-AP4 REAL MISMATCH: traverse() returned related nodes "
+            f"{traverse_related_names} but _recompute_reachability returned "
+            f"{recomputed_names}.  "
+            "Difference (traverse - recompute): "
+            f"{traverse_related_names - recomputed_names}.  "
+            "Difference (recompute - traverse): "
+            f"{recomputed_names - traverse_related_names}.  "
+            "This is a REAL gap: the BFS semantics of _recompute_reachability "
+            "are inconsistent with the production traverse() semantics."
+        )
+
+        # Additionally verify the expected topology: NodeA and NodeB both appear.
+        assert node_a_name in recomputed_names, (
+            f"v13-AP4: NodeA (forward-edge neighbour of Seed) missing from "
+            f"traverse result: {traverse_related_names}.  "
+            "Neo4j traverse() must follow forward edges."
+        )
+        assert node_b_name in recomputed_names, (
+            f"v13-AP4: NodeB (reverse-edge neighbour of Seed) missing from "
+            f"traverse result: {traverse_related_names}.  "
+            "Neo4j traverse() uses undirected Cypher (no arrowhead) — it MUST "
+            "follow the B→Seed edge from Seed's perspective to reach NodeB.  "
+            "If NodeB is absent, the Cypher became directed — a real regression."
+        )
+
+        # The undirected-recompute-is-consistent-with-traverse verdict is now PROVEN.
+
+    finally:
+        await store.close()

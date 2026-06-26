@@ -108,5 +108,14 @@ async def _ensure_stream(
             log.error("nats_stream_create_failed", stream=cfg.name, error=str(exc))
             raise
         # Stream exists — apply the current config so subject changes take effect.
+        #
+        # DELIBERATE DESIGN DECISION (v13-AP5): update_stream errors PROPAGATE.
+        # If update_stream raises (e.g., incompatible config change — different
+        # retention policy, storage type, or replica count), the error is NOT
+        # caught here.  This is intentional: a silent config mismatch (running
+        # with stale stream settings) is worse than a loud startup failure that
+        # surfaces the problem immediately.  Operators must resolve the conflict
+        # manually (delete + recreate, or adjust the config to match) rather
+        # than silently proceeding with an inconsistent stream.
         await js.update_stream(config=cfg)
         log.info("nats_stream_updated", stream=cfg.name, subjects=cfg.subjects)
