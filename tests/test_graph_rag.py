@@ -31,11 +31,13 @@ from omniscience_core.storage.graph import (
     GraphResultView,
 )
 from omniscience_retrieval.graph_rag import (
+    _EPOCH_DROPS,
     ANCHOR_FILTER_KEY,
     CANDIDATE_EXPANSION_FACTOR,
     MAX_ANCHOR_CANDIDATES,
     GraphRAGComposer,
     _apply_graph_watermark_filter,
+    _apply_watermark_filter,
     _build_affinity_map,
     _collect_candidates,
     _extract_anchor,
@@ -1557,4 +1559,688 @@ def test_recompute_reachability_keeps_directly_connected_nodes() -> None:
     assert "AheadNode" not in remaining_names, "AheadNode (version=10 > wm=7) must be excluded"
     assert "RelatedViaAhead" not in remaining_names, (
         "RelatedViaAhead reachable only via excluded AheadNode must be dropped (v11-AP5)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v13-AP1: reason-labeled _EPOCH_DROPS counter tests
+# ---------------------------------------------------------------------------
+
+
+class TestEpochDropsCounter:
+    """v13-AP1: _EPOCH_DROPS fires with correct (reason, filter) labels.
+
+    All assertions use DELTA semantics: capture counter value before the call,
+    assert the exact increment after.  This is CRITICAL because the default
+    Prometheus registry accumulates across all tests in the process.
+    Asserting absolute values would cause cross-test interference.
+    """
+
+    def test_epoch_drops_counter_in_map_lag(self) -> None:
+        """lag: hit with applied_version > watermark > 0 increments lag/hit counter."""
+        src_id = uuid.uuid4()
+        # applied_version=5, wm=3 → 5 > 3 → lag (wm>0 so not cold_zero)
+        hit_lag = SearchHit(
+            chunk_id=uuid.uuid4(),
+            document_id=uuid.uuid4(),
+            score=0.8,
+            text="lag-hit",
+            source=SourceInfo(id=src_id, name="src", type="slack"),
+            citation=Citation(
+                uri="mem://x",
+                title=None,
+                indexed_at=datetime(2026, 6, 1, tzinfo=UTC),
+                doc_version=1,
+            ),
+            lineage=ChunkLineage(
+                ingestion_run_id=None,
+                embedding_model="stub",
+                embedding_provider="stub",
+                parser_version="1",
+                chunker_strategy="fixed",
+            ),
+            metadata={},
+            applied_version=5,
+        )
+        # Hit that should PASS (applied_version=0, wm=0 → 0 <= 0 → PASS, no counter)
+        hit_epoch0 = SearchHit(
+            chunk_id=uuid.uuid4(),
+            document_id=uuid.uuid4(),
+            score=0.7,
+            text="epoch0-hit",
+            source=SourceInfo(id=src_id, name="src", type="slack"),
+            citation=Citation(
+                uri="mem://x",
+                title=None,
+                indexed_at=datetime(2026, 6, 1, tzinfo=UTC),
+                doc_version=1,
+            ),
+            lineage=ChunkLineage(
+                ingestion_run_id=None,
+                embedding_model="stub",
+                embedding_provider="stub",
+                parser_version="1",
+                chunker_strategy="fixed",
+            ),
+            metadata={},
+            applied_version=0,
+        )
+
+        before_lag = _EPOCH_DROPS.labels(reason="lag", filter="hit")._value.get()
+        before_cold = _EPOCH_DROPS.labels(reason="cold_zero", filter="hit")._value.get()
+
+        result = _apply_watermark_filter([hit_lag, hit_epoch0], {str(src_id): 3})
+
+        # hit_lag (av=5 > wm=3 > 0) must be dropped with reason=lag
+        dropped_versions = {h.applied_version for h in result}
+        assert 5 not in dropped_versions, "av=5 > wm=3 must be dropped"
+
+        # hit_epoch0 (av=0, wm=0 → 0 <= 0) must PASS — no counter
+        assert 0 in dropped_versions, "av=0, wm=0 must PASS (epoch-0 consistent read)"
+
+        # lag counter fires once for the dropped hit
+        assert _EPOCH_DROPS.labels(reason="lag", filter="hit")._value.get() == before_lag + 1, (
+            "v13-AP1: lag/hit counter must increment by 1 for av=5 > wm=3"
+        )
+        # cold_zero counter must NOT fire (wm=3 ≠ 0)
+        assert _EPOCH_DROPS.labels(reason="cold_zero", filter="hit")._value.get() == before_cold, (
+            "v13-AP1: cold_zero/hit counter must not fire when wm>0"
+        )
+
+    def test_epoch_drops_counter_in_map_cold_zero(self) -> None:
+        """cold_zero: hit with av=1, wm=0 increments cold_zero/hit counter.
+
+        BOUNDARY: av=0, wm=0 → 0 <= 0 → PASS with NO counter increment.
+        """
+        src_id = uuid.uuid4()
+
+        hit_cold = SearchHit(
+            chunk_id=uuid.uuid4(),
+            document_id=uuid.uuid4(),
+            score=0.8,
+            text="cold-hit",
+            source=SourceInfo(id=src_id, name="src", type="slack"),
+            citation=Citation(
+                uri="mem://x",
+                title=None,
+                indexed_at=datetime(2026, 6, 1, tzinfo=UTC),
+                doc_version=1,
+            ),
+            lineage=ChunkLineage(
+                ingestion_run_id=None,
+                embedding_model="stub",
+                embedding_provider="stub",
+                parser_version="1",
+                chunker_strategy="fixed",
+            ),
+            metadata={},
+            applied_version=1,  # av=1, wm=0 → cold_zero drop
+        )
+        # BOUNDARY: av=0, wm=0 → PASS (0 <= 0); no counter
+        hit_epoch0 = SearchHit(
+            chunk_id=uuid.uuid4(),
+            document_id=uuid.uuid4(),
+            score=0.7,
+            text="epoch0",
+            source=SourceInfo(id=src_id, name="src", type="slack"),
+            citation=Citation(
+                uri="mem://x",
+                title=None,
+                indexed_at=datetime(2026, 6, 1, tzinfo=UTC),
+                doc_version=1,
+            ),
+            lineage=ChunkLineage(
+                ingestion_run_id=None,
+                embedding_model="stub",
+                embedding_provider="stub",
+                parser_version="1",
+                chunker_strategy="fixed",
+            ),
+            metadata={},
+            applied_version=0,  # av=0, wm=0 → PASS boundary
+        )
+
+        before_cold = _EPOCH_DROPS.labels(reason="cold_zero", filter="hit")._value.get()
+        before_lag = _EPOCH_DROPS.labels(reason="lag", filter="hit")._value.get()
+
+        result = _apply_watermark_filter([hit_cold, hit_epoch0], {str(src_id): 0})
+
+        # av=1 with wm=0 must be dropped (cold_zero)
+        dropped_versions = {h.applied_version for h in result}
+        assert 1 not in dropped_versions, "av=1 with wm=0 must be dropped (cold_zero)"
+
+        # av=0, wm=0 → 0 <= 0 → PASS (epoch-0 boundary)
+        assert 0 in dropped_versions, "av=0, wm=0 must PASS (epoch-0 consistent read)"
+
+        # cold_zero fires once for av=1 drop
+        assert (
+            _EPOCH_DROPS.labels(reason="cold_zero", filter="hit")._value.get() == before_cold + 1
+        ), "v13-AP1: cold_zero/hit must fire for av=1 with wm=0"
+        # lag must NOT fire (wm=0 classifies as cold_zero, not lag)
+        assert _EPOCH_DROPS.labels(reason="lag", filter="hit")._value.get() == before_lag, (
+            "v13-AP1: lag/hit must not fire for av=1 with wm=0 (classified as cold_zero)"
+        )
+
+
+def test_graph_node_drop_increments_epoch_drops_node() -> None:
+    """v13-AP1: _apply_graph_watermark_filter increments _EPOCH_DROPS(filter='node').
+
+    Verifies:
+    - related node with av > wm > 0 fires lag/node
+    - related node with av >= 1 and wm == 0 fires cold_zero/node
+    - seed-excluded path (version > wm) does NOT fire any node counter
+      (the caller's anchor-miss is the observable signal)
+    - unmapped source graph node PASSES without firing any counter
+    """
+    src_seed = str(uuid.uuid4())
+    src_lag = str(uuid.uuid4())
+    src_cold = str(uuid.uuid4())
+    src_unmapped = str(uuid.uuid4())
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Seed",
+        kind="service",
+        source=src_seed,
+        chunk_text=None,
+        depth=0,
+        version=3,
+    )
+    node_lag = EntityNodeView(
+        id=uuid.uuid4(),
+        name="LagNode",
+        kind="repo",
+        source=src_lag,
+        chunk_text=None,
+        depth=1,
+        version=7,  # > wm=3 and wm > 0 → lag
+    )
+    node_cold = EntityNodeView(
+        id=uuid.uuid4(),
+        name="ColdNode",
+        kind="team",
+        source=src_cold,
+        chunk_text=None,
+        depth=1,
+        version=1,  # >= 1 and wm=0 → cold_zero
+    )
+    node_unmapped = EntityNodeView(
+        id=uuid.uuid4(),
+        name="UnmappedNode",
+        kind="service",
+        source=src_unmapped,
+        chunk_text=None,
+        depth=1,
+        version=999,  # very high, but src_unmapped not in map → PASS by design
+    )
+
+    graph_result = GraphResultView(
+        seed=seed,
+        related=[node_lag, node_cold, node_unmapped],
+        edges=[
+            GraphEdgeView(from_entity="Seed", to_entity="LagNode", edge_type="USES"),
+            GraphEdgeView(from_entity="Seed", to_entity="ColdNode", edge_type="USES"),
+            GraphEdgeView(from_entity="Seed", to_entity="UnmappedNode", edge_type="USES"),
+        ],
+    )
+
+    per_source_wm = {
+        src_seed: 10,  # seed within watermark
+        src_lag: 3,  # LagNode at v7 > wm=3 (and wm>0) → lag drop
+        src_cold: 0,  # ColdNode at v1 >= 1, wm=0 → cold_zero drop
+        # src_unmapped intentionally absent → graph node passes
+    }
+
+    before_lag_node = _EPOCH_DROPS.labels(reason="lag", filter="node")._value.get()
+    before_cold_node = _EPOCH_DROPS.labels(reason="cold_zero", filter="node")._value.get()
+    before_unmapped_node = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+
+    filtered, seed_excluded = _apply_graph_watermark_filter(graph_result, per_source_wm)
+
+    assert seed_excluded is False, "Seed (v3 <= wm=10) must not be excluded"
+
+    remaining = {n.name for n in filtered.related}
+    assert "LagNode" not in remaining, "LagNode (v7 > wm=3) must be excluded"
+    assert "ColdNode" not in remaining, "ColdNode (v1 >= 1, wm=0) must be excluded"
+    assert "UnmappedNode" in remaining, "UnmappedNode (unmapped source) must pass by design"
+
+    # lag/node fires once for LagNode
+    assert _EPOCH_DROPS.labels(reason="lag", filter="node")._value.get() == before_lag_node + 1, (
+        "v13-AP1: lag/node must fire for LagNode (v7 > wm=3, wm>0)"
+    )
+    # cold_zero/node fires once for ColdNode
+    assert (
+        _EPOCH_DROPS.labels(reason="cold_zero", filter="node")._value.get() == before_cold_node + 1
+    ), "v13-AP1: cold_zero/node must fire for ColdNode (v1 >= 1, wm=0)"
+    # unmapped/node must NOT fire (graph nodes from unmapped sources pass by design)
+    assert (
+        _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get() == before_unmapped_node
+    ), (
+        "v13-AP1: unmapped/node must NOT fire for graph nodes from unmapped sources "
+        "(they pass by design — only vector-hit filter enforces unmapped drops)"
+    )
+
+
+def test_graph_node_seed_excluded_does_not_fire_node_counter() -> None:
+    """v13-AP1: seed-excluded path (graph-ahead seed) must NOT increment filter=node counters.
+
+    When the seed itself is graph-ahead, _apply_graph_watermark_filter returns
+    (graph_result, True) immediately — it does NOT loop through related nodes
+    and does NOT call _EPOCH_DROPS.  The caller (_run_anchor_stage) records the
+    exclusion as an anchor-miss via the anchor outcome counter.
+    """
+    src = str(uuid.uuid4())
+    seed_ahead = EntityNodeView(
+        id=uuid.uuid4(),
+        name="AheadSeed",
+        kind="service",
+        source=src,
+        chunk_text=None,
+        depth=0,
+        version=10,  # > wm=7
+    )
+    graph_result = GraphResultView(seed=seed_ahead, related=[], edges=[])
+
+    before_lag = _EPOCH_DROPS.labels(reason="lag", filter="node")._value.get()
+    before_cold = _EPOCH_DROPS.labels(reason="cold_zero", filter="node")._value.get()
+
+    _result, seed_excluded = _apply_graph_watermark_filter(graph_result, {src: 7})
+    assert seed_excluded is True
+
+    # No node counters must fire for the seed-excluded early return
+    assert _EPOCH_DROPS.labels(reason="lag", filter="node")._value.get() == before_lag, (
+        "v13-AP1: seed-excluded path must not fire lag/node"
+    )
+    assert _EPOCH_DROPS.labels(reason="cold_zero", filter="node")._value.get() == before_cold, (
+        "v13-AP1: seed-excluded path must not fire cold_zero/node"
+    )
+
+
+# ---------------------------------------------------------------------------
+# v14-D4: symmetric fail-closed for unmapped graph nodes (topology-epoch fix)
+# ---------------------------------------------------------------------------
+
+
+def test_unmapped_graph_node_excluded_under_strict_epoch() -> None:
+    """v14-D4: unmapped-source graph node is EXCLUDED under strict_epoch=True.
+
+    Scenario: Seed(src_a, in map) → FutureEnt(src_b, NOT in map, v999).
+    Under strict_epoch=True the unmapped node must be excluded and
+    _EPOCH_DROPS(reason="unmapped", filter="node") must increment once.
+    Under strict_epoch=False the node passes (legacy behaviour).
+    """
+    src_a = str(uuid.uuid4())
+    src_b = str(uuid.uuid4())  # unmapped — not in per_source_watermark
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="SeedA",
+        kind="service",
+        source=src_a,
+        chunk_text=None,
+        depth=0,
+        version=5,
+    )
+    future_node = EntityNodeView(
+        id=uuid.uuid4(),
+        name="FutureEnt",
+        kind="service",
+        source=src_b,
+        chunk_text=None,
+        depth=1,
+        version=999,  # far-future topology from unmapped src_b
+    )
+    graph_result_strict = GraphResultView(
+        seed=seed,
+        related=[future_node],
+        edges=[GraphEdgeView(from_entity="SeedA", to_entity="FutureEnt", edge_type="USES")],
+    )
+    graph_result_lax = GraphResultView(
+        seed=EntityNodeView(
+            id=seed.id,
+            name=seed.name,
+            kind=seed.kind,
+            source=seed.source,
+            chunk_text=seed.chunk_text,
+            depth=seed.depth,
+            version=seed.version,
+        ),
+        related=[
+            EntityNodeView(
+                id=future_node.id,
+                name=future_node.name,
+                kind=future_node.kind,
+                source=future_node.source,
+                chunk_text=future_node.chunk_text,
+                depth=future_node.depth,
+                version=future_node.version,
+            )
+        ],
+        edges=[GraphEdgeView(from_entity="SeedA", to_entity="FutureEnt", edge_type="USES")],
+    )
+
+    per_source_wm = {src_a: 10}  # src_b intentionally absent
+
+    # --- strict_epoch=True: unmapped node must be excluded ---
+    before_unmapped_node = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+
+    filtered_strict, seed_excluded = _apply_graph_watermark_filter(
+        graph_result_strict, per_source_wm, strict_epoch=True
+    )
+
+    assert seed_excluded is False, "SeedA (v5 <= wm=10) must not be excluded"
+    remaining_strict = {n.name for n in filtered_strict.related}
+    assert "FutureEnt" not in remaining_strict, (
+        "v14-D4: FutureEnt from unmapped src_b must be excluded under strict_epoch=True"
+    )
+
+    # Counter must increment exactly once for the unmapped node drop
+    after_unmapped_node = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+    assert after_unmapped_node == before_unmapped_node + 1, (
+        "v14-D4: _EPOCH_DROPS(reason='unmapped', filter='node') must fire once "
+        f"(before={before_unmapped_node}, after={after_unmapped_node})"
+    )
+
+    # --- strict_epoch=False: unmapped node must PASS (legacy) ---
+    before2 = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+
+    filtered_lax, seed_excl_lax = _apply_graph_watermark_filter(
+        graph_result_lax, per_source_wm, strict_epoch=False
+    )
+
+    assert seed_excl_lax is False
+    remaining_lax = {n.name for n in filtered_lax.related}
+    assert "FutureEnt" in remaining_lax, (
+        "v14-D4: strict_epoch=False must preserve legacy pass-through for unmapped nodes"
+    )
+    after2 = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+    assert after2 == before2, "v14-D4: strict_epoch=False must NOT increment unmapped/node counter"
+
+
+def test_unmapped_node_phantom_path_pruned_by_reachability() -> None:
+    """v14-D4: a node reachable ONLY via an excluded unmapped node is pruned.
+
+    Graph: Seed(src_a) → UnmappedGateway(src_b) → Phantom(src_c, in map).
+    Under strict_epoch=True:
+    - UnmappedGateway is excluded (src_b unmapped).
+    - Phantom is reachable only through UnmappedGateway → also excluded by
+      _recompute_reachability BFS.
+    """
+    src_a = str(uuid.uuid4())
+    src_b = str(uuid.uuid4())  # unmapped
+    src_c = str(uuid.uuid4())  # in map, within watermark
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Seed",
+        kind="service",
+        source=src_a,
+        chunk_text=None,
+        depth=0,
+        version=3,
+    )
+    unmapped_gateway = EntityNodeView(
+        id=uuid.uuid4(),
+        name="UnmappedGateway",
+        kind="service",
+        source=src_b,
+        chunk_text=None,
+        depth=1,
+        version=500,
+    )
+    phantom = EntityNodeView(
+        id=uuid.uuid4(),
+        name="Phantom",
+        kind="service",
+        source=src_c,
+        chunk_text=None,
+        depth=2,
+        version=1,
+    )
+
+    graph_result = GraphResultView(
+        seed=seed,
+        related=[unmapped_gateway, phantom],
+        edges=[
+            GraphEdgeView(from_entity="Seed", to_entity="UnmappedGateway", edge_type="USES"),
+            GraphEdgeView(from_entity="UnmappedGateway", to_entity="Phantom", edge_type="CALLS"),
+        ],
+    )
+
+    per_source_wm = {src_a: 10, src_c: 5}  # src_b absent
+
+    filtered, seed_excluded = _apply_graph_watermark_filter(
+        graph_result, per_source_wm, strict_epoch=True
+    )
+
+    assert seed_excluded is False
+
+    remaining = {n.name for n in filtered.related}
+    assert "UnmappedGateway" not in remaining, (
+        "v14-D4: UnmappedGateway from unmapped src_b must be excluded"
+    )
+    assert "Phantom" not in remaining, (
+        "v14-D4: Phantom reachable only via UnmappedGateway must also be pruned "
+        "by reachability recompute (no phantom path from excluded unmapped node)"
+    )
+
+
+def test_legitimate_cross_source_link_not_regressed() -> None:
+    """v14-D4: a cross-source node whose source IS in the watermark map is NOT dropped.
+
+    Scenario: Seed(src_a) → HealthyNode(src_b, in map, within watermark).
+    Both sources are in the map → healthy link → HealthyNode survives.
+    This guards against regressions to legitimate cross_ref linking (e.g. AWS↔K8s).
+    """
+    src_a = str(uuid.uuid4())
+    src_b = str(uuid.uuid4())  # cross-source, but IN the map and within watermark
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="AWSEntity",
+        kind="service",
+        source=src_a,
+        chunk_text=None,
+        depth=0,
+        version=2,
+    )
+    healthy_cross = EntityNodeView(
+        id=uuid.uuid4(),
+        name="K8sEntity",
+        kind="deployment",
+        source=src_b,
+        chunk_text=None,
+        depth=1,
+        version=3,  # <= wm=5 → within watermark
+    )
+
+    graph_result = GraphResultView(
+        seed=seed,
+        related=[healthy_cross],
+        edges=[
+            GraphEdgeView(from_entity="AWSEntity", to_entity="K8sEntity", edge_type="cross_ref")
+        ],
+    )
+
+    per_source_wm = {src_a: 10, src_b: 5}  # BOTH sources in map
+
+    before_unmapped = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+
+    filtered, seed_excluded = _apply_graph_watermark_filter(
+        graph_result, per_source_wm, strict_epoch=True
+    )
+
+    assert seed_excluded is False
+    remaining = {n.name for n in filtered.related}
+    assert "K8sEntity" in remaining, (
+        "v14-D4: K8sEntity (src_b in map, v3 <= wm=5) must NOT be excluded — "
+        "legitimate cross-source link must survive strict_epoch=True"
+    )
+
+    after_unmapped = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+    assert after_unmapped == before_unmapped, (
+        "v14-D4: no unmapped/node drop must fire for a cross-source node whose source IS in map"
+    )
+
+
+def test_topology_leak_closed_affinity_not_boosted_under_strict_epoch() -> None:
+    """v14-D4 end-to-end topology-epoch leak test.
+
+    Setup:
+    - src_a is the seed source (in map, wm=10).
+    - src_b is an unmapped source with a future-epoch graph node (v999).
+    - A vector hit from src_b has applied_version=None (no epoch claim, passes hit filter).
+
+    Under strict_epoch=True (v14-D4 fix):
+    - The src_b graph node is excluded from the candidate set.
+    - src_b therefore has NO graph-affinity entry.
+    - The av=None hit from src_b receives affinity=0.0 (un-boosted baseline).
+    - merged_score = (1-MERGE_ALPHA)*vector_score + MERGE_ALPHA*0.0.
+
+    Under strict_epoch=False (old behaviour / legacy):
+    - The src_b graph node passes → src_b IS in candidate set → gets affinity bonus.
+    - merged_score = (1-MERGE_ALPHA)*vector_score + MERGE_ALPHA*GRAPH_AFFINITY_BASE.
+
+    This test verifies the score difference and that _EPOCH_DROPS fires correctly.
+    """
+    from omniscience_retrieval.graph_rag import (
+        GRAPH_AFFINITY_BASE,
+        MERGE_ALPHA,
+        _build_affinity_map,
+        _collect_candidates,
+        _linear_blend,
+    )
+
+    src_a = str(uuid.uuid4())
+    src_b = str(uuid.uuid4())  # unmapped — topology-epoch leak source
+
+    seed = EntityNodeView(
+        id=uuid.uuid4(),
+        name="SeedEnt",
+        kind="service",
+        source=src_a,
+        chunk_text=None,
+        depth=0,
+        version=2,
+    )
+    future_node = EntityNodeView(
+        id=uuid.uuid4(),
+        name="FutureSrcB",
+        kind="service",
+        source=src_b,
+        chunk_text=None,
+        depth=1,
+        version=999,
+    )
+
+    # Build two graph results — one for strict, one for lax
+    def _make_graph() -> GraphResultView:
+        return GraphResultView(
+            seed=EntityNodeView(
+                id=seed.id,
+                name=seed.name,
+                kind=seed.kind,
+                source=seed.source,
+                chunk_text=seed.chunk_text,
+                depth=seed.depth,
+                version=seed.version,
+            ),
+            related=[
+                EntityNodeView(
+                    id=future_node.id,
+                    name=future_node.name,
+                    kind=future_node.kind,
+                    source=future_node.source,
+                    chunk_text=future_node.chunk_text,
+                    depth=future_node.depth,
+                    version=future_node.version,
+                )
+            ],
+            edges=[GraphEdgeView(from_entity="SeedEnt", to_entity="FutureSrcB", edge_type="USES")],
+        )
+
+    per_source_wm = {src_a: 10}  # src_b intentionally absent
+    vector_score = 0.4
+
+    # --- strict_epoch=True: unmapped node excluded → no affinity bonus ---
+    before_unmapped = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+
+    g_strict = _make_graph()
+    filtered_strict, _ = _apply_graph_watermark_filter(g_strict, per_source_wm, strict_epoch=True)
+
+    after_unmapped = _EPOCH_DROPS.labels(reason="unmapped", filter="node")._value.get()
+    assert after_unmapped == before_unmapped + 1, (
+        "v14-D4: unmapped/node counter must fire for future src_b node under strict_epoch=True"
+    )
+
+    # Collect candidates — src_b must NOT be in the candidate set
+    candidates_strict, depths_strict, centralities_strict, parked_strict = _collect_candidates(
+        filtered_strict
+    )
+    assert src_b not in candidates_strict, (
+        "v14-D4: src_b must NOT be a candidate after unmapped-node exclusion"
+    )
+
+    # Build affinity map — src_b absent → affinity=0.0
+    from omniscience_retrieval.graph_rag import _AnchorStageResult
+
+    anchor_strict = _AnchorStageResult(
+        anchor_requested=True,
+        anchor_name="SeedEnt",
+        anchor_hit=True,
+        candidate_source_ids=candidates_strict,
+        candidate_depths=depths_strict,
+        candidate_centralities=centralities_strict,
+        candidate_parked=parked_strict,
+        duration_s=0.0,
+    )
+    affinity_map_strict = _build_affinity_map(anchor_strict)
+    affinity_for_src_b_strict = affinity_map_strict.get(str(src_b), 0.0)
+    assert affinity_for_src_b_strict == 0.0, (
+        f"v14-D4: src_b affinity must be 0.0 (no topology bonus); got {affinity_for_src_b_strict}"
+    )
+
+    merged_strict = _linear_blend(vector_score=vector_score, graph_affinity=0.0)
+    expected_no_boost = (1.0 - MERGE_ALPHA) * vector_score
+    assert merged_strict == pytest.approx(expected_no_boost), (
+        f"v14-D4: un-boosted score should be {expected_no_boost:.4f}; got {merged_strict:.4f}"
+    )
+
+    # --- strict_epoch=False: unmapped node passes → affinity bonus applies ---
+    g_lax = _make_graph()
+    filtered_lax, _ = _apply_graph_watermark_filter(g_lax, per_source_wm, strict_epoch=False)
+
+    candidates_lax, depths_lax, centralities_lax, parked_lax = _collect_candidates(filtered_lax)
+    assert src_b in candidates_lax, (
+        "Legacy: src_b must be a candidate when strict_epoch=False (unmapped node passes)"
+    )
+
+    anchor_lax = _AnchorStageResult(
+        anchor_requested=True,
+        anchor_name="SeedEnt",
+        anchor_hit=True,
+        candidate_source_ids=candidates_lax,
+        candidate_depths=depths_lax,
+        candidate_centralities=centralities_lax,
+        candidate_parked=parked_lax,
+        duration_s=0.0,
+    )
+    affinity_map_lax = _build_affinity_map(anchor_lax)
+    affinity_for_src_b_lax = affinity_map_lax.get(str(src_b), 0.0)
+    expected_affinity = GRAPH_AFFINITY_BASE  # depth=1 → affinity=1.0
+    assert affinity_for_src_b_lax == pytest.approx(expected_affinity), (
+        f"Legacy: src_b affinity should be {expected_affinity} (depth=1); "
+        f"got {affinity_for_src_b_lax}"
+    )
+
+    merged_lax = _linear_blend(vector_score=vector_score, graph_affinity=affinity_for_src_b_lax)
+    expected_boosted = (1.0 - MERGE_ALPHA) * vector_score + MERGE_ALPHA * expected_affinity
+    assert merged_lax == pytest.approx(expected_boosted), (
+        f"Legacy: boosted score should be {expected_boosted:.4f} (0.4→{expected_boosted:.2f}); "
+        f"got {merged_lax:.4f}"
+    )
+
+    # Confirm strict path score < legacy boosted score (the leak is closed)
+    assert merged_strict < merged_lax, (
+        f"v14-D4: strict score ({merged_strict:.4f}) must be < legacy boosted ({merged_lax:.4f})"
     )

@@ -1022,6 +1022,42 @@ async def test_live_ap3_v12_consumer_path_fail_closed() -> None:
             "The consumer-path wrote versioned evidence that was not dropped."
         )
 
+        # ------------------------------------------------------------------
+        # v13-AP3 POSITIVE assertion: healthy source src_a SURVIVES.
+        #
+        # Without this assertion the test is VACUOUS: src_b_hits_versioned==[]
+        # would also pass if the entire retrieval path returned [] for any
+        # reason (FakeLegacy returns [], Qdrant down, wrong workspace, etc.).
+        #
+        # Why src_a hits are expected:
+        # - OutboxConsumerWorker consumed the EntityUpsertEvent(version=5)
+        #   for src_a and called qdrant_store.upsert_chunks(..., version=5),
+        #   which writes a chunk (doc_version=1 in payload) AND a checkpoint
+        #   sentinel (version=5).
+        # - check_convergence: per_source_wm[src_a] = min(pg=5, neo4j=5,
+        #   qdrant_checkpoint=5) = 5.
+        # - hit.applied_version = doc_version = 1 <= 5 → passes filter.
+        # - The positive assertion proves the retrieval path is non-empty
+        #   and the fail-closed filter is selective (not a total blackout).
+        # ------------------------------------------------------------------
+        src_a_hits = [h for h in result.hits if h.source.id == src_a]
+        assert len(src_a_hits) >= 1, (
+            f"v13-AP3 positive assertion FAILED: healthy source {src_a_key[:8]} "
+            f"has NO hits in the result.  The consumer path did not produce a "
+            f"src_a hit, or the fail-closed filter incorrectly dropped it.  "
+            f"per_source_wm[src_a]={per_source_wm.get(src_a_key)}, "
+            f"total hits in result: {len(result.hits)}, "
+            f"all source ids seen: "
+            f"{[str(h.source.id)[:8] for h in result.hits]}.  "
+            "This indicates the test was vacuous (passing even when the "
+            "healthy source retrieval path returned nothing)."
+        )
+        assert any(h.applied_version is not None and h.applied_version >= 1 for h in src_a_hits), (
+            f"v13-AP3: src_a hits exist but none have applied_version >= 1 "
+            f"(OutboxConsumerWorker chunk should have doc_version=1+): "
+            f"{[(h.applied_version,) for h in src_a_hits]}"
+        )
+
         # All surviving versioned hits must respect their per-source watermark.
         for hit in result.hits:
             if hit.applied_version is None:
