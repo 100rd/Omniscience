@@ -40,10 +40,6 @@ evidence.  The behaviour is governed by the ``strict_epoch`` parameter
 (default ``True``); set ``strict_epoch=False`` to revert to the old
 fail-open behaviour (not recommended for production).
 
-A Prometheus counter ``omniscience_graphrag_epoch_dropped_unmapped_total``
-tracks the number of hits dropped by the fail-closed policy so the
-leak-rate is observable.
-
 v11-AP2 — explicit anchor-miss, no control-flow-by-exception
 --------------------------------------------------------------
 ``_apply_graph_watermark_filter`` no longer raises ``ValueError`` for a
@@ -81,6 +77,43 @@ BFS directed would produce a reachability set INCONSISTENT with what
 pruned here but were included by the graph query.  The undirected BFS is the
 correct behaviour; this is documented (not changed) as the AP3 verdict.
 
+v13-AP2 — canonical no-reconciler signal
+-----------------------------------------
+``search()`` initialises ``per_source_watermark`` to ``None`` (not ``{}``)
+and only populates it when ``self._global_reconciler is not None``.
+``wait_for_convergence`` always returns a ``dict`` (possibly empty), so:
+
+- No reconciler wired → ``per_source_watermark = None`` → ``_apply_watermark_filter``
+  None-bypass fires → ALL hits pass (LIVE).
+- Reconciler ran but found no sources → ``per_source_watermark = {}`` → empty
+  dict flows through per-hit logic → every versioned hit from an unmapped
+  source is DROPPED under ``strict_epoch=True`` (FAIL-CLOSED, observable via
+  the ``empty_map_blackout`` reason label on ``_EPOCH_DROPS``).
+
+This removes the pre-v13 ambiguity where ``{}`` was the default for BOTH
+"no reconciler" AND "cold workspace", making "no reconciler" behave as
+fail-closed on first call.
+
+v13-AP1 — reason-labeled epoch-drop observability
+--------------------------------------------------
+``_EPOCH_DROPPED_UNMAPPED`` is replaced by a single ``_EPOCH_DROPS`` Counter
+with two labels:
+
+- ``reason ∈ {unmapped, lag, cold_zero, empty_map_blackout}`` — WHY the hit
+  or node was dropped.
+- ``filter ∈ {hit, node}`` — WHICH filter dropped it.
+
+Both ``_apply_watermark_filter`` (vector hits, ``filter="hit"``) and
+``_apply_graph_watermark_filter`` (graph nodes, ``filter="node"``) increment
+this counter at every drop site.  The ``empty_map_blackout`` label fires once
+per ``search()`` call when the map is empty under ``strict_epoch=True``.
+
+Graph nodes from UNMAPPED sources intentionally PASS through
+``_apply_graph_watermark_filter`` (no ``unmapped`` counter for nodes) — the
+graph filter only applies version ceilings for sources whose watermark IS
+known.  This is by design: the vector-hit filter handles unmapped-source
+drops for evidence; the graph filter handles graph-ahead nodes.
+
 Backwards-compatibility
 -----------------------
 
@@ -111,9 +144,25 @@ Telemetry
 Per-stage metrics are emitted under the ``omniscience_graphrag_*``
 namespace; see :data:`_STAGE_DURATION`, :data:`_CANDIDATE_SET_SIZE`,
 :data:`_ANCHOR_HIT_TOTAL`, :data:`_COMPOSED_QUERIES_TOTAL`,
-:data:`_EPOCH_DROPPED_UNMAPPED`.  Each request also produces a structlog
+:data:`_EPOCH_DROPS`.  Each request also produces a structlog
 event ``graphrag_query_complete`` with the same numbers for trace
 correlation.
+
+``_EPOCH_DROPS`` (``omniscience_graphrag_epoch_dropped_total``) is
+incremented at every drop site in both ``_apply_watermark_filter``
+(``filter="hit"``) and ``_apply_graph_watermark_filter``
+(``filter="node"``).  Reasons:
+
+- ``unmapped`` — hit from a source absent from the watermark map
+  (strict_epoch=True, ``filter="hit"`` only; graph nodes from unmapped
+  sources pass by design).
+- ``lag`` — hit/node whose ``applied_version > watermark`` (source is in
+  the map but lagging).
+- ``cold_zero`` — hit/node whose source has watermark=0 and
+  ``applied_version >= 1`` (source not yet applied anything).
+- ``empty_map_blackout`` — fired ONCE per ``search()`` call when the
+  watermark map is empty (``{}``) under ``strict_epoch=True``; signals
+  a cold-start or reconciler gap affecting the entire request.
 """
 
 from __future__ import annotations
@@ -257,20 +306,36 @@ _COMPOSED_QUERIES_TOTAL: Counter = Counter(
     labelnames=["path"],
 )
 
-#: v11-AP1: tracks hits dropped by the fail-closed epoch policy (strict_epoch=True)
-#: because the hit's source was absent from the per_source_watermark map.
-#: A non-zero rate indicates sources that were indexed into Qdrant/Neo4j but
-#: whose pg watermark snapshot did not include them — typically a reconciler
-#: race or a source newly added to a store but not yet committed to Postgres.
-_EPOCH_DROPPED_UNMAPPED: Counter = Counter(
-    name="omniscience_graphrag_epoch_dropped_unmapped_total",
+#: v13-AP1: unified epoch-drop counter replacing the old _EPOCH_DROPPED_UNMAPPED.
+#: Incremented in BOTH _apply_watermark_filter (filter="hit") and
+#: _apply_graph_watermark_filter (filter="node") at every drop site.
+#:
+#: reason labels:
+#:   unmapped      — hit from a source not in the watermark map (strict_epoch=True).
+#:                   NOT used for graph nodes (unmapped-source graph nodes pass by design).
+#:   lag           — hit/node with applied_version > watermark (source in map, lagging).
+#:   cold_zero     — hit/node with watermark=0 and applied_version >= 1 (not yet applied).
+#:   empty_map_blackout — fired once per search() call when map == {} under strict_epoch=True.
+#:
+#: filter labels:
+#:   hit  — drop occurred in _apply_watermark_filter (vector evidence layer).
+#:   node — drop occurred in _apply_graph_watermark_filter (graph node layer).
+_EPOCH_DROPS: Counter = Counter(
+    name="omniscience_graphrag_epoch_dropped_total",
     documentation=(
-        "Number of vector hits dropped by the fail-closed epoch policy "
-        "(strict_epoch=True) because the hit's source_id was absent from "
-        "the per_source_watermark map.  A sustained non-zero rate signals "
-        "a reconciler gap or a newly-added source not yet seen by the "
-        "GlobalReconciler (v11-AP1)."
+        "Number of vector hits or graph nodes dropped by the epoch pinning policy. "
+        "Labels: reason ∈ {unmapped, lag, cold_zero, empty_map_blackout}, "
+        "filter ∈ {hit, node}. "
+        "'unmapped' fires when a vector hit's source is absent from the watermark map "
+        "(strict_epoch=True); graph nodes from unmapped sources pass by design. "
+        "'lag' fires when applied_version > watermark for a mapped source. "
+        "'cold_zero' fires when watermark==0 and applied_version>=1 (source not yet applied). "
+        "'empty_map_blackout' fires once per request when the map is {} under strict_epoch=True "
+        "(cold-start / reconciler gap). "
+        "A sustained non-zero rate on 'unmapped' signals a reconciler gap or newly-added "
+        "source not yet seen by the GlobalReconciler (v13-AP1)."
     ),
+    labelnames=["reason", "filter"],
 )
 
 
@@ -494,10 +559,18 @@ class GraphRAGComposer:
 
         # AP3 / v10-AP1: capture convergence signals including per-source watermark.
         # Do NOT discard on timeout — the watermark is what pins the read path.
+        #
+        # v13-AP2 canonical no-reconciler signal:
+        # Initialise to None (not {}) so the no-reconciler path is unambiguous.
+        # - None  → no reconciler wired → _apply_watermark_filter None-bypass → ALL hits pass
+        #           (LIVE).
+        # - {}    → reconciler ran but found no sources (cold workspace) → fail-closed under
+        #           strict_epoch=True → versioned hits DROPPED + empty_map_blackout counter fired.
+        # wait_for_convergence always returns a dict (possibly empty), never None.
         convergence_degraded: list[str] = []
         convergence_staleness: float | None = None
         min_watermark: int | None = None
-        per_source_watermark: dict[str, int] = {}
+        per_source_watermark: dict[str, int] | None = None
         if self._global_reconciler is not None:
             (
                 convergence_degraded,
@@ -505,6 +578,16 @@ class GraphRAGComposer:
                 min_watermark,
                 per_source_watermark,
             ) = await self._global_reconciler.wait_for_convergence(workspace_id)
+
+        # v13-AP1: fire the empty_map_blackout counter ONCE per request when the map
+        # is {} (reconciler ran but cold) under strict_epoch=True.  This makes the
+        # cold-start scenario observable without relying on per-hit counters.
+        if per_source_watermark == {} and self._strict_epoch:
+            _EPOCH_DROPS.labels(reason="empty_map_blackout", filter="hit").inc()
+            log.warning(
+                "graphrag_epoch_empty_map_blackout",
+                workspace_id=str(workspace_id),
+            )
 
         # v10-AP2: pass per-source watermark into anchor stage so graph-ahead
         # nodes/edges are excluded before they influence candidate selection.
@@ -964,8 +1047,8 @@ def _apply_watermark_filter(
     ``strict_epoch=False`` to revert to the legacy fail-open behaviour
     (hit passes when its source has no map entry).
 
-    ``_EPOCH_DROPPED_UNMAPPED`` is incremented for each hit dropped by
-    the fail-closed policy so the leak-rate is observable.
+    v13-AP1: ``_EPOCH_DROPS`` is incremented with labelled reasons at
+    every drop site for full observability.
 
     Rules (strict_epoch=True, the default):
     - When ``per_source_watermark is None``: no reconciler is wired → pass
@@ -980,12 +1063,24 @@ def _apply_watermark_filter(
     - For a hit whose source has no entry in the map:
       - ``applied_version is None``: pass through (no version info).
       - ``applied_version is not None``: DROP (fail-closed) and increment
-        ``omniscience_graphrag_epoch_dropped_unmapped_total``.
+        ``_EPOCH_DROPS(reason="unmapped", filter="hit")``.
     - For a hit whose source IS in the map:
-      - watermark == 0: drop if ``applied_version`` is not None and >= 1
-        (version 0 means nothing applied for this source yet).
-      - Otherwise: drop if ``applied_version > watermark``.
-      - Hits with ``applied_version is None``: always pass through.
+      - watermark == 0 and applied_version >= 1: DROP and increment
+        ``_EPOCH_DROPS(reason="cold_zero", filter="hit")``.
+      - applied_version > watermark (and wm > 0): DROP and increment
+        ``_EPOCH_DROPS(reason="lag", filter="hit")``.
+      - applied_version <= watermark OR applied_version is None: pass.
+
+    BOUNDARY: applied_version=0, wm=0 → PASSES (0 <= 0).  This is correct:
+    version 0 means "nothing applied yet for this source" on BOTH sides,
+    which is a consistent read at epoch 0 — not a mixed-epoch violation.
+
+    Skipping the graph filter on empty map ({}) in ``_apply_graph_watermark_filter``
+    is correct: when the map is {}, there are no source ceilings to enforce in the
+    graph — ANY node version is unconstrained.  The vector-hit filter handles the
+    fail-closed logic for evidence; the graph filter only applies when there are
+    known ceilings.  An empty map for the graph filter means "no graph-ahead nodes
+    to prune" — all graph nodes pass, and the vector-hit filter controls the epoch pin.
 
     Rules (strict_epoch=False, legacy):
     - Hits from unmapped sources pass through unconditionally (old behaviour).
@@ -1008,9 +1103,10 @@ def _apply_watermark_filter(
                 result.append(h)
             elif strict_epoch:
                 # Fail-closed: versioned hit from unmapped source is dropped.
-                _EPOCH_DROPPED_UNMAPPED.inc()
+                _EPOCH_DROPS.labels(reason="unmapped", filter="hit").inc()
                 log.debug(
-                    "graphrag_epoch_dropped_unmapped",
+                    "graphrag_epoch_dropped",
+                    reason="unmapped",
                     source_id=src_key,
                     applied_version=h.applied_version,
                 )
@@ -1020,7 +1116,29 @@ def _apply_watermark_filter(
             continue
         wm = per_source_watermark[src_key]
         if h.applied_version is None or h.applied_version <= wm:
+            # Pass: no version info OR within watermark.
+            # BOUNDARY: applied_version=0, wm=0 → 0 <= 0 → PASS (epoch-0 consistent read).
             result.append(h)
+        elif wm == 0:
+            # cold_zero: source watermark is 0 (never applied) but hit has applied_version >= 1.
+            _EPOCH_DROPS.labels(reason="cold_zero", filter="hit").inc()
+            log.debug(
+                "graphrag_epoch_dropped",
+                reason="cold_zero",
+                source_id=src_key,
+                applied_version=h.applied_version,
+                watermark=wm,
+            )
+        else:
+            # lag: source in map, applied_version > watermark > 0.
+            _EPOCH_DROPS.labels(reason="lag", filter="hit").inc()
+            log.debug(
+                "graphrag_epoch_dropped",
+                reason="lag",
+                source_id=src_key,
+                applied_version=h.applied_version,
+                watermark=wm,
+            )
     return result
 
 
@@ -1048,13 +1166,22 @@ def _apply_graph_watermark_filter(
     excluded edges (phantom paths) are removed from ``graph_result.related``
     and their stale depths do not feed graph-affinity scoring.
 
+    v13-AP1: ``_EPOCH_DROPS(filter="node")`` is incremented at both drop
+    sites (seed-excluded path returns True, so the caller handles that case;
+    related-node drops are incremented here with reason="cold_zero" or
+    reason="lag").  Graph nodes from UNMAPPED sources intentionally PASS
+    (no ``unmapped`` counter for nodes — see module docstring).
+
     Rules:
     - Seed node version-ceiling is checked; if the seed is graph-ahead,
       returns ``(graph_result, True)`` — caller treats as anchor-miss.
+      The seed exclusion is NOT counted here — it is the caller's signal.
     - Related nodes whose version exceeds the watermark are removed.
+      reason="cold_zero" when wm==0; reason="lag" otherwise.
     - Edges between removed nodes are pruned.
     - Nodes with ``version is None`` pass through (no ceiling info).
-    - Sources not in the watermark map pass through (no ceiling for them).
+    - Sources not in the watermark map pass through (no ceiling for them —
+      by design; the vector-hit filter handles unmapped-source drops).
     - After pruning, BFS reachability is recomputed from the seed over
       surviving edges; unreachable nodes are dropped.
 
@@ -1076,6 +1203,9 @@ def _apply_graph_watermark_filter(
         wm = per_source_watermark[seed_src]
         if seed.version > wm:
             # v11-AP2: return explicit signal instead of raising ValueError.
+            # The caller (_run_anchor_stage) counts this as anchor-miss;
+            # we do NOT increment _EPOCH_DROPS here — the caller's anchor-miss
+            # counter is the observable signal for seed exclusion.
             return graph_result, True
 
     # Filter related nodes.
@@ -1086,6 +1216,29 @@ def _apply_graph_watermark_filter(
             wm = per_source_watermark[node_src]
             if node.version > wm:
                 excluded_names.add(node.name)
+                # v13-AP1: count the drop with the appropriate reason.
+                if wm == 0:
+                    _EPOCH_DROPS.labels(reason="cold_zero", filter="node").inc()
+                    log.debug(
+                        "graphrag_epoch_dropped",
+                        reason="cold_zero",
+                        filter="node",
+                        node_name=node.name,
+                        source=node_src,
+                        version=node.version,
+                        watermark=wm,
+                    )
+                else:
+                    _EPOCH_DROPS.labels(reason="lag", filter="node").inc()
+                    log.debug(
+                        "graphrag_epoch_dropped",
+                        reason="lag",
+                        filter="node",
+                        node_name=node.name,
+                        source=node_src,
+                        version=node.version,
+                        watermark=wm,
+                    )
                 continue
         kept_related.append(node)
     graph_result.related = kept_related
