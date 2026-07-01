@@ -25,6 +25,8 @@ jobs:
       - run: uv run ruff format --check .
       - name: Check for stale architecture and doc-drift
         run: uv run python scripts/lint_stale_architecture.py packages/ apps/ tests/ docs/decisions/
+      - name: Check no secret env files are tracked
+        run: python scripts/check_no_tracked_secrets.py
 
   dependency-audit:
     runs-on: ubuntu-latest
