@@ -4,7 +4,11 @@ version = "0.2.0"
 description = "PostgreSQL + Qdrant index layer for Omniscience"
 requires-python = ">=3.12"
 dependencies = [
-    "omniscience-core",
+    # queue: index imports omniscience_core.queue.messages (event schemas),
+    # whose package __init__ needs nats-py.  telemetry: importing
+    # omniscience_core.telemetry.metrics executes the sub-package __init__,
+    # which wires the OTel SDK.
+    "omniscience-core[queue,telemetry]",
     "omniscience-embeddings",
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29.0",

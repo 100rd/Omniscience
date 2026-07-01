@@ -37,7 +37,7 @@ dev = [
     "pytest-cov>=5.0.0",
     "httpx>=0.27.0",
     "pre-commit>=3.7.1",
-    "omniscience-core",
+    "omniscience-core[all]",
     "omniscience-connectors",
     "omniscience-server",
     "omniscience-embeddings",
@@ -64,7 +64,6 @@ line-length = 99
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "S", "T20", "SIM", "TCH", "RUF"]
 ignore = [
-    "S104",  # Binding to all interfaces — required for containerised services
     "TC001", # Application imports in TYPE_CHECKING blocks — causes issues with pydantic models
     "TC002", # Third-party imports in TYPE_CHECKING blocks — causes runtime issues with starlette
     "TC003", # Stdlib imports in TYPE_CHECKING blocks — we use from __future__ import annotations
@@ -73,15 +72,51 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = [
     "S101",  # assert is the standard pytest assertion mechanism
-    "S105",  # Hardcoded password string — test fixtures use placeholder values
-    "S106",  # Hardcoded password in function argument — test fixtures only
-    "S107",  # Hardcoded password in function default — test fixtures only
-    "S108",  # Probable insecure usage of temp file — test-only temp paths
     "S306",  # Insecure mktemp — test-only, we unlink immediately
     "S603",  # subprocess call — test helpers run git in controlled fixtures
     "S607",  # Partial executable path — controlled test environment
-    "B017",  # Do not assert blind exception — inherited from contract tests
 ]
+# Placeholder credentials in test fixtures: S105 (hardcoded string assignments /
+# comparisons), S106 (call keyword arguments), S107 (function defaults). Scoped to
+# the individual files that use them instead of blanket-disabling the checks for
+# the whole test tree. S108/B017 are handled with per-line noqa at the few sites
+# that need them.
+"tests/connectors/contract_tests.py" = ["S106"]
+"tests/conformance/test_ap1_per_entity_cas.py" = ["S106"]
+"tests/integration/test_neo4j_bootstrap_schema.py" = ["S105"]
+"tests/integration/test_neo4j_writer_metadata.py" = ["S105"]
+"tests/integration/test_replay.py" = ["S105"]
+"tests/test_alerts_webhook.py" = ["S106", "S107"]
+"tests/test_auth.py" = ["S105"]
+"tests/test_build_aws_docs.py" = ["S106"]
+"tests/test_cli.py" = ["S105", "S106"]
+"tests/test_connector_sdk.py" = ["S105", "S106"]
+"tests/test_connectors_v2.py" = ["S105"]
+"tests/test_db_schema.py" = ["S105", "S106"]
+"tests/test_federation.py" = ["S105", "S106", "S107"]
+"tests/test_git_connector.py" = ["S105"]
+"tests/test_github_pr_connector.py" = ["S105"]
+"tests/test_github_pr_webhook.py" = ["S105"]
+"tests/test_ingestion_e2e.py" = ["S106"]
+"tests/test_init_cli.py" = ["S106", "S107"]
+"tests/test_mcp_incident_timeline_coverage.py" = ["S105"]
+"tests/test_mcp_list_entities.py" = ["S105"]
+"tests/test_mcp_server_coverage.py" = ["S105"]
+"tests/test_merge_unmerge_store.py" = ["S106"]
+"tests/test_multi_tenant.py" = ["S105", "S106"]
+"tests/test_neo4j_store.py" = ["S106"]
+"tests/test_neo4j_store_as_of.py" = ["S106"]
+"tests/test_neo4j_store_bitemporal_backfill.py" = ["S106"]
+"tests/test_neo4j_store_bitemporal_schema.py" = ["S106"]
+"tests/test_neo4j_store_bitemporal_writer.py" = ["S106"]
+"tests/test_neo4j_store_list_entities.py" = ["S106"]
+"tests/test_pagerduty_connector.py" = ["S105"]
+"tests/test_rest_api.py" = ["S105"]
+"tests/test_s3_connector.py" = ["S105", "S106"]
+"tests/test_slack_connector_entities.py" = ["S105"]
+"tests/test_store_contract.py" = ["S106"]
+"tests/test_tombstone_end_dating.py" = ["S106"]
+"tests/test_webhooks.py" = ["S105", "S106"]
 "benchmarks/*" = [
     "S101",  # assert is the standard pytest assertion mechanism
 ]
@@ -112,4 +147,4 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov --cov-report=term-missing"
+addopts = "--cov --cov-report=term-missing --cov-fail-under=80"

@@ -4,7 +4,12 @@ version = "0.2.0"
 description = "Omniscience API server (FastAPI + FastMCP)"
 requires-python = ">=3.12"
 dependencies = [
-    "omniscience-core",
+    # The server is the consumer of core's db/queue/auth/telemetry modules,
+    # so it opts into the heavy extras that left core's base.
+    "omniscience-core[auth,db,queue,telemetry]",
+    # Migrations (make migrate / `omniscience migrate` shelling out to
+    # `python -m alembic`) run against the server environment.
+    "alembic>=1.13.0",
     "omniscience-connectors",
     "omniscience-embeddings",
     "omniscience-index",

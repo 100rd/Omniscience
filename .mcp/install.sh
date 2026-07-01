@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # Omniscience one-line installer.
 #
-# Usage:
-#   curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash
+# Usage (pinned install — download, verify the checksum, then run):
+#   curl -fsSL -o install.sh \
+#     https://raw.githubusercontent.com/100rd/Omniscience/v0.5.0/.mcp/install.sh
+#   echo "<expected sha256 — see .mcp/install.sh.sha256 or the release notes>  install.sh" \
+#     | sha256sum -c -          # macOS: shasum -a 256 -c -
+#   bash install.sh
+#
+# The expected SHA-256 is recorded in-repo (.mcp/install.sh.sha256), inlined
+# in the README install section, and published in the release notes; any
+# release that changes this script bumps it. Never pipe this script from a
+# mutable ref (main/HEAD) straight into a shell.
 #
 # What it does:
 #   1. Checks prerequisites (docker, docker compose).

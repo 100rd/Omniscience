@@ -43,6 +43,7 @@ from omniscience_server.blast_radius import (
     INVALID_ACTION_TYPE_CODE,
     INVALID_ENTITY_ID_CODE,
     ActionType,
+    BlastRadiusResponse,
     mcp_blast_radius,
 )
 
@@ -652,3 +653,129 @@ class TestEdgeAllowlistForwardedToStore:
         find_call = next(c for c in store.calls if c["op"] == "find_related")
         allow = set(find_call["edge_types"])
         assert allow == {"SCHEDULED_ON", "RUNS_ON"}
+
+
+# ---------------------------------------------------------------------------
+# 7. Uncalibrated-scoring flag — v0.1 placeholder scores are marked in-band
+# ---------------------------------------------------------------------------
+
+
+class TestUncalibratedScoringFlag:
+    """v0.1 placeholder ``impact_score``/``confidence`` are flagged in-band.
+
+    ``docs/api/blast-radius.md`` warns in prose that the impact score is a
+    "v0.1 placeholder, not a calibrated probability" — but nothing in the
+    response lets an automated client gate on that.  The contract mirrors
+    the AP4 ``resolve_incident`` precedent: a machine-readable
+    ``calibrated: bool`` flag, declared in the Pydantic schema (not
+    injected post-``model_dump``), defaulting to ``False`` so existing
+    payloads stay valid (back-compatible, additive-only).
+    """
+
+    async def test_response_carries_calibrated_false_top_level(self) -> None:
+        """The MCP response carries ``calibrated=False`` on the v0.1 path."""
+        store = _BlastGraphStore()
+        _seed_full_topology(store, workspace_id=_WS_A)
+        app = FastAPI()
+        _wire_graph_store(app, store)
+
+        result = await mcp_blast_radius(
+            app=app,
+            entity_id=_SEED,
+            workspace_id=_WS_A,
+            action_type="restart",
+        )
+
+        assert "calibrated" in result, (
+            "blast_radius response must carry a machine-readable 'calibrated' "
+            "flag so automated clients can gate on placeholder scores"
+        )
+        # v0.1 deterministic heuristic — never a fitted artifact.
+        assert result["calibrated"] is False
+
+    @pytest.mark.parametrize("action_type", list(ACTION_TYPES))
+    async def test_every_action_type_reports_uncalibrated(
+        self,
+        action_type: ActionType,
+    ) -> None:
+        """No action type sneaks a calibrated=True past the v0.1 scorer."""
+        store = _BlastGraphStore()
+        _seed_full_topology(store, workspace_id=_WS_A)
+        app = FastAPI()
+        _wire_graph_store(app, store)
+
+        result = await mcp_blast_radius(
+            app=app,
+            entity_id=_SEED,
+            workspace_id=_WS_A,
+            action_type=action_type,
+        )
+        assert result["calibrated"] is False
+
+    async def test_meta_carries_calibrated_alongside_scoring_model(self) -> None:
+        """``meta`` pairs the existing ``scoring_model`` hint with the flag.
+
+        Dashboards already read ``meta.scoring_model``; the boolean lives
+        next to it so meta-only consumers gate without string-matching a
+        version label.
+        """
+        store = _BlastGraphStore()
+        _seed_full_topology(store, workspace_id=_WS_A)
+        app = FastAPI()
+        _wire_graph_store(app, store)
+
+        result = await mcp_blast_radius(
+            app=app,
+            entity_id=_SEED,
+            workspace_id=_WS_A,
+            action_type="restart",
+        )
+
+        meta = result["meta"]
+        assert meta is not None
+        # Existing explainability hint stays — additive change only.
+        assert meta["scoring_model"] == "v0.1-deterministic"
+        assert meta.get("calibrated") is False, (
+            "meta must carry calibrated=False next to scoring_model; "
+            f"got meta={meta!r}"
+        )
+
+    async def test_calibrated_is_first_class_pydantic_field(self) -> None:
+        """``calibrated`` is declared on the schema, not injected post-dump.
+
+        Mirrors AP4: the flag must survive schema-driven consumers
+        (OpenAPI, SDK codegen), which only see declared fields.
+        """
+        fields = BlastRadiusResponse.model_fields
+        assert "calibrated" in fields, (
+            "calibrated must be a declared Pydantic field on BlastRadiusResponse"
+        )
+        assert fields["calibrated"].default is False, (
+            "calibrated must default to False so pre-existing constructor "
+            "call sites keep validating (back-compatible)"
+        )
+
+    async def test_omitting_calibrated_still_validates(self) -> None:
+        """Back-compat: constructing the response without the flag works."""
+        response = BlastRadiusResponse(
+            seed_entity_id=_SEED,
+            action_type="restart",
+            max_depth=DEFAULT_MAX_DEPTH,
+            impacted=[],
+            effective_as_of=_AS_OF_T,
+            meta=None,
+        )
+        assert response.calibrated is False
+
+    async def test_contract_parity_with_resolve_incident(self) -> None:
+        """Both confidence-scored tools expose the same gating flag.
+
+        ``resolve_incident`` already carries ``calibrated`` (AP4);
+        ``blast_radius`` must match so clients gate uniformly.
+        """
+        from omniscience_retrieval.incidents.resolution import (
+            ResolveIncidentResponse,
+        )
+
+        assert "calibrated" in ResolveIncidentResponse.model_fields
+        assert "calibrated" in BlastRadiusResponse.model_fields

@@ -124,6 +124,14 @@ class BlastRadiusResponse(BaseModel):
     impacted: list[BlastRadiusImpact] = Field(default_factory=list)
     effective_as_of: datetime
     meta: dict[str, Any] | None = None
+    calibrated: bool = Field(
+        default=False,
+        description=(
+            "True when impact_score/confidence come from a fitted calibration "
+            "artifact. False on the v0.1 deterministic heuristic — automated "
+            "clients should gate on this flag before trusting the scores."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -303,6 +311,7 @@ def build_blast_meta(
         "edge_allowlist": list(edge_allowlist),
         "max_depth": depth,
         "scoring_model": "v0.1-deterministic",
+        "calibrated": False,
     }
 
 
@@ -337,6 +346,9 @@ def build_blast_response(
         impacted=impacted,
         effective_as_of=effective_as_of,
         meta=meta,
+        # v0.1 deterministic scorer — flips to True only when a fitted
+        # calibration artifact backs impact_score/confidence (#155).
+        calibrated=False,
     )
 
 

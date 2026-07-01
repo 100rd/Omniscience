@@ -28,6 +28,7 @@ MANIFEST
 
 # Testing
 .pytest_cache/
+.hypothesis/
 .coverage
 .coverage.*
 htmlcov/
@@ -69,3 +70,7 @@ Thumbs.db
 
 # Claude Code agent worktrees / local state
 .claude/
+.agents/
+
+# Local debug scratch scripts
+debug_fixture.py

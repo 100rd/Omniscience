@@ -3,20 +3,50 @@ name = "omniscience-core"
 version = "0.2.0"
 description = "Shared types, config, logging, telemetry for Omniscience"
 requires-python = ">=3.12"
+# Base deps stay lightweight: core is inherited transitively by every
+# workspace member (cli/parsers/embeddings included), so DB drivers, the
+# NATS client, argon2 and the OTel SDK live behind the extras below.
+# opentelemetry-api is a no-op shim without the SDK; prometheus-client is
+# pure Python.
 dependencies = [
     "pydantic>=2.7.0",
     "pydantic-settings>=2.3.0",
     "structlog>=24.2.0",
     "opentelemetry-api>=1.25.0",
-    "opentelemetry-sdk>=1.25.0",
-    "opentelemetry-exporter-otlp>=1.25.0",
-    "opentelemetry-instrumentation-fastapi>=0.46b0",
     "prometheus-client>=0.20.0",
-    "sqlalchemy[asyncio]>=2.0.30",
-    "asyncpg>=0.29.0",
-    "alembic>=1.13.0",
-    "nats-py>=2.7.0",
+]
+
+[project.optional-dependencies]
+# Union of the extras below, for the server and the dev environment.
+all = [
     "argon2-cffi>=23.1.0",
+    "asyncpg>=0.29.0",
+    "nats-py>=2.7.0",
+    "opentelemetry-exporter-otlp>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+]
+# omniscience_core.auth — token hashing plus SQLAlchemy-backed middleware.
+auth = [
+    "argon2-cffi>=23.1.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+]
+# omniscience_core.db / .stats / .freshness / .audit — SQLAlchemy models
+# and async sessions against Postgres.
+db = [
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+]
+# omniscience_core.queue — NATS JetStream framework. queue.messages itself
+# is pure Pydantic, but importing it executes the package __init__, which
+# needs the client.
+queue = [
+    "nats-py>=2.7.0",
+]
+# omniscience_core.telemetry.otel — OTel SDK + OTLP exporter wiring.
+telemetry = [
+    "opentelemetry-exporter-otlp>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
 ]
 
 [build-system]

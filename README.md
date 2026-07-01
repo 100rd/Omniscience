@@ -98,13 +98,18 @@ flowchart TB
 
 **v0.2.0.** Backend split to **Neo4j + Qdrant + Postgres** (Epic #96 cutover). Bitemporal `as_of` is implemented and exercised across the MCP/REST surface; hybrid `search` is the production workhorse; graph traversal and the incident tools are live, with a few v0.1 placeholders maturing (calibrated `resolve_incident` confidence and `blast_radius` impact scoring). Infra connectors (AWS, S3 Terraform state) are in pilot; the native Kubernetes operator and desired-vs-actual drift detection are on the roadmap. See [docs/roadmap.md](docs/roadmap.md) (M0 → M6) and [docs/vision.md](docs/vision.md).
 
-## Install (one line)
+## Install (pinned)
+
+Download the installer pinned to a release tag, verify its SHA-256, then run it — never pipe a script from a mutable branch into your shell:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/100rd/Omniscience/v0.5.0/.mcp/install.sh
+echo "080551789e472af099aa9e60554a3ac28a30a7fa98dd1c80c9a0698b5eff7ca1  install.sh" | sha256sum -c -
+# macOS (no sha256sum): shasum -a 256 -c - instead
+bash install.sh
 ```
 
-Starts the stack with Docker, mints secrets into `./omniscience/.env`, and waits for `/health`. Then wire it into your IDE in one shot:
+The expected checksum is published in [`.mcp/install.sh.sha256`](.mcp/install.sh.sha256) and in each release's notes; it changes only when a release updates the installer. Starts the stack with Docker, mints secrets into `./omniscience/.env`, and waits for `/health`. Then wire it into your IDE in one shot:
 
 ```bash
 uvx --from omniscience-cli omniscience init --client claude-code

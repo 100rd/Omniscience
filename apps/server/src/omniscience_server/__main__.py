@@ -11,7 +11,7 @@ def main() -> None:
     """Run the Omniscience server with uvicorn."""
     uvicorn.run(
         create_app(),
-        host="0.0.0.0",
+        host="0.0.0.0",  # noqa: S104 — container entrypoint must bind all interfaces
         port=8000,
         log_config=None,  # structlog handles all logging; suppress uvicorn's own config
     )

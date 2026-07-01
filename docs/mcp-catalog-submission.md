@@ -131,11 +131,22 @@ issue #237; design lead to deliver.
 
 ## Install-flow validation
 
-The `1-line install` advertised everywhere is:
+The pinned install advertised everywhere (README, PulseMCP, Cline
+marketplace) downloads the installer at an immutable release tag,
+verifies its SHA-256 against the in-repo sidecar
+`.mcp/install.sh.sha256`, and only then executes it:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash
+curl -fsSL -o install.sh https://raw.githubusercontent.com/100rd/Omniscience/v0.5.0/.mcp/install.sh
+echo "080551789e472af099aa9e60554a3ac28a30a7fa98dd1c80c9a0698b5eff7ca1  install.sh" | sha256sum -c -
+# macOS (no sha256sum): shasum -a 256 -c - instead
+bash install.sh
 ```
+
+Cutting a release that touches `.mcp/install.sh` must regenerate
+`.mcp/install.sh.sha256` and the digests inlined in the README, this
+doc, `.mcp/pulsemcp.json`, and `.mcp/cline-marketplace.json`
+(`tests/test_install_pinning.py` fails otherwise).
 
 Public installs use the GHCR-image variant **`docker-compose.prod.yml`** (no local build context required); images are published from tag `v*` by `.github/workflows/release.yml` to `ghcr.io/100rd/omniscience-{app,admin}`. Pin a specific image tag with `OMNISCIENCE_VERSION=v0.5.0 bash install.sh`; default is `:latest`. The dev compose (`docker-compose.yml`) still uses `build:` for local hot-reload and is not consumed by the installer.
 
@@ -143,7 +154,9 @@ It must pass on **both** macOS and Linux. Validation procedure:
 
 1. **macOS** (Intel + Apple Silicon): fresh shell, fresh `$PWD`:
    ```bash
-   curl -fsSL .../install.sh | bash
+   curl -fsSL -o install.sh https://raw.githubusercontent.com/100rd/Omniscience/v0.5.0/.mcp/install.sh
+   sha256sum -c install.sh.sha256   # after fetching the sidecar; macOS: shasum -a 256 -c
+   bash install.sh
    curl http://localhost:8000/health
    ```
 2. **Linux** (Ubuntu 22.04 + Debian 12): same procedure inside

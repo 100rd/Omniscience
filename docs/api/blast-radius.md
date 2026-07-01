@@ -75,8 +75,10 @@ Both surfaces return the same JSON shape:
     "action_type":     "restart",
     "edge_allowlist":  ["CALLS", "DEPENDS_ON", "ROUTES_TO"],
     "max_depth":       3,
-    "scoring_model":   "v0.1-deterministic"
-  }
+    "scoring_model":   "v0.1-deterministic",
+    "calibrated":      false
+  },
+  "calibrated": false
 }
 ```
 
@@ -143,6 +145,13 @@ clipped to `[0.0, 1.0]`, where:
 > should treat the score as a ranking signal between entities in the
 > same response, not an absolute "how bad is this on a scale of 0 to 1"
 > number.  A calibrated model is a follow-up to issue #234.
+>
+> This is also signalled **in-band**: the response carries a top-level
+> `calibrated: false` (mirrored in `meta.calibrated`, next to
+> `scoring_model`) so automated clients can gate on placeholder scores
+> without parsing prose.  The flag matches the `resolve_incident`
+> contract; it flips to `true` only when a fitted calibration artifact
+> backs the scores.
 
 ## Confidence
 

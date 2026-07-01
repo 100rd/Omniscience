@@ -110,15 +110,6 @@ wheels = [
 ]
 
 [[package]]
-name = "asgiref"
-version = "3.11.1"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/63/40/f03da1264ae8f7cfdbf9146542e5e7e8100a4c66ab48e791df9a03d3f6c0/asgiref-3.11.1.tar.gz", hash = "sha256:5f184dc43b7e763efe848065441eac62229c9f7b0475f41f80e207a114eda4ce", size = 38550, upload-time = "2026-02-03T13:30:14.33Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/5c/0a/a72d10ed65068e115044937873362e6e32fab1b7dce0046aeb224682c989/asgiref-3.11.1-py3-none-any.whl", hash = "sha256:e8667a091e69529631969fd45dc268fa79b99c92c5fcdda727757e52146ec133", size = 24345, upload-time = "2026-02-03T13:30:13.039Z" },
-]
-
-[[package]]
 name = "asyncpg"
 version = "0.31.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1260,7 +1251,7 @@ dev = [
     { name = "mypy" },
     { name = "omniscience-cli" },
     { name = "omniscience-connectors" },
-    { name = "omniscience-core" },
+    { name = "omniscience-core", extra = ["all"] },
     { name = "omniscience-embeddings" },
     { name = "omniscience-index" },
     { name = "omniscience-parsers" },
@@ -1295,7 +1286,7 @@ dev = [
     { name = "mypy", specifier = ">=1.10.0" },
     { name = "omniscience-cli", editable = "apps/cli" },
     { name = "omniscience-connectors", editable = "packages/connectors" },
-    { name = "omniscience-core", editable = "packages/core" },
+    { name = "omniscience-core", extras = ["all"], editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
     { name = "omniscience-index", editable = "packages/index" },
     { name = "omniscience-parsers", editable = "packages/parsers" },
@@ -1365,37 +1356,60 @@ name = "omniscience-core"
 version = "0.2.0"
 source = { editable = "packages/core" }
 dependencies = [
-    { name = "alembic" },
-    { name = "argon2-cffi" },
-    { name = "asyncpg" },
-    { name = "nats-py" },
     { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp" },
-    { name = "opentelemetry-instrumentation-fastapi" },
-    { name = "opentelemetry-sdk" },
     { name = "prometheus-client" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
+]
+
+[package.optional-dependencies]
+all = [
+    { name = "argon2-cffi" },
+    { name = "asyncpg" },
+    { name = "nats-py" },
+    { name = "opentelemetry-exporter-otlp" },
+    { name = "opentelemetry-sdk" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+auth = [
+    { name = "argon2-cffi" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+db = [
+    { name = "asyncpg" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+]
+queue = [
+    { name = "nats-py" },
+]
+telemetry = [
+    { name = "opentelemetry-exporter-otlp" },
+    { name = "opentelemetry-sdk" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "alembic", specifier = ">=1.13.0" },
-    { name = "argon2-cffi", specifier = ">=23.1.0" },
-    { name = "asyncpg", specifier = ">=0.29.0" },
-    { name = "nats-py", specifier = ">=2.7.0" },
+    { name = "argon2-cffi", marker = "extra == 'all'", specifier = ">=23.1.0" },
+    { name = "argon2-cffi", marker = "extra == 'auth'", specifier = ">=23.1.0" },
+    { name = "asyncpg", marker = "extra == 'all'", specifier = ">=0.29.0" },
+    { name = "asyncpg", marker = "extra == 'db'", specifier = ">=0.29.0" },
+    { name = "nats-py", marker = "extra == 'all'", specifier = ">=2.7.0" },
+    { name = "nats-py", marker = "extra == 'queue'", specifier = ">=2.7.0" },
     { name = "opentelemetry-api", specifier = ">=1.25.0" },
-    { name = "opentelemetry-exporter-otlp", specifier = ">=1.25.0" },
-    { name = "opentelemetry-instrumentation-fastapi", specifier = ">=0.46b0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.25.0" },
+    { name = "opentelemetry-exporter-otlp", marker = "extra == 'all'", specifier = ">=1.25.0" },
+    { name = "opentelemetry-exporter-otlp", marker = "extra == 'telemetry'", specifier = ">=1.25.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'all'", specifier = ">=1.25.0" },
+    { name = "opentelemetry-sdk", marker = "extra == 'telemetry'", specifier = ">=1.25.0" },
     { name = "prometheus-client", specifier = ">=0.20.0" },
     { name = "pydantic", specifier = ">=2.7.0" },
     { name = "pydantic-settings", specifier = ">=2.3.0" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
+    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'all'", specifier = ">=2.0.30" },
+    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'auth'", specifier = ">=2.0.30" },
+    { name = "sqlalchemy", extras = ["asyncio"], marker = "extra == 'db'", specifier = ">=2.0.30" },
     { name = "structlog", specifier = ">=24.2.0" },
 ]
+provides-extras = ["all", "auth", "db", "queue", "telemetry"]
 
 [[package]]
 name = "omniscience-embeddings"
@@ -1421,7 +1435,7 @@ source = { editable = "packages/index" }
 dependencies = [
     { name = "asyncpg" },
     { name = "neo4j" },
-    { name = "omniscience-core" },
+    { name = "omniscience-core", extra = ["queue", "telemetry"] },
     { name = "omniscience-embeddings" },
     { name = "qdrant-client" },
     { name = "sqlalchemy", extra = ["asyncio"] },
@@ -1432,7 +1446,7 @@ dependencies = [
 requires-dist = [
     { name = "asyncpg", specifier = ">=0.29.0" },
     { name = "neo4j", specifier = ">=5.19.0" },
-    { name = "omniscience-core", editable = "packages/core" },
+    { name = "omniscience-core", extras = ["queue", "telemetry"], editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
     { name = "qdrant-client", specifier = ">=1.17,<1.18" },
     { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.30" },
@@ -1525,11 +1539,12 @@ name = "omniscience-server"
 version = "0.2.0"
 source = { editable = "apps/server" }
 dependencies = [
+    { name = "alembic" },
     { name = "boto3" },
     { name = "fastapi" },
     { name = "mcp" },
     { name = "omniscience-connectors" },
-    { name = "omniscience-core" },
+    { name = "omniscience-core", extra = ["auth", "db", "queue", "telemetry"] },
     { name = "omniscience-embeddings" },
     { name = "omniscience-index" },
     { name = "omniscience-retrieval" },
@@ -1539,11 +1554,12 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "alembic", specifier = ">=1.13.0" },
     { name = "boto3", specifier = ">=1.42.91" },
     { name = "fastapi", specifier = ">=0.111.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "omniscience-connectors", editable = "packages/connectors" },
-    { name = "omniscience-core", editable = "packages/core" },
+    { name = "omniscience-core", extras = ["auth", "db", "queue", "telemetry"], editable = "packages/core" },
     { name = "omniscience-embeddings", editable = "packages/embeddings" },
     { name = "omniscience-index", editable = "packages/index" },
     { name = "omniscience-retrieval", editable = "packages/retrieval" },
@@ -1626,53 +1642,6 @@ wheels = [
 ]
 
 [[package]]
-name = "opentelemetry-instrumentation"
-version = "0.62b0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "packaging" },
-    { name = "wrapt" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f9/fd/b8e90bb340957f059084376f94cff336b0e871a42feba7d3f7342365e987/opentelemetry_instrumentation-0.62b0.tar.gz", hash = "sha256:aa1b0b9ab2e1722c2a8a5384fb016fc28d30bba51826676c8036074790d2861e", size = 34042, upload-time = "2026-04-09T14:40:22.843Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/00/b6/3356d2e335e3c449c5183e9b023f30f04f1b7073a6583c68745ea2e704b1/opentelemetry_instrumentation-0.62b0-py3-none-any.whl", hash = "sha256:30d4e76486eae64fb095264a70c2c809c4bed17b73373e53091470661f7d477c", size = 34158, upload-time = "2026-04-09T14:39:21.428Z" },
-]
-
-[[package]]
-name = "opentelemetry-instrumentation-asgi"
-version = "0.62b0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "asgiref" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "opentelemetry-util-http" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/f1/38/999bf777774878971c2716de4b7a03cd57a7decb4af25090e703b79fa0e5/opentelemetry_instrumentation_asgi-0.62b0.tar.gz", hash = "sha256:93cde8c62e5918a3c1ff9ba020518127300e5e0816b7e8b14baf46a26ba619fc", size = 26779, upload-time = "2026-04-09T14:40:26.566Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/25/cf/29df82f5870178143bdb5c9a7be044b9f78c71e1c5dcf995242e86d80158/opentelemetry_instrumentation_asgi-0.62b0-py3-none-any.whl", hash = "sha256:89b62a6f996b260b162f515c25e6d78e39286e4cbe2f935899e51b32f31027e2", size = 17011, upload-time = "2026-04-09T14:39:27.305Z" },
-]
-
-[[package]]
-name = "opentelemetry-instrumentation-fastapi"
-version = "0.62b0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-instrumentation" },
-    { name = "opentelemetry-instrumentation-asgi" },
-    { name = "opentelemetry-semantic-conventions" },
-    { name = "opentelemetry-util-http" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/37/09/92740c6d114d1bef392557a03ae6de64065c83c1b331dae9b57fe718497c/opentelemetry_instrumentation_fastapi-0.62b0.tar.gz", hash = "sha256:e4748e4e575077e08beaf2c5d2f369da63dd90882d89d73c4192a97356637dec", size = 25056, upload-time = "2026-04-09T14:40:36.438Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/64/bb/186ffe0fde0ad33ceb50e1d3596cc849b732d3b825592a6a507a40c8c49b/opentelemetry_instrumentation_fastapi-0.62b0-py3-none-any.whl", hash = "sha256:06d3272ad15f9daea5a0a27c32831aff376110a4b0394197120256ef6d610e6e", size = 13482, upload-time = "2026-04-09T14:39:43.446Z" },
-]
-
-[[package]]
 name = "opentelemetry-proto"
 version = "1.41.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1709,15 +1678,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a3/b0/c14f723e86c049b7bf8ff431160d982519b97a7be2857ed2247377397a24/opentelemetry_semantic_conventions-0.62b0.tar.gz", hash = "sha256:cbfb3c8fc259575cf68a6e1b94083cc35adc4a6b06e8cf431efa0d62606c0097", size = 145753, upload-time = "2026-04-09T14:38:48.274Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/6c/5e86fa1759a525ef91c2d8b79d668574760ff3f900d114297765eb8786cb/opentelemetry_semantic_conventions-0.62b0-py3-none-any.whl", hash = "sha256:0ddac1ce59eaf1a827d9987ab60d9315fb27aea23304144242d1fcad9e16b489", size = 231619, upload-time = "2026-04-09T14:38:32.394Z" },
-]
-
-[[package]]
-name = "opentelemetry-util-http"
-version = "0.62b0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/9b/e7/830f7c57135158eb8a8efd3f94ab191a89e3b8a49bed314a35ee501da3f2/opentelemetry_util_http-0.62b0.tar.gz", hash = "sha256:a62e4b19b8a432c0de657f167dee3455516136bb9c6ed463ca8063019970d835", size = 11393, upload-time = "2026-04-09T14:40:59.442Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/3d/7f/5c1b7d4385852b9e5eacd4e7f9d8b565d3d351d17463b24916ad098adf1a/opentelemetry_util_http-0.62b0-py3-none-any.whl", hash = "sha256:c20462808d8cc95b69b0dc4a3e02a9d36beb663347e96c931f51ffd78bd318ad", size = 9294, upload-time = "2026-04-09T14:40:19.014Z" },
 ]
 
 [[package]]
