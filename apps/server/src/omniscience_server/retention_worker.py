@@ -447,7 +447,11 @@ class RetentionWorker:
                 dates=len(snapshot_dates),
             )
             return
-        s3_client = build_s3_client(
+        # boto3 client construction is synchronous (loads botocore service
+        # models from disk, resolves credentials) — keep it off the loop
+        # thread; the worker shares the loop with API request handling.
+        s3_client = await asyncio.to_thread(
+            build_s3_client,
             region_name=self._settings.retention_archive_s3_region,
             endpoint_url=self._settings.retention_archive_s3_endpoint_url,
         )
@@ -477,21 +481,22 @@ class RetentionWorker:
             workspace_id=workspace_id,
             snapshot_date=snapshot_date,
         )
-        body = build_parquet_bytes(entity_rows=entity_rows, edge_rows=edge_rows)
+        # CPU-bound pyarrow serialisation — scales with snapshot size, so
+        # it must not run on the loop thread.
+        body = await asyncio.to_thread(
+            build_parquet_bytes, entity_rows=entity_rows, edge_rows=edge_rows
+        )
         key = build_archive_key(workspace_id=workspace_id, snapshot_date=snapshot_date)
         # Synchronous boto3 call — S3 PUT does not benefit from asyncio.
-        # Keep it inside an executor to avoid blocking the event loop on
+        # Keep it on a worker thread to avoid blocking the event loop on
         # large objects.
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: write_archive_object(
-                s3_client=s3_client,
-                bucket=bucket,
-                key=key,
-                body=body,
-                kms_key_arn=self._settings.retention_archive_kms_key_arn,
-            ),
+        await asyncio.to_thread(
+            write_archive_object,
+            s3_client=s3_client,
+            bucket=bucket,
+            key=key,
+            body=body,
+            kms_key_arn=self._settings.retention_archive_kms_key_arn,
         )
         # AFTER the parquet write succeeded, reap warm rows on Neo4j
         # and the corresponding chunks on Qdrant.  Failure between these
