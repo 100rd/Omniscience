@@ -48,7 +48,7 @@
     }
   ],
   "install": {
-    "one_line": "curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash",
+    "one_line": "curl -fsSL -o install.sh https://raw.githubusercontent.com/100rd/Omniscience/v0.5.0/.mcp/install.sh && echo '080551789e472af099aa9e60554a3ac28a30a7fa98dd1c80c9a0698b5eff7ca1  install.sh' | sha256sum -c - && bash install.sh",
     "docker": "docker run -d -p 8000:8000 -e POSTGRES_PASSWORD=change-me -e OMNISCIENCE_SECRET_KEY=change-me-32-chars ghcr.io/100rd/omniscience:latest",
     "uvx": "uvx --from omniscience-cli omniscience mcp serve --transport stdio",
     "config_writer": "uvx --from omniscience-cli omniscience init --client claude-code"
