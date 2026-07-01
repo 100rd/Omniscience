@@ -185,7 +185,7 @@ def _make_config(**overrides: Any) -> MigrationConfig:
         "dry_run": False,
         "resume": False,
         "verify_only": False,
-        "progress_file": Path("/tmp/_migration_progress_test.json"),
+        "progress_file": Path("/tmp/_migration_progress_test.json"),  # noqa: S108
     }
     base.update(overrides)
     return MigrationConfig(**base)

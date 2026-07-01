@@ -122,22 +122,22 @@ class TestGitConnectorValidate:
 
     async def test_validate_nonexistent_path_raises(self) -> None:
         connector = GitConnector()
-        config = GitConfig(url="/tmp/does-not-exist-xyz-abc")
-        with pytest.raises(Exception):
+        config = GitConfig(url="/tmp/does-not-exist-xyz-abc")  # noqa: S108
+        with pytest.raises(Exception):  # noqa: B017
             await connector.validate(config, {})
 
     async def test_validate_non_git_directory_raises(self) -> None:
         tmp = tempfile.mkdtemp()
         connector = GitConnector()
         config = GitConfig(url=tmp)
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await connector.validate(config, {})
 
     async def test_validate_invalid_ref_raises(self) -> None:
         repo = _make_repo()
         connector = GitConnector()
         config = GitConfig(url=repo, ref="refs/heads/nonexistent-branch")
-        with pytest.raises(Exception):
+        with pytest.raises(Exception):  # noqa: B017
             await connector.validate(config, {})
 
     async def test_validate_link_local_url_rejected(self) -> None:

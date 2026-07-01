@@ -77,7 +77,7 @@ def _serve_http(port: int) -> None:
                 "omniscience_server.app:create_app",
                 "--factory",
                 "--host",
-                "0.0.0.0",
+                "0.0.0.0",  # noqa: S104 — HTTP MCP server deliberately binds all interfaces
                 "--port",
                 str(port),
             ],

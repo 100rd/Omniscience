@@ -313,7 +313,7 @@ class TestFsConnectorContract(ConnectorContractTests):
         return FsConnector()
 
     def valid_config(self) -> FsConfig:
-        return FsConfig(root_path=self.__class__._root or "/tmp")
+        return FsConfig(root_path=self.__class__._root or "/tmp")  # noqa: S108
 
     def invalid_config(self) -> FsConfig:
         return FsConfig(root_path="/totally/nonexistent/directory/abc123")

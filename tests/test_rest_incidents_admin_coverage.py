@@ -518,7 +518,7 @@ async def test_put_scoring_reraises_unknown_value_error() -> None:
         new=AsyncMock(side_effect=ValueError("some_other_error:details")),
     ):
         async with await _client(app) as c:
-            with pytest.raises(Exception):
+            with pytest.raises(Exception):  # noqa: B017
                 await c.put(
                     _SCORING_URL,
                     json={"weights": _VALID_WEIGHTS, "confidence_threshold": 0.6},
