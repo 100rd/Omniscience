@@ -1,0 +1,43 @@
+# Consilium priority-files manifest — logic-bearing source bundle.
+#
+# Round 1 embedded 24 files that were all manifests/config, leaving the
+# security-critical surface unverifiable. Later Consilium rounds MUST embed
+# the files below (repo-relative paths, one per line) so reviewers can read
+# the actual token/scope/ACL/query-construction logic, not just packaging.
+#
+# Guarded by tests/test_security_review_source_bundle_guard.py: every path
+# must exist, logic-bearing source must dominate, and each named security
+# surface must be represented.
+
+# --- Token hash/verify -----------------------------------------------------
+packages/core/src/omniscience_core/auth/tokens.py
+
+# --- Per-tool scope enforcement ---------------------------------------------
+packages/core/src/omniscience_core/auth/scopes.py
+apps/server/src/omniscience_server/mcp/server.py
+apps/server/src/omniscience_server/mcp/tools.py
+
+# --- Workspace / ACL enforcement ---------------------------------------------
+packages/core/src/omniscience_core/auth/workspace.py
+packages/core/src/omniscience_core/auth/middleware.py
+
+# --- Hybrid retrieval path (dense + sparse BM25, RRF) ------------------------
+packages/index/src/omniscience_index/stores/qdrant_store.py
+packages/index/src/omniscience_index/stores/qdrant_filters.py
+
+# --- GraphRAG retrieval path --------------------------------------------------
+packages/retrieval/src/omniscience_retrieval/graph_rag.py
+packages/retrieval/src/omniscience_retrieval/graph_query.py
+
+# --- tsvector/BM25 + SQL construction (pgvector-lite fallback included) -------
+packages/index/src/omniscience_index/stores/postgres_only_store.py
+packages/core/src/omniscience_core/storage/vector.py
+
+# --- Cypher construction -------------------------------------------------------
+packages/index/src/omniscience_index/stores/neo4j/_cypher.py
+packages/index/src/omniscience_index/stores/neo4j/store.py
+packages/index/src/omniscience_index/stores/neo4j_store.py
+
+# --- as_of vs ACL/tombstone interaction ----------------------------------------
+packages/core/src/omniscience_core/storage/graph.py
+packages/index/src/omniscience_index/writer.py
