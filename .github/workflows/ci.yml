@@ -27,6 +27,8 @@ jobs:
         run: uv run python scripts/lint_stale_architecture.py packages/ apps/ tests/ docs/decisions/
       - name: Check no secret env files are tracked
         run: python scripts/check_no_tracked_secrets.py
+      - name: Check no tracked file violates .gitignore
+        run: python scripts/check_gitignore_enforced.py
 
   dependency-audit:
     runs-on: ubuntu-latest
