@@ -112,4 +112,4 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov --cov-report=term-missing"
+addopts = "--cov --cov-report=term-missing --cov-fail-under=80"
