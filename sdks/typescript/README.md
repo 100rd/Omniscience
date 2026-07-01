@@ -1,6 +1,6 @@
 # @omniscience/sdk
 
-TypeScript client SDK for [Omniscience](https://github.com/omniscience-ai/omniscience) — a self-hosted knowledge retrieval service with a Model Context Protocol (MCP) first API.
+TypeScript client SDK for [Omniscience](https://github.com/100rd/Omniscience) — a self-hosted knowledge retrieval service with a Model Context Protocol (MCP) first API.
 
 ## Installation
 

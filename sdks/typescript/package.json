@@ -5,10 +5,10 @@
   "type": "module",
   "license": "Apache-2.0",
   "author": "Omniscience Contributors",
-  "homepage": "https://github.com/omniscience-ai/omniscience",
+  "homepage": "https://github.com/100rd/Omniscience",
   "repository": {
     "type": "git",
-    "url": "https://github.com/omniscience-ai/omniscience"
+    "url": "git+https://github.com/100rd/Omniscience.git"
   },
   "keywords": [
     "omniscience",
