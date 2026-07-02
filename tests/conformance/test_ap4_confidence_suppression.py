@@ -140,7 +140,7 @@ def test_uncalibrated_path_returns_band_not_decimal() -> None:
     store = _FakeGraphStore(alert=alert, related=[pr])
     app = _make_app(store)
 
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS)
     )
 
@@ -215,7 +215,7 @@ def test_fitted_artifact_path_returns_decimal_confidence(tmp_path: Path) -> None
     store = _FakeGraphStore(alert=alert, related=[pr])
     app = _make_app(store)
 
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS)
     )
 
@@ -277,7 +277,7 @@ def test_ladder_constants_not_exposed_to_users_as_calibrated() -> None:
     store = _FakeGraphStore(alert=alert, related=[pr])
     app = _make_app(store)
 
-    result = asyncio.get_event_loop().run_until_complete(
+    result = asyncio.run(
         mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS)
     )
 

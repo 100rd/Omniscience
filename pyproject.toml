@@ -112,4 +112,15 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov --cov-report=term-missing"
+
+# Coverage is collected in CI only (.github/workflows/ci.yml runs `pytest --cov`,
+# which defers to this config); it is deliberately NOT in pytest addopts so local
+# runs are tracer-free and not subject to the gate.
+[tool.coverage.run]
+# First-party workspace code only — keep in sync with [tool.uv.workspace].members.
+source = ["packages", "apps"]
+
+[tool.coverage.report]
+# Ratchet upward as measured CI coverage grows; keep at or just below the
+# currently measured value to avoid a flag-day break.
+fail_under = 70
