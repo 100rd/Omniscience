@@ -140,9 +140,7 @@ def test_uncalibrated_path_returns_band_not_decimal() -> None:
     store = _FakeGraphStore(alert=alert, related=[pr])
     app = _make_app(store)
 
-    result = asyncio.run(
-        mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS)
-    )
+    result = asyncio.run(mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS))
 
     # Core invariant: no decimal confidence on uncalibrated path.
     assert result["calibrated"] is False, "Expected calibrated=False on uncalibrated path"
@@ -215,9 +213,7 @@ def test_fitted_artifact_path_returns_decimal_confidence(tmp_path: Path) -> None
     store = _FakeGraphStore(alert=alert, related=[pr])
     app = _make_app(store)
 
-    result = asyncio.run(
-        mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS)
-    )
+    result = asyncio.run(mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS))
 
     # With a fitted artifact: decimal is surfaced, band is None.
     assert result["calibrated"] is True, (
@@ -277,9 +273,7 @@ def test_ladder_constants_not_exposed_to_users_as_calibrated() -> None:
     store = _FakeGraphStore(alert=alert, related=[pr])
     app = _make_app(store)
 
-    result = asyncio.run(
-        mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS)
-    )
+    result = asyncio.run(mcp_resolve_incident(app=app, alert_id=_ALERT_ID, workspace_id=_WS))
 
     # The v0.1 ladder was used (no artifact) — calibrated must be False.
     assert result["calibrated"] is False
