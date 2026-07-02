@@ -113,3 +113,23 @@ warn_unused_configs = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--cov --cov-report=term-missing"
+
+[tool.coverage.run]
+# Scope coverage to first-party packages only; a bare --cov would instrument
+# third-party/stdlib code and mis-map the src/ layout. Add new packages/*/src
+# and apps/*/src packages here (tests/test_coverage_config.py enforces this).
+source = [
+    "omniscience_core",
+    "omniscience_connectors",
+    "omniscience_embeddings",
+    "omniscience_index",
+    "omniscience_parsers",
+    "omniscience_retrieval",
+    "omniscience_server",
+    "omniscience_cli",
+]
+
+[tool.coverage.report]
+# Matches the CI gate (--cov-fail-under=80 in .github/workflows/ci.yml);
+# ratchet upward as the measured baseline improves.
+fail_under = 80
