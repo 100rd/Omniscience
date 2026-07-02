@@ -111,6 +111,11 @@ warn_unused_configs = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+# Root collection deliberately excludes sdks/python/tests: the client SDK is
+# not a workspace member (own uv.lock, released independently), so its suite
+# runs against its own environment via the sdk-python-test job in
+# .github/workflows/ci.yml. tests/test_sdk_suite_collection.py fails if that
+# delegation (or root collection) ever disappears.
 testpaths = ["tests"]
 
 # Coverage is collected in CI only (.github/workflows/ci.yml runs `pytest --cov`,

@@ -56,6 +56,27 @@ jobs:
       - run: uv sync --frozen
       - run: uv run mypy apps/ packages/
 
+  # The Python client SDK is not a uv workspace member (it ships with its own
+  # uv.lock and is released independently), so the root `uv run pytest` above
+  # never collects sdks/python/tests. This job is the explicit delegation that
+  # keeps that suite from being silently skipped — see the note next to
+  # [tool.pytest.ini_options].testpaths in the root pyproject.toml.
+  sdk-python-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdks/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen --extra dev
+      - run: uv run pytest
+
   test:
     runs-on: ubuntu-latest
     services:
