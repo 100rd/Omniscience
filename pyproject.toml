@@ -114,6 +114,21 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--cov --cov-report=term-missing"
 
+# Explicit disposition of every test tree in the repository, so a green root
+# run cannot silently hide an unrun suite. 'collected' must mirror pytest
+# testpaths exactly; 'excluded' maps each tree that intentionally lives
+# outside the root run to the reason and the place it DOES run. Any test file
+# outside all listed trees fails tests/test_collection_config.py — new
+# per-package suites must either join testpaths+collected or be excluded here
+# with a reason.
+[tool.omniscience.test-collection]
+collected = ["tests"]
+
+[tool.omniscience.test-collection.excluded]
+"benchmarks" = "Performance-regression suite; deliberately outside the default run to keep it fast and deterministic. Run explicitly via `uv run pytest benchmarks/` (CI sanity floor) or with OMNISCIENCE_RUN_BITEMPORAL_PERF=1 on perf-lab hardware; see tests/property/README.md."
+"helm/omniscience-operator/tests" = "Helm chart hardening assertions; need the helm binary and run with a standalone pytest (addopts cleared) in .github/workflows/operator.yml, not in the uv workspace environment."
+"sdks/python/tests" = "Standalone Python client SDK project with its own pyproject.toml, uv.lock, and pytest config; run from sdks/python with its own `uv run pytest`, independent of the root workspace."
+
 [tool.coverage.run]
 # Scope coverage to first-party packages only; a bare --cov would instrument
 # third-party/stdlib code and mis-map the src/ layout. Add new packages/*/src
