@@ -28,11 +28,17 @@ MANIFEST
 
 # Testing
 .pytest_cache/
+.hypothesis/
 .coverage
 .coverage.*
 htmlcov/
 coverage.xml
 *.cover
+test_out.txt
+
+# Local runtime state / generated output
+omniscience.db
+graphify-out/
 
 # Linting
 .ruff_cache/
