@@ -81,8 +81,7 @@ def _nested_suites() -> dict[str, list[Path]]:
                 continue
             base = pyproject_path.parent
             test_dirs = [
-                (base / testpath).resolve()
-                for testpath in _testpaths(ini_options) or ["tests"]
+                (base / testpath).resolve() for testpath in _testpaths(ini_options) or ["tests"]
             ]
             test_dirs = [d for d in test_dirs if _has_tests(d)]
             if test_dirs:
