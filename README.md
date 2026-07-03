@@ -104,6 +104,15 @@ flowchart TB
 curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh | bash
 ```
 
+The installer itself verifies the `docker-compose.prod.yml` it fetches against a published `sha256` checksum before starting anything, and aborts if the download was tampered with or the checksum sidecar is missing. If you'd rather not pipe straight into `bash`, download it, inspect it, and verify the checksum yourself first:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/100rd/Omniscience/main/.mcp/install.sh -o install.sh
+less install.sh   # review the script before running it
+sha256sum install.sh   # or: shasum -a 256 install.sh (macOS) — compare against the release notes
+bash install.sh
+```
+
 Starts the stack with Docker, mints secrets into `./omniscience/.env`, and waits for `/health`. Then wire it into your IDE in one shot:
 
 ```bash

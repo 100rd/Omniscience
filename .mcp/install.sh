@@ -12,10 +12,14 @@
 #      The prod variant references pre-built GHCR images
 #      (ghcr.io/100rd/omniscience-app, ghcr.io/100rd/omniscience-admin)
 #      so no source checkout / local build is required.
-#   5. Starts the stack with `docker compose up -d`.
-#   6. Waits for /health to return 200 (up to 300s — first run must
+#   5. Fetches the accompanying docker-compose.prod.yml.sha256 sidecar and
+#      verifies the compose file's digest against it, aborting on any
+#      mismatch or missing sidecar (protects against a tampered/corrupted
+#      download).
+#   6. Starts the stack with `docker compose up -d`.
+#   7. Waits for /health to return 200 (up to 300s — first run must
 #      pull ~4 images and Neo4j start_period alone is ~30s).
-#   7. Prints next-step instructions: how to mint a token and run
+#   8. Prints next-step instructions: how to mint a token and run
 #      `omniscience init --client <ide>`.
 #
 # Environment overrides:
@@ -50,6 +54,17 @@ die()  { c_red "    error: $*"; exit 1; }
 
 need() {
   command -v "$1" >/dev/null 2>&1 || die "missing prerequisite: $1"
+}
+
+sha256_of() {
+  # Prints the sha256 hex digest of $1, using whichever tool is available.
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | awk '{print $1}'
+  else
+    die "missing prerequisite: sha256sum or shasum (needed for checksum verification)"
+  fi
 }
 
 gen_secret() {
@@ -149,6 +164,19 @@ EOF
   step "Fetching $COMPOSE_FILE @ ${OMNISCIENCE_REF}"
   curl -fsSL "${OMNISCIENCE_REPO}/${OMNISCIENCE_REF}/${COMPOSE_FILE}" -o "$COMPOSE_FILE"
   ok "wrote $COMPOSE_FILE"
+
+  step "Verifying checksum of $COMPOSE_FILE"
+  if ! curl -fsSL "${OMNISCIENCE_REPO}/${OMNISCIENCE_REF}/${COMPOSE_FILE}.sha256" -o "$COMPOSE_FILE.sha256"; then
+    rm -f "$COMPOSE_FILE" "$COMPOSE_FILE.sha256"
+    die "checksum verification failed: could not fetch $COMPOSE_FILE.sha256"
+  fi
+  expected_digest="$(awk '{print $1}' "$COMPOSE_FILE.sha256")"
+  actual_digest="$(sha256_of "$COMPOSE_FILE")"
+  if [ -z "$expected_digest" ] || [ "$expected_digest" != "$actual_digest" ]; then
+    rm -f "$COMPOSE_FILE" "$COMPOSE_FILE.sha256"
+    die "checksum verification failed: $COMPOSE_FILE does not match expected sha256 (got $actual_digest, expected ${expected_digest:-<empty>})"
+  fi
+  ok "checksum verified ($actual_digest)"
 
   step "Starting stack (docker compose -f $COMPOSE_FILE up -d) — image pull may take a few minutes on first run"
   docker compose -f "$COMPOSE_FILE" up -d
