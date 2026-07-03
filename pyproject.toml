@@ -112,4 +112,4 @@ warn_unused_configs = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "--cov --cov-report=term-missing"
+addopts = "--cov=packages/core/src/omniscience_core --cov=packages/connectors/src/omniscience_connectors --cov=packages/embeddings/src/omniscience_embeddings --cov=packages/index/src/omniscience_index --cov=packages/parsers/src/omniscience_parsers --cov=packages/retrieval/src/omniscience_retrieval --cov=apps/server/src/omniscience_server --cov=apps/cli/src/omniscience_cli --cov-report=term-missing --cov-fail-under=80"
