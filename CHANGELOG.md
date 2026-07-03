@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Blast-radius: `calibrated: bool` field tags `impact_score` as an
+  uncalibrated placeholder (consilium round-1 P1).** `BlastRadiusResponse`
+  now carries a first-class `calibrated` field, mirroring
+  `resolve_incident`'s `calibrated` (consilium-v9 AP4). It defaults to
+  (and today always returns) `false`, since `impact_score` is still the
+  v0.1 deterministic heuristic, not a fitted/calibrated model. Both the
+  MCP `blast_radius` tool and the REST `GET /api/v1/blast-radius`
+  endpoint share the same response builder, so the flag is present on
+  both wire surfaces. See `docs/api/blast-radius.md`.
+
 - **Retrieval: fail-closed epoch policy and per-source watermark observability
   (consilium-v11 AP1/AP2/AP5/AP6, ADR-0017).**
 

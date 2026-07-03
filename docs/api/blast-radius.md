@@ -76,7 +76,8 @@ Both surfaces return the same JSON shape:
     "edge_allowlist":  ["CALLS", "DEPENDS_ON", "ROUTES_TO"],
     "max_depth":       3,
     "scoring_model":   "v0.1-deterministic"
-  }
+  },
+  "calibrated": false
 }
 ```
 
@@ -143,6 +144,14 @@ clipped to `[0.0, 1.0]`, where:
 > should treat the score as a ranking signal between entities in the
 > same response, not an absolute "how bad is this on a scale of 0 to 1"
 > number.  A calibrated model is a follow-up to issue #234.
+
+The top-level response carries `calibrated: bool` (mirroring
+`resolve_incident`'s `calibrated` field) so a generic client can gate on
+"is this number grounded" without tool-specific logic. It is always
+`false` today — no fitted/calibrated blast-radius model exists yet, so
+every `impact_score` in the response is the v0.1 heuristic above.
+`meta.scoring_model` and `calibrated` never disagree: a deterministic
+`scoring_model` always pairs with `calibrated: false`.
 
 ## Confidence
 

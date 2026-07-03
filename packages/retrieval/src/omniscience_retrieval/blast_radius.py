@@ -125,6 +125,17 @@ class BlastRadiusResponse(BaseModel):
     effective_as_of: datetime
     meta: dict[str, Any] | None = None
 
+    # Mirrors ResolveIncidentResponse.calibrated (AP4): impact_score is a
+    # v0.1 heuristic placeholder, not a fitted/calibrated probability.
+    calibrated: bool = Field(
+        default=False,
+        description=(
+            "True when impact_score is backed by a fitted/calibrated model. "
+            "False when the v0.1 deterministic heuristic is in use — always "
+            "False today, since no calibrated blast-radius model exists yet."
+        ),
+    )
+
 
 # ---------------------------------------------------------------------------
 # Internal dataclass

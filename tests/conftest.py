@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 import pytest
@@ -10,6 +11,27 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 from omniscience_core.config import Settings
 from omniscience_server.app import create_app
+
+
+@pytest.fixture(autouse=True)
+def _default_event_loop() -> None:
+    """Keep ``asyncio.get_event_loop()`` usable from synchronous tests.
+
+    ``asyncio.set_event_loop()`` is called at least once per process by
+    pytest-asyncio (one per async test). Per the stdlib policy, that
+    permanently disables the "auto-create a loop for the main thread"
+    fallback in ``get_event_loop()``, so a later synchronous test that
+    drives a coroutine via ``asyncio.get_event_loop().run_until_complete()``
+    would otherwise raise ``RuntimeError`` once no loop is currently set.
+    Re-arm a fresh loop before every test so that pattern keeps working.
+    """
+    try:
+        loop = asyncio.get_event_loop()
+        closed = loop.is_closed()
+    except RuntimeError:
+        closed = True
+    if closed:
+        asyncio.set_event_loop(asyncio.new_event_loop())
 
 
 @pytest.fixture()
