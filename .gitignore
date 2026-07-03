@@ -33,6 +33,7 @@ MANIFEST
 htmlcov/
 coverage.xml
 *.cover
+.hypothesis/
 
 # Linting
 .ruff_cache/
