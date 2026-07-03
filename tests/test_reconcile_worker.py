@@ -1155,3 +1155,79 @@ async def test_reemit_cursor_resets_each_run() -> None:
     # After run_once, cursor should have been reset to 0 at start, then advanced by 0
     # (no drift in this run) → final value is 0.
     assert worker._reemit_cursor == 0
+
+
+# ---------------------------------------------------------------------------
+# Round-2 scope-gate: worker-path authz — cross-workspace edge target leak
+#
+# reconcile_worker.py's module docstring and _reconcile_workspace docstring
+# both assert an "ACL invariant: every store call passes workspace_id;
+# cross-workspace mixing is structurally impossible because the outer loop
+# iterates workspaces and every per-workspace method pins the id."  There is
+# no DB constraint enforcing that an Edge's source_entity and target_entity
+# live in the same workspace (Edge.target_entity_id is a bare FK to
+# entities.id — see packages/core/src/omniscience_core/db/models.py).  The
+# PG "edge SoT" query in _check_edge_drift only joins Source via the edge's
+# SOURCE entity; it never re-validates the TARGET entity's tenant.  If a
+# target entity ever ends up outside workspace_id (corruption, a bad merge,
+# a future migration bug — exactly the class of anomaly this worker exists
+# to catch), the query still treats the edge as this workspace's ground
+# truth and emits an edge.upsert OutboxEvent for it under this tenant,
+# leaking a reference to another tenant's entity into this workspace's
+# outbox stream.  This is a real gap in a worker path explicitly named by
+# the round-2 review scope gate.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_edge_drift_query_pins_workspace_on_target_entity_too() -> None:
+    """The PG edge-SoT query must validate tenancy on BOTH edge endpoints.
+
+    White-box regression (matches this file's existing mock-at-session.execute
+    style): capture the SELECT statement _check_edge_drift issues and assert
+    it consults the entities/sources tables more than once in its FROM/JOIN
+    clause — i.e. it re-validates the target entity's workspace, not only
+    the source entity's.  Today it only joins once, so this fails.
+    """
+    import re
+
+    ws_id = uuid.uuid4()
+    captured: list[Any] = []
+
+    async def _capture_execute(stmt: Any, *_a: Any, **_kw: Any) -> MagicMock:
+        captured.append(stmt)
+        result = MagicMock()
+        result.scalars.return_value.all.return_value = []
+        return result
+
+    session = AsyncMock()
+    session.execute = AsyncMock(side_effect=_capture_execute)
+    cm = AsyncMock()
+    cm.__aenter__ = AsyncMock(return_value=session)
+    cm.__aexit__ = AsyncMock(return_value=False)
+    factory = MagicMock(return_value=cm)
+
+    gs = _make_graph_store()
+    vs = _make_vector_store()
+    settings = _make_settings()
+    worker = ReconcileWorker(
+        session_factory=factory,
+        vector_store=vs,
+        graph_store=gs,
+        settings=settings,
+    )
+
+    await worker._check_edge_drift(workspace_id=ws_id)
+
+    assert captured, "expected _check_edge_drift to issue at least one SELECT"
+    edge_stmt = captured[0]
+    compiled_sql = str(edge_stmt.compile(compile_kwargs={"literal_binds": False}))
+    from_clause = compiled_sql.split("WHERE")[0]
+    join_hits = re.findall(r"\bjoin\s+entities\b", from_clause, re.IGNORECASE)
+    assert len(join_hits) >= 2, (
+        "the edge-drift PG query only joins Entity/Source via the edge's "
+        "SOURCE entity (one 'JOIN entities'); it must also join/validate "
+        "the TARGET entity's tenant before treating the edge as this "
+        "workspace's ground truth and re-emitting it into the outbox.\n"
+        f"Compiled SQL:\n{compiled_sql}"
+    )

@@ -102,6 +102,7 @@ from omniscience_index.stores.neo4j_store import Neo4jGraphStore
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 from omniscience_server.reconcile_constants import (
     DRIFT_EDGE,
@@ -481,13 +482,22 @@ class ReconcileWorker:
             )
             return
 
-        # Load PG edge SoT.
+        # Load PG edge SoT. Both endpoints must be re-validated against
+        # workspace_id: an edge's target_entity_id is a bare FK with no DB
+        # constraint tying it to the same tenant as the source entity, so a
+        # corrupted/cross-tenant edge must not be treated as this
+        # workspace's ground truth and re-emitted into its outbox stream.
+        TargetEntity = aliased(Entity)
+        TargetSource = aliased(Source)
         async with self._session_factory() as session:
             stmt = (
                 select(Edge)
                 .join(Entity, Edge.source_entity_id == Entity.id)
                 .join(Source, Entity.source_id == Source.id)
+                .join(TargetEntity, Edge.target_entity_id == TargetEntity.id)
+                .join(TargetSource, TargetEntity.source_id == TargetSource.id)
                 .where(Source.tenant_id == workspace_id)
+                .where(TargetSource.tenant_id == workspace_id)
             )
             result = await session.execute(stmt)
             pg_edges: list[Edge] = list(result.scalars().all())
