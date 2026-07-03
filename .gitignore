@@ -28,6 +28,7 @@ MANIFEST
 
 # Testing
 .pytest_cache/
+.hypothesis/
 .coverage
 .coverage.*
 htmlcov/

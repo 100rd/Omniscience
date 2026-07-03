@@ -64,13 +64,18 @@ line-length = 99
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "S", "T20", "SIM", "TCH", "RUF"]
 ignore = [
-    "S104",  # Binding to all interfaces — required for containerised services
     "TC001", # Application imports in TYPE_CHECKING blocks — causes issues with pydantic models
     "TC002", # Third-party imports in TYPE_CHECKING blocks — causes runtime issues with starlette
     "TC003", # Stdlib imports in TYPE_CHECKING blocks — we use from __future__ import annotations
 ]
 
 [tool.ruff.lint.per-file-ignores]
+"apps/server/src/omniscience_server/__main__.py" = [
+    "S104",  # Binding to all interfaces — required for the containerised server entrypoint
+]
+"apps/cli/src/omniscience_cli/commands/mcp.py" = [
+    "S104",  # Binding to all interfaces — required for `mcp serve --http`
+]
 "tests/*" = [
     "S101",  # assert is the standard pytest assertion mechanism
     "S105",  # Hardcoded password string — test fixtures use placeholder values
