@@ -6,7 +6,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/entity"
 )
 
 // TestClusterToEvent_IdempotentExternalID asserts that two calls with the

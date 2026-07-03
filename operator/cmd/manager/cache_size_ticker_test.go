@@ -27,7 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
 )
 
 // fakeCache is a minimal cache.Cache implementation that returns a

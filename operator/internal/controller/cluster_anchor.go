@@ -21,8 +21,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
-	"github.com/100rd/omniscience/operator/internal/publisher"
+	"github.com/100rd/Omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/publisher"
 )
 
 // ClusterAnchorPublisher emits the per-cluster anchor entity at startup.

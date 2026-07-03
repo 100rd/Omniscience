@@ -27,8 +27,8 @@ import (
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/100rd/omniscience/operator/internal/controller"
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
+	"github.com/100rd/Omniscience/operator/internal/controller"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
 )
 
 // eventLagSampleCount returns the cumulative SampleCount for the

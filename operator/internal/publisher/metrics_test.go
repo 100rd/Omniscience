@@ -11,7 +11,7 @@ import (
 	"errors"
 	"testing"
 
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
 )
 
 // TestClassifyNATSError covers the closed enum mapping. A regression here

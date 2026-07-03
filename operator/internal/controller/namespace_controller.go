@@ -18,9 +18,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
-	"github.com/100rd/omniscience/operator/internal/publisher"
+	"github.com/100rd/Omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
+	"github.com/100rd/Omniscience/operator/internal/publisher"
 )
 
 // NamespaceReconciler watches Namespaces and publishes change events.

@@ -34,8 +34,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
-	"github.com/100rd/omniscience/operator/internal/publisher"
+	"github.com/100rd/Omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/publisher"
 )
 
 // Worker is the reconciliation worker singleton. One per operator process.

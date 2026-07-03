@@ -6,7 +6,7 @@ import (
 	batchv1 "k8s.io/api/batch/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/entity"
 )
 
 func newJob(namespace, name string, parallelism *int32, active int32, owners []metav1.OwnerReference) *batchv1.Job {

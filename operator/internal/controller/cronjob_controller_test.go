@@ -10,8 +10,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/100rd/omniscience/operator/internal/controller"
-	"github.com/100rd/omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/controller"
+	"github.com/100rd/Omniscience/operator/internal/entity"
 )
 
 // ─── Constructor preconditions ─────────────────────────────────────────────

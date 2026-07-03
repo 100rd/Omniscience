@@ -35,8 +35,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
-	"github.com/100rd/omniscience/operator/internal/reconciler"
+	"github.com/100rd/Omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/reconciler"
 )
 
 // fakePublisher captures published events so tests assert on the corrective

@@ -18,7 +18,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/entity"
 )
 
 var (

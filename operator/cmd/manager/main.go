@@ -34,12 +34,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
-	"github.com/100rd/omniscience/operator/internal/argocd"
-	"github.com/100rd/omniscience/operator/internal/config"
-	"github.com/100rd/omniscience/operator/internal/controller"
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
-	"github.com/100rd/omniscience/operator/internal/publisher"
-	"github.com/100rd/omniscience/operator/internal/reconciler"
+	"github.com/100rd/Omniscience/operator/internal/argocd"
+	"github.com/100rd/Omniscience/operator/internal/config"
+	"github.com/100rd/Omniscience/operator/internal/controller"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
+	"github.com/100rd/Omniscience/operator/internal/publisher"
+	"github.com/100rd/Omniscience/operator/internal/reconciler"
 )
 
 // operatorVersion is the build-stamped version. Overridable via -ldflags

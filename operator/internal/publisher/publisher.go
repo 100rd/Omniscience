@@ -17,8 +17,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
-	"github.com/100rd/omniscience/operator/internal/entity"
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
+	"github.com/100rd/Omniscience/operator/internal/entity"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
 )
 
 // Publisher is the operator's outbound interface to NATS JetStream.

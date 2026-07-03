@@ -1,4 +1,4 @@
-module github.com/100rd/omniscience/operator
+module github.com/100rd/Omniscience/operator
 
 go 1.23.0
 

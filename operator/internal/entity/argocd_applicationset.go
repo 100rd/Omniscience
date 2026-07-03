@@ -26,7 +26,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/100rd/omniscience/operator/internal/argocd"
+	"github.com/100rd/Omniscience/operator/internal/argocd"
 )
 
 // EntityKindApplicationSet is the K8s Kind segment for ArgoCD ApplicationSets.

@@ -15,8 +15,8 @@ import (
 	"github.com/google/uuid"
 	ctrl "sigs.k8s.io/controller-runtime"
 
-	"github.com/100rd/omniscience/operator/internal/argocd"
-	"github.com/100rd/omniscience/operator/internal/publisher"
+	"github.com/100rd/Omniscience/operator/internal/argocd"
+	"github.com/100rd/Omniscience/operator/internal/publisher"
 )
 
 // SetupArgoCDWatchers conditionally registers the Application and

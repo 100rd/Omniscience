@@ -44,7 +44,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	opmetrics "github.com/100rd/omniscience/operator/internal/metrics"
+	opmetrics "github.com/100rd/Omniscience/operator/internal/metrics"
 )
 
 // cacheKindEntry pairs a Kubernetes Kind label (as the dashboard joins on

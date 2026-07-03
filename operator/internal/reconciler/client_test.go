@@ -16,7 +16,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/100rd/omniscience/operator/internal/reconciler"
+	"github.com/100rd/Omniscience/operator/internal/reconciler"
 )
 
 // recorder captures requests so tests can assert on what the client sent.

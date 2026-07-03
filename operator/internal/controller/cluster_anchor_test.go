@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/100rd/omniscience/operator/internal/controller"
-	"github.com/100rd/omniscience/operator/internal/entity"
+	"github.com/100rd/Omniscience/operator/internal/controller"
+	"github.com/100rd/Omniscience/operator/internal/entity"
 )
 
 // anchorFakePublisher is a minimal in-memory publisher that records every
