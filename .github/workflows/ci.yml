@@ -56,6 +56,23 @@ jobs:
       - run: uv sync --frozen
       - run: uv run mypy apps/ packages/
 
+  js-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        package: [apps/admin, sdks/typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install dependencies
+        working-directory: ${{ matrix.package }}
+        run: npm install
+      - name: Run tests
+        working-directory: ${{ matrix.package }}
+        run: npm test
+
   test:
     runs-on: ubuntu-latest
     services:
