@@ -4,8 +4,19 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Placeholder secret values shipped in quickstart docs (README.md,
+# docs/integrations/*.md, .mcp/pulsemcp.json). If one of these survives into
+# a real deployment the app would boot with a publicly-documented, guessable
+# secret key, so Settings refuses to construct rather than accept them.
+_KNOWN_PLACEHOLDER_SECRET_KEYS = frozenset(
+    {
+        "change-me-32-char-secret-key-here",
+        "change-me-32-chars",
+    }
+)
 
 
 class Settings(BaseSettings):
@@ -176,6 +187,28 @@ class Settings(BaseSettings):
         le=300,
         description="Per-remote HTTP timeout (seconds) used during federated search fan-out.",
     )
+
+    # --- Secrets ---
+    secret_key: str | None = Field(
+        default=None,
+        validation_alias="OMNISCIENCE_SECRET_KEY",
+        description=(
+            "Application secret key, read from OMNISCIENCE_SECRET_KEY. "
+            "Optional for local/dev use; when set, must not be one of the "
+            "known quickstart-doc placeholder values (rejected at startup)."
+        ),
+    )
+
+    @field_validator("secret_key")
+    @classmethod
+    def _reject_placeholder_secret_key(cls, value: str | None) -> str | None:
+        if value in _KNOWN_PLACEHOLDER_SECRET_KEYS:
+            raise ValueError(
+                "OMNISCIENCE_SECRET_KEY is set to a known documentation "
+                "placeholder value. Generate a real secret and set it "
+                "before starting the app."
+            )
+        return value
 
     # --- Observability ---
     log_level: str = Field(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pydantic
 import pytest
 from omniscience_core.config import Settings
 
@@ -20,6 +21,7 @@ _DEFAULT_TEST_ENV_VARS = (
     "ENVIRONMENT",
     "EMBEDDING_PROVIDER",
     "GRAPH_BITEMPORAL",
+    "OMNISCIENCE_SECRET_KEY",
 )
 
 
@@ -134,3 +136,57 @@ def test_graph_bitemporal_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GRAPH_BITEMPORAL", "disabled")
     s = Settings(_env_file=None)
     assert s.graph_bitemporal == "disabled"
+
+
+# ---------------------------------------------------------------------------
+# secret_key fail-fast on known README/docs placeholder values
+#
+# The quickstart docs (README.md, docs/integrations/*.md, .mcp/pulsemcp.json)
+# tell operators to `cat > .env` with OMNISCIENCE_SECRET_KEY set to a
+# `change-me-...` placeholder before swapping in a real value. Nothing
+# currently rejects the placeholder if it survives into a real deployment,
+# so the app boots with a guessable, publicly-documented secret key. Settings
+# must refuse to construct when secret_key is one of these known placeholders.
+# ---------------------------------------------------------------------------
+
+_KNOWN_PLACEHOLDER_SECRET_KEYS = (
+    # README.md, docs/integrations/claude-code.md, docs/integrations/multiqlti.md
+    "change-me-32-char-secret-key-here",
+    # .mcp/pulsemcp.json
+    "change-me-32-chars",
+)
+
+
+def test_secret_key_none_by_default(clean_env: None) -> None:
+    """secret_key is optional for local/dev use and defaults to unset."""
+    s = Settings(_env_file=None)
+    assert s.secret_key is None
+
+
+@pytest.mark.parametrize("placeholder", _KNOWN_PLACEHOLDER_SECRET_KEYS)
+def test_secret_key_rejects_known_placeholder(
+    monkeypatch: pytest.MonkeyPatch, placeholder: str
+) -> None:
+    """Booting with a documented placeholder secret must fail fast."""
+    monkeypatch.setenv("OMNISCIENCE_SECRET_KEY", placeholder)
+    with pytest.raises(pydantic.ValidationError):
+        Settings(_env_file=None)
+
+
+def test_secret_key_env_var_is_omniscience_secret_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Settings reads the exact env var name the quickstart docs instruct."""
+    real_value = "9f3a7c1e5b8d2046af90c3e7b1d5f8a2"
+    monkeypatch.setenv("OMNISCIENCE_SECRET_KEY", real_value)
+    s = Settings(_env_file=None)
+    assert s.secret_key == real_value
+
+
+def test_secret_key_accepts_non_placeholder_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real, non-blocklisted secret key boots normally."""
+    monkeypatch.setenv("OMNISCIENCE_SECRET_KEY", "9f3a7c1e5b8d2046af90c3e7b1d5f8a2")
+    s = Settings(_env_file=None)
+    assert s.secret_key == "9f3a7c1e5b8d2046af90c3e7b1d5f8a2"
