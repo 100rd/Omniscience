@@ -70,8 +70,14 @@ def workspace_filter(query: Select[Any], workspace_id: uuid.UUID) -> Select[Any]
       ``WHERE workspace_id = :workspace_id``.
     * If the model has a ``tenant_id`` column (older tables like ``sources``),
       filter with strict equality: ``WHERE tenant_id = :workspace_id``.
-    * If neither column is present, the query is returned unchanged — the
-      table is not workspace-scoped (e.g. ``workspaces`` itself).
+    * If the table is one of the *transitively*-scoped tables (tenant
+      isolation only exists via a join back to ``sources.tenant_id``, e.g.
+      ``entities``/``edges``/``documents``/``chunks``/``ingestion_runs``),
+      fail closed and raise ``PermissionError`` — see
+      :data:`_TRANSITIVELY_SCOPED_TABLES`.
+    * If neither column is present and the table is not one of the above,
+      the query is returned unchanged — the table is genuinely
+      tenant-agnostic (e.g. ``workspaces`` itself).
 
     **No NULL inclusion**: unlike the previous implementation this function
     never adds an ``OR col IS NULL`` clause.  Migration ``0010`` must backfill
@@ -87,13 +93,22 @@ def workspace_filter(query: Select[Any], workspace_id: uuid.UUID) -> Select[Any]
 
     Returns:
         The same (or augmented) ``Select`` statement.
+
+    Raises:
+        PermissionError: When the query targets a table whose tenant
+            isolation is only transitive (via a join to ``sources``) —
+            silently returning such a query unfiltered would be a
+            cross-tenant data leak. Callers must join to ``Source`` and
+            filter on ``Source.tenant_id`` themselves.
     """
     # Determine which column to filter on by inspecting the from clauses.
     # get_final_froms() is the SA 2.x successor to the deprecated .froms attribute.
     entity_cols: dict[str, Any] = {}
+    table_name: str | None = None
     for from_clause in query.get_final_froms():
         if hasattr(from_clause, "c"):
             entity_cols = {col.key: col for col in from_clause.c}
+            table_name = getattr(from_clause, "name", None)
             break
 
     if "workspace_id" in entity_cols:
@@ -104,8 +119,26 @@ def workspace_filter(query: Select[Any], workspace_id: uuid.UUID) -> Select[Any]
         col = entity_cols["tenant_id"]
         return query.where(col == workspace_id)
 
+    if table_name in _TRANSITIVELY_SCOPED_TABLES:
+        raise PermissionError(
+            f"requires_join_scoping: table {table_name!r} carries no direct "
+            "tenant_id/workspace_id column; its isolation is only transitive "
+            "(via source_id -> sources.tenant_id). workspace_filter() cannot "
+            "safely scope it — join to Source and filter on "
+            "Source.tenant_id explicitly instead."
+        )
+
     # Table is not workspace-scoped — return as-is.
     return query
+
+
+# Tables whose tenant isolation is only transitive, via a join back to
+# sources.tenant_id (see migration 0010_backfill_null_tenant's table
+# survey). workspace_filter() must fail closed for these rather than
+# silently returning an unfiltered query.
+_TRANSITIVELY_SCOPED_TABLES = frozenset(
+    {"entities", "edges", "documents", "chunks", "ingestion_runs"}
+)
 
 
 __all__ = ["DEFAULT_WORKSPACE_ID", "get_workspace_id", "workspace_filter"]

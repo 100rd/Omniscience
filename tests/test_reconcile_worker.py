@@ -542,6 +542,67 @@ async def test_multiple_workspaces_separate_reports() -> None:
     assert ws2 in ws_ids
 
 
+# ---------------------------------------------------------------------------
+# Per-workspace fault isolation — a transient store outage for one workspace
+# must not starve every other workspace queued behind it in the same tick.
+#
+# `run_once()` iterates `workspace_ids` and calls
+# `await self._reconcile_workspace(workspace_id=ws_id)` with no per-iteration
+# exception handling. Today, an exception raised while reconciling workspace
+# A (e.g. a transient Neo4j/Qdrant/PG error) propagates straight out of
+# `run_once()`, so every workspace ordered after A in `workspace_ids` is
+# silently skipped for that tick -- and, since `_load_workspace_ids` ordering
+# is stable, potentially every subsequent tick too, until A's outage clears.
+# One tenant's bad luck degrades reconciliation guarantees for every other
+# tenant. This is a tenancy-isolation and reconcile-consistency bug, not
+# just a robustness nice-to-have.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transient_store_outage_in_one_workspace_does_not_block_others() -> None:
+    """A store error while reconciling workspace A must not prevent
+    workspace B (queued after A) from being reconciled in the same tick.
+
+    Patches ``ReconcileWorker._reconcile_workspace`` itself -- the exact
+    per-workspace unit of work ``run_once()`` iterates over -- so workspace
+    A's simulated outage is injected with no effect on the mocked
+    session/store call sequence workspace B relies on: B is routed through
+    the real, unmodified ``_reconcile_workspace`` implementation, exactly
+    as in ``test_multiple_workspaces_separate_reports`` above.
+    """
+    ws2 = uuid.UUID("bbbbbbbb-0000-0000-0000-000000000099")
+    worker, _vs, _gs = _build_worker(workspace_ids=[_WS, ws2])
+
+    attempted: list[uuid.UUID] = []
+    real_reconcile_workspace = ReconcileWorker._reconcile_workspace
+
+    async def _flaky_reconcile_workspace(self: ReconcileWorker, *, workspace_id: uuid.UUID):
+        attempted.append(workspace_id)
+        if workspace_id == _WS:
+            raise ConnectionError("simulated transient store outage for workspace A")
+        return await real_reconcile_workspace(self, workspace_id=workspace_id)
+
+    with (
+        patch.object(
+            ReconcileWorker, "_reconcile_workspace", _flaky_reconcile_workspace
+        ),
+        patch("omniscience_server.reconcile_worker.RECONCILE_DRIFT_TOTAL"),
+        patch("omniscience_server.reconcile_worker.RECONCILE_WORKER_RUNS_TOTAL"),
+        patch("omniscience_server.reconcile_worker.RECONCILE_WORKER_DURATION_SECONDS"),
+    ):
+        report = await worker.run_once()
+
+    # Both workspaces must have been attempted -- the loop must not stop
+    # dead at the first failure.
+    assert _WS in attempted
+    assert ws2 in attempted, "workspace B was never attempted: one tenant's outage starved another"
+
+    # Workspace B's healthy reconcile must still show up in the run report.
+    ws_ids_in_report = {r.workspace_id for r in report.per_workspace}
+    assert ws2 in ws_ids_in_report, "workspace B is missing from the run report entirely"
+
+
 @pytest.mark.asyncio
 async def test_check_entity_drift_creates_outbox_events() -> None:
     from omniscience_core.db.models import Entity, OutboxEvent

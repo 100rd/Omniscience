@@ -9,6 +9,11 @@ Coverage:
 - Security: NULL-tenant rows are NOT visible to any workspace token
 - Security: legacy token without workspace_id raises PermissionError
 - Backfill logic: workspace_filter no longer includes OR-NULL clause
+- Security: workspace_filter fails closed (raises) for ORM models that are
+  only *transitively* tenant-scoped (entities/edges/documents/chunks/
+  ingestion_runs via source_id -> sources.tenant_id) instead of silently
+  returning an unfiltered query, per the "extend review to the unreviewed
+  security-critical source surface" hardening follow-up.
 """
 
 from __future__ import annotations
@@ -28,7 +33,16 @@ from omniscience_core.auth.workspace import (
     get_workspace_id,
     workspace_filter,
 )
-from omniscience_core.db.models import ApiToken, Workspace
+from omniscience_core.db.models import (
+    ApiToken,
+    Chunk,
+    Document,
+    Edge,
+    Entity,
+    IngestionRun,
+    Source,
+    Workspace,
+)
 from omniscience_core.db.schemas import (
     ApiTokenCreate,
     ApiTokenRead,
@@ -569,3 +583,76 @@ def test_api_token_workspace_id_is_nullable() -> None:
     """
     col = ApiToken.__table__.c["workspace_id"]
     assert col.nullable is True
+
+
+# ---------------------------------------------------------------------------
+# workspace_filter — fail-closed for transitively-scoped models
+#
+# Migration 0010_backfill_null_tenant's table survey documents that
+# entities/edges/documents/chunks/ingestion_runs carry NO direct tenant_id
+# or workspace_id column: isolation is enforced only transitively, by
+# joining back to sources.tenant_id.  Production call sites that query
+# these tables today do so correctly (see reconcile_worker.py's
+# `.join(Source).where(Source.tenant_id == workspace_id)` and
+# mcp/tools.py), but they bypass `workspace_filter` entirely to do it.
+#
+# `workspace_filter`'s "no workspace_id/tenant_id column on the FROM
+# clause -> table is not tenant-scoped, return unchanged" branch was
+# written for genuinely tenant-agnostic tables like `workspaces`. Applied
+# to Entity/Edge/Document/Chunk/IngestionRun it is a silent fail-OPEN: a
+# future caller who (reasonably, given the helper's name and docstring)
+# assumes `workspace_filter(select(Entity), ws_id)` scopes the query would
+# ship a cross-tenant read with no error, no warning, nothing.
+#
+# The fix is for workspace_filter to fail CLOSED for these models — raise
+# rather than silently pass an unfiltered query through — mirroring the
+# fail-closed precedent already set by get_workspace_id() for legacy
+# tokens.
+# ---------------------------------------------------------------------------
+
+_TRANSITIVELY_SCOPED_MODELS = (Entity, Edge, Document, Chunk, IngestionRun)
+
+
+@pytest.mark.parametrize("model", _TRANSITIVELY_SCOPED_MODELS)
+def test_workspace_filter_fails_closed_for_transitively_scoped_models(
+    model: type[Any],
+) -> None:
+    """workspace_filter must raise, not silently pass through, for models
+    whose tenant isolation is only transitive (via source_id -> sources).
+
+    An unfiltered pass-through here is a cross-tenant data leak waiting to
+    happen; the correct behaviour is to refuse rather than guess.
+    """
+    query = select(model)
+    with pytest.raises(PermissionError, match="requires_join_scoping"):
+        workspace_filter(query, _ALPHA_WS_ID)
+
+
+def test_workspace_filter_fail_closed_error_names_the_table() -> None:
+    """The fail-closed error message identifies which table was rejected,
+    so the exception is actionable rather than a bare generic failure."""
+    with pytest.raises(PermissionError, match="entities"):
+        workspace_filter(select(Entity), _ALPHA_WS_ID)
+
+
+def test_workspace_filter_still_passes_through_for_genuinely_global_table() -> None:
+    """Regression guard: the fail-closed fix must NOT overreach.
+
+    `workspaces` itself has no tenant/workspace scoping column and is
+    legitimately global (it *is* the tenant lookup table) — it must keep
+    passing through unchanged, exactly like the synthetic-table case
+    already covered by test_workspace_filter_passthrough_for_unscoped_table.
+    """
+    query = select(Workspace)
+    result = workspace_filter(query, _ALPHA_WS_ID)
+    assert result is query
+
+
+def test_workspace_filter_still_scopes_source_with_real_model() -> None:
+    """Regression guard: directly-scoped real models (Source has tenant_id)
+    must keep filtering normally — only transitively-scoped models raise."""
+    query = select(Source)
+    filtered = workspace_filter(query, _ALPHA_WS_ID)
+    assert filtered is not query
+    compiled = str(filtered.compile(compile_kwargs={"literal_binds": False}))
+    assert "tenant_id" in compiled

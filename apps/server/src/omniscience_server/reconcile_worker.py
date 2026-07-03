@@ -277,7 +277,20 @@ class ReconcileWorker:
         per_workspace: list[WorkspaceReconcileReport] = []
 
         for ws_id in workspace_ids:
-            report = await self._reconcile_workspace(workspace_id=ws_id)
+            try:
+                report = await self._reconcile_workspace(workspace_id=ws_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # A transient outage (or any other failure) reconciling one
+                # workspace must not starve every workspace queued behind it
+                # in the same tick — isolate the failure and keep going.
+                log.error(
+                    "reconcile_workspace_failed",
+                    workspace_id=str(ws_id),
+                    error=str(exc),
+                )
+                continue
             per_workspace.append(report)
 
         duration = time.monotonic() - wall_start
