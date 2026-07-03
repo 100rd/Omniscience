@@ -29,6 +29,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from omniscience_core.auth.workspace import workspace_filter
 from omniscience_core.db.models import Source
 
 log = structlog.get_logger(__name__)
@@ -122,8 +123,17 @@ class FreshnessChecker:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
 
-    async def check_all(self) -> list[FreshnessReport]:
-        """Return a freshness report for every source in the database.
+    async def check_all(
+        self, *, workspace_id: uuid.UUID | None = None
+    ) -> list[FreshnessReport]:
+        """Return a freshness report for every source.
+
+        Args:
+            workspace_id: When given, results are restricted to sources
+                          owned by this workspace (used by tenant-facing
+                          REST callers). ``None`` returns sources across
+                          all workspaces — for trusted, non-tenant-scoped
+                          callers only (e.g. the background metrics worker).
 
         A consistent ``now`` timestamp is captured once per call so that
         relative ages are comparable across all sources in the same batch.
@@ -131,26 +141,42 @@ class FreshnessChecker:
         now = datetime.now(tz=UTC)
         session: AsyncSession
         async with self._session_factory() as session:
-            result = await session.execute(select(Source))
+            stmt = select(Source)
+            if workspace_id is not None:
+                stmt = workspace_filter(stmt, workspace_id)
+            result = await session.execute(stmt)
             sources = result.scalars().all()
 
         reports = [_compute_report(s, now) for s in sources]
         log.debug("freshness_check_all", count=len(reports))
         return reports
 
-    async def check_source(self, source_id: uuid.UUID) -> FreshnessReport:
+    async def check_source(
+        self, source_id: uuid.UUID, *, workspace_id: uuid.UUID | None = None
+    ) -> FreshnessReport:
         """Return the freshness report for a single source.
 
         Args:
             source_id: The UUID of the source to evaluate.
+            workspace_id: When given, the source must belong to this
+                          workspace or it is treated as not found (avoids
+                          leaking existence of another tenant's source).
+                          ``None`` skips the workspace check — for trusted,
+                          non-tenant-scoped callers only.
 
         Raises:
-            KeyError: When no source with the given id exists.
+            KeyError: When no source with the given id exists in
+                      *workspace_id* (including when it exists in a
+                      different workspace).
         """
         now = datetime.now(tz=UTC)
         session: AsyncSession
         async with self._session_factory() as session:
-            source = await session.get(Source, source_id)
+            stmt = select(Source).where(Source.id == source_id)
+            if workspace_id is not None:
+                stmt = workspace_filter(stmt, workspace_id)
+            result = await session.execute(stmt)
+            source = result.scalar_one_or_none()
 
         if source is None:
             raise KeyError(f"Source {source_id} not found")

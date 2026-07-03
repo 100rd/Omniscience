@@ -21,6 +21,8 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request
 from omniscience_core.auth.middleware import require_scope
 from omniscience_core.auth.scopes import Scope
+from omniscience_core.auth.workspace import get_workspace_id
+from omniscience_core.db.models import ApiToken
 from omniscience_core.freshness import FreshnessChecker, FreshnessReport
 from pydantic import BaseModel
 
@@ -30,6 +32,17 @@ router = APIRouter(tags=["freshness"])
 
 # Module-level Depends singleton — avoids ruff B008.
 _read_scope_dep: Any = Depends(require_scope(Scope.sources_read))
+
+
+def _require_workspace(token: ApiToken) -> uuid.UUID:
+    """Extract the caller's workspace_id, rejecting legacy tokens fail-closed.
+
+    get_workspace_id raises PermissionError, caught by the global handler
+    in rest/errors.py and converted to 403 — a workspace-less token must
+    never see every tenant's freshness data.
+    """
+    return get_workspace_id(token)
+
 
 # JSON-safe sentinel used instead of ``Infinity`` for sources never synced.
 _INFINITY_JSON_SAFE: float = 1e15
@@ -113,8 +126,10 @@ def _get_checker(request: Request) -> FreshnessChecker:
     summary="Freshness report for all sources",
     dependencies=[_read_scope_dep],
 )
-async def list_freshness(request: Request) -> FreshnessAllResponse:
-    """Return a freshness SLO evaluation for every configured source.
+async def list_freshness(
+    request: Request, token: ApiToken = _read_scope_dep
+) -> FreshnessAllResponse:
+    """Return a freshness SLO evaluation for every source in the caller's workspace.
 
     ``age_seconds`` is the elapsed time since ``last_sync_at``.  When a source
     has never been synced the value is set to ``1e15`` (a large finite sentinel
@@ -124,10 +139,13 @@ async def list_freshness(request: Request) -> FreshnessAllResponse:
     positive value means the source is overdue; a negative value means it is
     within its SLO budget.
 
-    Requires scope: ``sources:read``
+    Requires scope: ``sources:read``. ACL: results are restricted to the
+    caller's workspace_id; a legacy token with no workspace_id is rejected
+    fail-closed with 403.
     """
+    workspace_id = _require_workspace(token)
     checker = _get_checker(request)
-    reports = await checker.check_all()
+    reports = await checker.check_all(workspace_id=workspace_id)
     responses = [_report_to_response(r) for r in reports]
     stale_count = sum(1 for r in reports if r.is_stale)
     return FreshnessAllResponse(
@@ -146,14 +164,17 @@ async def list_freshness(request: Request) -> FreshnessAllResponse:
 async def get_source_freshness(
     source_id: uuid.UUID,
     request: Request,
+    token: ApiToken = _read_scope_dep,
 ) -> FreshnessReportResponse:
     """Return the freshness SLO evaluation for a single source.
 
-    Requires scope: ``sources:read``
+    Requires scope: ``sources:read``. Returns 404 when the source does not
+    exist OR belongs to a different workspace — avoids leaking existence.
     """
+    workspace_id = _require_workspace(token)
     checker = _get_checker(request)
     try:
-        report = await checker.check_source(source_id)
+        report = await checker.check_source(source_id, workspace_id=workspace_id)
     except KeyError as exc:
         raise HTTPException(
             status_code=404,

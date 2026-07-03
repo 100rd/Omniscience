@@ -1,14 +1,23 @@
 """Token management endpoints.
 
-Provides CRUD operations for API tokens.  These routes are intentionally
-unprotected on POST (bootstrap use-case — minting the very first admin token).
-List and Delete require an active admin-scoped session in future waves; for
-the current wave they are available to any authenticated caller (or
-unauthenticated during bootstrap) to keep the implementation self-contained.
+Provides CRUD operations for API tokens.
 
 POST  /api/v1/tokens        — create a new token (returns plaintext once)
 GET   /api/v1/tokens        — list all active tokens (no secrets exposed)
 DELETE /api/v1/tokens/{id}  — deactivate a token by id
+
+Bootstrap vs. steady-state authz
+--------------------------------
+``POST`` is unauthenticated ONLY while no active token exists yet in the
+database (the bootstrap use-case — minting the very first admin token).
+Once at least one active token exists, ``POST`` requires a caller-presented
+token with the ``admin`` scope — otherwise any anonymous caller could mint
+an admin token scoped to an arbitrary workspace at any time, not just during
+bootstrap.
+
+``GET``/``DELETE`` are unchanged from the prior wave (available to any
+authenticated-or-bootstrap caller); tightening them to ``admin``-only is
+tracked as follow-up work, not bundled into this change.
 """
 
 from __future__ import annotations
@@ -18,8 +27,11 @@ from datetime import datetime
 from typing import Any
 
 import structlog
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from omniscience_core.auth.audit import audit_token_created, audit_token_deleted
+from omniscience_core.auth.middleware import get_current_token
+from omniscience_core.auth.scopes import Scope, check_scopes
 from omniscience_core.auth.tokens import (
     delete_api_token,
     generate_token,
@@ -34,6 +46,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
+
+_bearer = HTTPBearer(auto_error=False)
 
 
 class TokenCreateRequest(BaseModel):
@@ -68,6 +82,42 @@ def _get_env(request: Request) -> str:
     return "development"
 
 
+async def _any_active_token_exists(db: AsyncSession) -> bool:
+    """True if at least one active token already exists.
+
+    Used to gate the unauthenticated bootstrap path on ``POST`` — once the
+    very first token has been minted, subsequent creates must not be
+    reachable by anonymous callers.
+    """
+    result = await db.execute(select(ApiToken).where(ApiToken.is_active.is_(True)))
+    return result.scalars().first() is not None
+
+
+async def _require_admin_for_non_bootstrap(request: Request, factory: Any) -> None:
+    """Enforce admin-scoped auth on ``POST /tokens`` once bootstrap is done.
+
+    While the database has zero active tokens, creation stays open
+    (bootstrap use-case). As soon as one exists, this requires a valid
+    bearer token carrying the ``admin`` scope — otherwise any anonymous
+    caller could keep minting arbitrary admin tokens after bootstrap.
+    """
+    db: AsyncSession
+    async with factory() as db:
+        bootstrapped = await _any_active_token_exists(db)
+
+    if not bootstrapped:
+        return
+
+    credentials: HTTPAuthorizationCredentials | None = await _bearer(request)
+    caller = await get_current_token(request, credentials)
+    granted = {Scope(s) for s in caller.scopes if s in Scope.__members__.values()}
+    if not check_scopes({Scope.admin}, granted):
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "message": "Insufficient token scopes"},
+        )
+
+
 @router.post("", response_model=TokenCreateResponse, status_code=201)
 async def create_token(
     payload: TokenCreateRequest,
@@ -81,9 +131,21 @@ async def create_token(
     If ``workspace_id`` is provided it is persisted on the token row,
     which allows the token to satisfy workspace-scoped endpoints (e.g.
     stats, graph retrieval).
+
+    Unauthenticated only while no active token exists yet (bootstrap);
+    once any token exists, requires the caller to present an
+    ``admin``-scoped token.
     """
     factory = _get_db_factory(request)
     env = _get_env(request)
+
+    await _require_admin_for_non_bootstrap(request, factory)
+
+    if payload.scopes and any(s not in Scope.__members__.values() for s in payload.scopes):
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_scope", "message": "Unknown scope in request"},
+        )
 
     plaintext, prefix = generate_token(env)
     hashed = hash_token(plaintext)

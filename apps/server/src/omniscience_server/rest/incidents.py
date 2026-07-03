@@ -170,6 +170,7 @@ class IncidentFeedback(BaseModel):
     "/incidents/{alert_id:path}/feedback",
     summary="Submit user feedback on a resolved incident for calibration",
     status_code=204,
+    dependencies=[_search_scope_dep],
 )
 async def submit_feedback(
     alert_id: str,
