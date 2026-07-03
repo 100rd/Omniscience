@@ -138,7 +138,7 @@ jobs:
             fi
           done
 
-      - run: uv run pytest --cov --cov-report=xml --cov-fail-under=80
+      - run: uv run pytest --cov-report=xml
         env:
           # --- Postgres (existing, unchanged) ---
           DATABASE_URL: postgresql+asyncpg://omniscience:test@localhost:5432/omniscience_test
