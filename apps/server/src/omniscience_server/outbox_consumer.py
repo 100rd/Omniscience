@@ -23,6 +23,7 @@ from omniscience_embeddings.base import EmbeddingProvider
 from prometheus_client import Gauge
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm import aliased
 
 log = structlog.get_logger(__name__)
 
@@ -216,11 +217,22 @@ class OutboxConsumerWorker:
                                 log.info("unpark_backfill_entity", entity_id=str(entity.id))
 
                         if stale_edges:
+                            # Re-validate BOTH edge endpoints against the same
+                            # tenant before republishing: target_entity_id is a
+                            # bare FK with no DB constraint tying it to the
+                            # source entity's workspace, so a corrupted/
+                            # cross-tenant edge must not be backfilled into the
+                            # wrong tenant's outbox stream on unpark.
+                            TargetEntity = aliased(Entity)
+                            TargetSource = aliased(Source)
                             stmt_e = (
                                 select(Edge, Source.tenant_id)
                                 .join(Entity, Edge.source_entity_id == Entity.id)
                                 .join(Source, Entity.source_id == Source.id)
+                                .join(TargetEntity, Edge.target_entity_id == TargetEntity.id)
+                                .join(TargetSource, TargetEntity.source_id == TargetSource.id)
                                 .where(Edge.id.in_(stale_edges))
+                                .where(TargetSource.tenant_id == Source.tenant_id)
                             )
                             res_e = await session.execute(stmt_e)
                             for edge, tenant_id in res_e:
