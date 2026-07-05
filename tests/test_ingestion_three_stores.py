@@ -773,3 +773,99 @@ async def test_worker_calls_index_writer_with_keyword_arguments_only() -> None:
     # would be empty and the next assertion fails.
     pg_call: call = pipeline._index_writer.upsert_document.call_args  # type: ignore[attr-defined]
     assert pg_call.kwargs, "IndexWriter.upsert_document must be called with kwargs"
+
+
+# ---------------------------------------------------------------------------
+# Real symbol-graph extraction (regression for the empty-entity-graph bug)
+# ---------------------------------------------------------------------------
+
+
+class TestRealSymbolGraphExtraction:
+    """End-to-end (no stubs) proof that a Python doc yields real entities.
+
+    Guards the primary root cause: the worker used to construct the pipeline
+    without a ``graph_extractor``, so ``_stage_graph`` short-circuited and the
+    Neo4j entity graph stayed empty (GraphRAG then returned 0 candidates).
+    """
+
+    @pytest.mark.asyncio
+    async def test_python_doc_upserts_real_entities(self) -> None:
+        from omniscience_parsers.code.graph import extract_symbol_graph
+
+        source = (
+            b"import os\n\n\n"
+            b"class Widget:\n"
+            b"    def render(self):\n"
+            b"        return os.getcwd()\n\n\n"
+            b"def main():\n"
+            b"    return Widget()\n"
+        )
+        index_writer = _make_index_writer()
+        pipeline = _make_pipeline(
+            connector=_make_connector(content=source),
+            index_writer=index_writer,
+            graph_extractor=extract_symbol_graph,  # the REAL extractor
+        )
+
+        await pipeline.run(
+            event=_make_event(external_id="pkg/widget.py"),
+            config=None,
+            secrets={},
+            workspace_id=_WORKSPACE_A,
+        )
+
+        index_writer.upsert_graph.assert_awaited_once()
+        entities = index_writer.upsert_graph.call_args.kwargs["entities"]
+        assert entities, "expected non-empty entities from a real Python document"
+
+        types = {e.entity_type for e in entities}
+        symbols = {e.symbol for e in entities}
+        assert "module" in types
+        assert "class" in types
+        assert "function" in types
+        assert any("Widget" in s for s in symbols)
+        assert any(s.endswith(".main") for s in symbols)
+
+    def test_worker_wires_the_real_extractor(self) -> None:
+        """The worker module imports the concrete extractor used at construction."""
+        from omniscience_parsers.code.graph import (
+            extract_symbol_graph as canonical_extractor,
+        )
+        from omniscience_server.ingestion import worker as worker_mod
+
+        assert worker_mod.extract_symbol_graph is canonical_extractor
+
+    @pytest.mark.asyncio
+    async def test_fanout_uses_ref_external_id_not_sync_marker(self) -> None:
+        """Discovery fan-out reuses one sync-marker event (external_id='*') for
+        every ref.  The graph stage must key the language off ``ref.external_id``
+        (the real file), else extraction is skipped for every discovered doc.
+        """
+        from omniscience_connectors.base import DocumentRef
+        from omniscience_parsers.code.graph import extract_symbol_graph
+
+        source = b"def handler():\n    return 1\n"
+        index_writer = _make_index_writer()
+        pipeline = _make_pipeline(
+            connector=_make_connector(content=source),
+            index_writer=index_writer,
+            graph_extractor=extract_symbol_graph,
+        )
+
+        # Sync-marker event (what the worker passes during fan-out) ...
+        sync_event = _make_event(external_id="*", uri="*")
+        # ... paired with the per-document ref that carries the real path.
+        ref = DocumentRef(external_id="pkg/handler.py", uri="file://pkg/handler.py")
+
+        await pipeline.run_ref(
+            event=sync_event,
+            ref=ref,
+            config=None,
+            secrets={},
+            workspace_id=_WORKSPACE_A,
+        )
+
+        index_writer.upsert_graph.assert_awaited_once()
+        entities = index_writer.upsert_graph.call_args.kwargs["entities"]
+        assert entities, "fan-out must extract entities using ref.external_id"
+        assert any(s.endswith(".handler") for s in {e.symbol for e in entities})

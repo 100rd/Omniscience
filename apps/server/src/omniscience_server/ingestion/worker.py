@@ -81,6 +81,7 @@ from omniscience_server.ingestion.operator_graph import (
     OperatorEventEdge,
     route_operator_event_to_graph,
 )
+from omniscience_parsers.code.graph import extract_symbol_graph
 from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.run_tracker import RunTracker
 
@@ -301,6 +302,7 @@ class IngestionWorker:
             connector=connector,
             embedding_provider=self._embedding_provider,
             index_writer=self._index_writer,
+            graph_extractor=extract_symbol_graph,
         )
 
         if _is_sync_marker(event):

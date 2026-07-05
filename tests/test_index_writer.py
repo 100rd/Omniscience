@@ -145,7 +145,7 @@ class TestUpsertCreatesNew:
 
     @pytest.mark.asyncio
     async def test_new_document_session_add_called(self) -> None:
-        """session.add() must be called for the Document and each Chunk."""
+        """The Document is ``session.add``-ed; chunks go via a Core INSERT."""
         factory = _make_session_factory(existing_doc=None)
         real_call = factory.return_value.__aenter__.return_value
 
@@ -160,8 +160,10 @@ class TestUpsertCreatesNew:
             chunks=[_chunk(0), _chunk(1), _chunk(2)],
         )
 
-        # 1 Document + 3 Chunks
-        assert real_call.add.call_count == 4
+        # Exactly the Document is added via the ORM; the 3 chunks are inserted
+        # with a single Core ``insert(Chunk)`` executemany (see _added_chunk_rows).
+        assert real_call.add.call_count == 1
+        assert len(_added_chunk_rows(real_call)) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -363,11 +365,15 @@ class TestPurgeTombstones:
 class TestAtomicity:
     @pytest.mark.asyncio
     async def test_chunk_flush_failure_propagates(self) -> None:
-        """If flush raises during chunk insert the exception must propagate."""
+        """If the chunk INSERT raises, the exception must propagate."""
         factory = _make_session_factory(existing_doc=None)
         session_mock = factory.return_value.__aenter__.return_value
-        # First flush (for doc insert) succeeds; second (for chunks) fails
-        session_mock.flush = AsyncMock(side_effect=[None, RuntimeError("DB is down")])
+        # execute[0] = document SELECT (find); execute[1] = chunk Core INSERT → fails.
+        scalar_result = MagicMock()
+        scalar_result.scalar_one_or_none.return_value = None
+        session_mock.execute = AsyncMock(
+            side_effect=[scalar_result, RuntimeError("DB is down")]
+        )
 
         writer = IndexWriter(factory)
         with pytest.raises(RuntimeError, match="DB is down"):
@@ -753,3 +759,125 @@ class TestIndexWriterWithVectorStore:
         count = await writer.purge_tombstones(timedelta(days=1))
 
         assert count == 5
+
+
+# ---------------------------------------------------------------------------
+# Test: chunks.embedding column is only written under the postgres backend
+# ---------------------------------------------------------------------------
+
+
+def _chunk_with_embedding(chunk_ord: int = 0) -> ChunkData:
+    """A chunk carrying a non-empty embedding vector (as the embed stage produces)."""
+    return ChunkData(
+        ord=chunk_ord,
+        text="def f(): ...",
+        embedding=[0.1, 0.2, 0.3],
+        symbol="mod.f",
+        metadata={},
+        embedding_model="nomic-embed-text",
+        embedding_provider="ollama",
+        parser_version="treesitter-python-0.21",
+        chunker_strategy="code_symbol",
+    )
+
+
+def _added_chunk_rows(session: Any) -> list[dict[str, Any]]:
+    """Pull the chunk row dicts handed to the Core ``insert(Chunk)`` executemany.
+
+    ``_insert_chunks`` calls ``session.execute(insert(Chunk), rows)`` where
+    ``rows`` is the second positional arg (a list of dicts).
+    """
+    rows: list[dict[str, Any]] = []
+    for call in session.execute.call_args_list:
+        if len(call.args) >= 2 and isinstance(call.args[1], list):
+            rows.extend(call.args[1])
+    return rows
+
+
+class TestChunkEmbeddingColumn:
+    """Guards the migration-0004 regression.
+
+    The pgvector ``chunks.embedding`` column was dropped for the qdrant vector
+    backend (issue #105).  Naming it in the INSERT raises ``UndefinedColumnError``
+    and rolls back the whole chunk write (0 chunks persisted).  The Core INSERT
+    must not name the column for qdrant and must name it for the postgres backend.
+    """
+
+    @pytest.mark.asyncio
+    async def test_qdrant_default_omits_embedding_column(self) -> None:
+        factory = _make_session_factory(existing_doc=None)
+        session = factory.return_value.__aenter__.return_value
+
+        writer = IndexWriter(factory)  # write_chunk_embedding defaults False (qdrant)
+        await writer.upsert_document(
+            source_id=uuid.uuid4(),
+            external_id="mod.py@abc",
+            uri="https://example.com/mod.py",
+            title=None,
+            content_hash=_sha256("mod"),
+            metadata={},
+            chunks=[_chunk_with_embedding(0), _chunk_with_embedding(1)],
+        )
+
+        rows = _added_chunk_rows(session)
+        assert len(rows) == 2
+        # The column is absent from the INSERT row entirely (not NULL) so a
+        # DB without the dropped column cannot raise UndefinedColumnError.
+        for row in rows:
+            assert "embedding" not in row
+
+    @pytest.mark.asyncio
+    async def test_postgres_backend_sets_embedding(self) -> None:
+        factory = _make_session_factory(existing_doc=None)
+        session = factory.return_value.__aenter__.return_value
+
+        writer = IndexWriter(factory, write_chunk_embedding=True)  # postgres backend
+        await writer.upsert_document(
+            source_id=uuid.uuid4(),
+            external_id="mod.py@abc",
+            uri="https://example.com/mod.py",
+            title=None,
+            content_hash=_sha256("mod"),
+            metadata={},
+            chunks=[_chunk_with_embedding(0)],
+        )
+
+        rows = _added_chunk_rows(session)
+        assert len(rows) == 1
+        assert rows[0]["embedding"] == [0.1, 0.2, 0.3]
+
+
+class TestSharedChunkIdAcrossStores:
+    """The Postgres ``chunks.id`` and the Qdrant point id must be the SAME uuid.
+
+    GraphRAG's ``_validate_hits`` joins a vector hit's ``chunk_id`` against the
+    Postgres ``chunks`` table; if the two stores mint independent ids the join
+    never matches and every hit is dropped (search returns 0 even with a
+    populated entity graph).
+    """
+
+    @pytest.mark.asyncio
+    async def test_pg_chunk_id_matches_qdrant_payload_chunk_id(self) -> None:
+        workspace_id = uuid.uuid4()
+        vector_store = AsyncMock()
+        factory = _make_session_factory_for_vs(existing_doc=None)
+        session = factory.return_value.__aenter__.return_value
+
+        writer = IndexWriter(factory, vector_store=vector_store)
+        await writer.upsert_document(
+            source_id=uuid.uuid4(),
+            external_id="doc.py@v1",
+            uri="https://example.com/doc.py",
+            title=None,
+            content_hash=_sha256("body"),
+            metadata={},
+            chunks=[_chunk_with_embedding(0), _chunk_with_embedding(1)],
+            workspace_id=workspace_id,
+        )
+
+        pg_ids = {str(r["id"]) for r in _added_chunk_rows(session)}
+        _, kwargs = vector_store.upsert_chunks.call_args
+        qdrant_ids = {p["chunk_id"] for p in kwargs["chunks"]}
+
+        assert len(pg_ids) == 2
+        assert pg_ids == qdrant_ids, "Postgres chunk ids must equal Qdrant point ids"

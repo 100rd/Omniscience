@@ -8,6 +8,7 @@ dependencies = [
     "omniscience-connectors",
     "omniscience-embeddings",
     "omniscience-index",
+    "omniscience-parsers",
     "omniscience-retrieval",
     "fastapi>=0.111.0",
     "uvicorn[standard]>=0.30.0",
@@ -24,6 +25,7 @@ omniscience-core = { workspace = true }
 omniscience-connectors = { workspace = true }
 omniscience-embeddings = { workspace = true }
 omniscience-index = { workspace = true }
+omniscience-parsers = { workspace = true }
 omniscience-retrieval = { workspace = true }
 
 [build-system]

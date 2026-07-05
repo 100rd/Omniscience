@@ -53,6 +53,8 @@ class ChunkPayload(TypedDict, total=False):
         - embedding
 
     Optional keys:
+        - chunk_id (shared Postgres/Qdrant chunk identity; used as the Qdrant
+          point id so vector hits can be validated against their Postgres row)
         - symbol
         - metadata
         - embedding_model
@@ -61,6 +63,7 @@ class ChunkPayload(TypedDict, total=False):
         - chunker_strategy
     """
 
+    chunk_id: str
     ord: int
     text: str
     embedding: list[float]

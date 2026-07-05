@@ -42,17 +42,23 @@ from typing import Any, Literal, cast
 from omniscience_core.db.models import Chunk, Document
 from omniscience_core.storage.graph import GraphStore
 from omniscience_core.storage.vector import ChunkPayload, VectorStore
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 @dataclass
 class ChunkData:
-    """All fields needed to persist a single chunk across stores."""
+    """All fields needed to persist a single chunk across stores.
+
+    ``id`` is the single chunk identity shared by the Postgres ``chunks`` row
+    and the Qdrant point.  Keeping one id across both stores lets the GraphRAG
+    read path validate a vector hit against its Postgres chunk row.
+    """
 
     ord: int
     text: str
+    id: uuid.UUID = field(default_factory=uuid.uuid4)
     embedding: list[float] = field(default_factory=list)
     symbol: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -84,10 +90,21 @@ class IndexWriter:
         session_factory: async_sessionmaker[AsyncSession],
         graph_store: GraphStore | None = None,
         vector_store: VectorStore | None = None,
+        write_chunk_embedding: bool = False,
     ) -> None:
         self._session_factory = session_factory
         self._graph_store = graph_store
         self._vector_store = vector_store
+        # Whether to persist the ``chunks.embedding`` pgvector column.
+        #
+        # As of migration 0004 (issue #105 cutover) the column is DROPPED for
+        # the default qdrant vector backend — vectors live in Qdrant only, so
+        # writing ``embedding`` here raises ``UndefinedColumnError`` and rolls
+        # back the whole chunk write (0 chunks persisted).  It is re-added at
+        # runtime *only* by ``PostgresOnlyStore.connect`` for the postgres
+        # vector backend, which owns its own chunk-insert path.  Default False
+        # keeps the ORM INSERT from ever naming the dropped column.
+        self._write_chunk_embedding = write_chunk_embedding
 
     # ------------------------------------------------------------------
     # Public API
@@ -154,6 +171,7 @@ class IndexWriter:
 
             payloads: list[ChunkPayload] = [
                 {
+                    "chunk_id": str(c.id),
                     "ord": c.ord,
                     "text": c.text,
                     "embedding": c.embedding,
@@ -346,23 +364,33 @@ class IndexWriter:
         chunks: list[ChunkData],
         ingestion_run_id: uuid.UUID | None,
     ) -> None:
+        rows: list[dict[str, Any]] = []
         for chunk_data in chunks:
-            chunk = Chunk(
-                id=uuid.uuid4(),
-                document_id=document_id,
-                ord=chunk_data.ord,
-                text=chunk_data.text,
-                symbol=chunk_data.symbol,
-                ingestion_run_id=ingestion_run_id,
-                embedding_model=chunk_data.embedding_model,
-                embedding_provider=chunk_data.embedding_provider,
-                parser_version=chunk_data.parser_version,
-                chunker_strategy=chunk_data.chunker_strategy,
-                chunk_metadata=chunk_data.metadata,
-                embedding=chunk_data.embedding,
-            )
-            session.add(chunk)
-        await session.flush()
+            row: dict[str, Any] = {
+                "id": chunk_data.id,
+                "document_id": document_id,
+                "ord": chunk_data.ord,
+                "text": chunk_data.text,
+                "symbol": chunk_data.symbol,
+                "ingestion_run_id": ingestion_run_id,
+                "embedding_model": chunk_data.embedding_model,
+                "embedding_provider": chunk_data.embedding_provider,
+                "parser_version": chunk_data.parser_version,
+                "chunker_strategy": chunk_data.chunker_strategy,
+                "chunk_metadata": chunk_data.metadata,
+            }
+            # Only name the pgvector ``embedding`` column when the backend still
+            # has it (postgres vector backend, which re-adds it at runtime).
+            # A Core INSERT emits ONLY the keys present here, so under the
+            # default qdrant backend — whose column migration 0004 DROPPED —
+            # the column is never named and the write cannot raise
+            # ``UndefinedColumnError``.  (A plain ORM ``session.add`` would still
+            # emit ``embedding = NULL`` for the unset mapped attribute.)
+            if self._write_chunk_embedding:
+                row["embedding"] = chunk_data.embedding
+            rows.append(row)
+        if rows:
+            await session.execute(insert(Chunk), rows)
 
 
 __all__ = ["ChunkData", "IndexWriter", "UpsertResult"]
