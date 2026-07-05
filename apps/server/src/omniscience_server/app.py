@@ -278,6 +278,11 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         session_factory=session_factory,
         graph_store=neo4j_graph_store,
         vector_store=qdrant_store,
+        # Only the postgres vector backend keeps the pgvector ``chunks.embedding``
+        # column (re-added at runtime by ``PostgresOnlyStore.connect``).  The
+        # default qdrant backend dropped it in migration 0004, so the writer must
+        # not name it in the chunk INSERT.
+        write_chunk_embedding=(vector_backend == "postgres"),
     )
     # OTLP/HTTP trace receiver (#152) — wired here so the route in
     # ``rest/otlp.py`` can pull the per-workspace ingester off

@@ -206,6 +206,13 @@ class _RawChunk:
         embedding_model: str,
         embedding_provider: str,
     ) -> None:
+        # One chunk id shared across Postgres and Qdrant.  The Postgres
+        # ``chunks.id`` and the Qdrant point id MUST be the same value so the
+        # GraphRAG read path's ``_validate_hits`` (which joins the vector hit's
+        # ``chunk_id`` against ``chunks.id``) can confirm the chunk still
+        # exists.  Generating it here — before either store writes — keeps the
+        # two id spaces aligned.
+        self.id = uuid.uuid4()
         self.ord = ord_
         self.text = text
         self.symbol: str | None = None
@@ -381,6 +388,7 @@ class IngestionPipeline:
 
         await self._stage_graph(
             event=event,
+            ref=ref,
             content_bytes=fetched.content_bytes,
             document_id=document_id,
             workspace_id=workspace_id,
@@ -571,6 +579,7 @@ class IngestionPipeline:
         self,
         *,
         event: DocumentChangeEvent,
+        ref: DocumentRef,
         content_bytes: bytes,
         document_id: UUID,
         workspace_id: uuid.UUID,
@@ -588,7 +597,7 @@ class IngestionPipeline:
 
         t0 = time.monotonic()
         try:
-            extracted = self._extract_graph(event, content_bytes, bound)
+            extracted = self._extract_graph(event, ref, content_bytes, bound)
             if extracted is None:
                 return
             entities, edges = extracted
@@ -614,19 +623,29 @@ class IngestionPipeline:
     def _extract_graph(
         self,
         event: DocumentChangeEvent,
+        ref: DocumentRef,
         content_bytes: bytes,
         bound: Any,
     ) -> tuple[list[Any], list[Any]] | None:
-        """Run the parser + extractor.  Best-effort: returns ``None`` on miss."""
+        """Run the parser + extractor.  Best-effort: returns ``None`` on miss.
+
+        The document identity comes from ``ref.external_id`` — NOT
+        ``event.external_id``.  In the discovery fan-out path the ``event`` is a
+        single sync marker (``external_id == "*"``) reused across every ref, so
+        keying the language/extension off the event skips extraction for every
+        file.  ``ref`` carries the real per-document path (matching
+        ``_stage_index``).
+        """
         try:
             from omniscience_parsers import TreeSitterParser
 
             parser = TreeSitterParser()
-            ext = "." + event.external_id.rsplit(".", 1)[-1] if "." in event.external_id else ""
+            external_id = ref.external_id
+            ext = "." + external_id.rsplit(".", 1)[-1] if "." in external_id else ""
             if not parser.can_handle("", ext):
                 return None
 
-            parsed = parser.parse(content_bytes, file_path=event.external_id)
+            parsed = parser.parse(content_bytes, file_path=external_id)
             entities, edges = self._graph_extractor(parsed, content_bytes)  # type: ignore[misc]
             if not entities and not edges:
                 return None

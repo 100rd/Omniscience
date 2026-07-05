@@ -680,7 +680,11 @@ class QdrantVectorStore:
         chunk text via ``_tokenize_to_sparse``.
         """
         text, ord_, embedding = _require_chunk_fields(chunk)
-        point_id = str(uuid.uuid4())
+        # Reuse the shared chunk identity as the Qdrant point id so the
+        # GraphRAG read path can join a vector hit back to its Postgres
+        # ``chunks`` row (``_validate_hits``).  Fall back to a fresh uuid only
+        # when the caller did not supply one (legacy payloads / other stores).
+        point_id = str(chunk.get("chunk_id") or uuid.uuid4())
         payload = _build_chunk_payload(
             text=text,
             ord_=ord_,
