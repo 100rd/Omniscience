@@ -39,10 +39,7 @@ import uuid
 from omniscience_core.config import Settings
 from omniscience_core.db import create_async_engine, create_session_factory
 from omniscience_core.db.models import Chunk, Document, Source, SourceStatus, SourceType
-
-# Guard: only run in the DR drill environment
-if not os.environ.get("OMNISCIENCE_DR_DRILL"):
-    raise RuntimeError("OMNISCIENCE_DR_DRILL env var must be set to run the DR drill seed script.")
+from sqlalchemy import insert
 
 # Fixed UUIDs for deterministic verification
 WORKSPACE_ID = uuid.UUID("10000000-0000-0000-0000-000000000001")
@@ -84,7 +81,25 @@ def _chunk_text(doc_idx: int, ord_idx: int) -> str:
     )
 
 
+def _chunk_row(doc_idx: int, doc_id: uuid.UUID, ord_idx: int) -> dict[str, object]:
+    """Build a row without naming the removed Postgres ``embedding`` column."""
+    return {
+        "id": uuid.uuid5(doc_id, f"chunk-{ord_idx}"),
+        "document_id": doc_id,
+        "ord": ord_idx,
+        "text": _chunk_text(doc_idx, ord_idx),
+        "embedding_model": "local-384",
+        "embedding_provider": "local",
+        "parser_version": "1.0",
+        "chunker_strategy": "fixed",
+        "chunk_metadata": {"workspace_id": str(WORKSPACE_ID)},
+    }
+
+
 async def seed() -> None:
+    if not os.environ.get("OMNISCIENCE_DR_DRILL"):
+        raise RuntimeError("OMNISCIENCE_DR_DRILL must be set to run the DR drill seed script.")
+
     settings = Settings()
     engine = create_async_engine(settings)
     session_factory = create_session_factory(engine)
@@ -116,23 +131,11 @@ async def seed() -> None:
             )
             await session.merge(doc)
 
-            for ord_idx in range(CHUNKS_PER_DOC):
-                chunk = Chunk(
-                    id=uuid.uuid5(doc_id, f"chunk-{ord_idx}"),
-                    document_id=doc_id,
-                    ord=ord_idx,
-                    text=_chunk_text(idx, ord_idx),
-                    # AP5: NO pre-stored embedding.  The rebuild script will
-                    # recompute from chunk.text via the live provider.
-                    # This is the correct rebuild-from-SoT pattern.
-                    embedding=None,
-                    embedding_model="local-384",
-                    embedding_provider="local",
-                    parser_version="1.0",
-                    chunker_strategy="fixed",
-                    chunk_metadata={"workspace_id": str(WORKSPACE_ID)},
-                )
-                await session.merge(chunk)
+            # Core INSERT emits only supplied keys. ORM merge/select would name the
+            # mapped legacy embedding attribute even though migration 0004 removed
+            # that physical column for the default Qdrant backend.
+            chunk_rows = [_chunk_row(idx, doc_id, ord_idx) for ord_idx in range(CHUNKS_PER_DOC)]
+            await session.execute(insert(Chunk), chunk_rows)
 
     print(
         f"DR drill seed complete: workspace={WORKSPACE_ID} source={SOURCE_ID}"

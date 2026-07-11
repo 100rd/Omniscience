@@ -33,6 +33,7 @@ from dr_verify import (
     check_rto,
     verify_projections,
 )
+from seed_dr_drill import _chunk_row
 
 # ---------------------------------------------------------------------------
 # Fake protocol implementations (no real stores required)
@@ -115,6 +116,14 @@ class _FakeNeo4j:
 
 _WS = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 _SRC = str(uuid.UUID("bbbbbbbb-0000-0000-0000-000000000001"))
+
+
+def test_dr_seed_chunk_row_omits_removed_embedding_column() -> None:
+    row = _chunk_row(0, uuid.UUID("30000000-0000-0000-0000-000000000001"), 0)
+
+    assert "embedding" not in row
+    assert row["text"]
+    assert row["embedding_provider"] == "local"
 
 
 def _perfect_fakes(
