@@ -10,10 +10,11 @@ Local setup (mirrors what the CI nightly matrix does)
 
 .. code-block:: bash
 
-    docker pull robusta/holmes:0.16.1  # pinned in versions.json
-    docker run -d --name holmes -p 8090:8080 \\
+    HOLMES_IMAGE="$(jq -r '.vendors.holmesgpt.ref' bench/vendors/versions.json)"
+    docker pull "$HOLMES_IMAGE"
+    docker run -d --name holmes -p 8090:5050 \\
         -e OPENAI_API_KEY=$OPENAI_API_KEY \\
-        robusta/holmes:0.16.1 server
+        --entrypoint python "$HOLMES_IMAGE" /app/server.py
 
     export BENCH_LIVE_VENDORS=1
     export HOLMESGPT_ENDPOINT=http://localhost:8090

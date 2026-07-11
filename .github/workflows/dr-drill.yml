@@ -87,6 +87,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Run database migrations
+        working-directory: packages/core
         env:
           DATABASE_URL: postgresql+asyncpg://omniscience:dr_drill_test@localhost:5432/omniscience_dr_drill
         run: uv run alembic upgrade head

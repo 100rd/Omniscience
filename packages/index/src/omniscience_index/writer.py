@@ -97,10 +97,10 @@ class IndexWriter:
         self._vector_store = vector_store
         # Whether to persist the ``chunks.embedding`` pgvector column.
         #
-        # As of migration 0004 (issue #105 cutover) the column is DROPPED for
-        # the default qdrant vector backend — vectors live in Qdrant only, so
-        # writing ``embedding`` here raises ``UndefinedColumnError`` and rolls
-        # back the whole chunk write (0 chunks persisted).  It is re-added at
+        # The default Qdrant vector backend does not create this column because
+        # vectors live in Qdrant only. Writing ``embedding`` here raises
+        # ``UndefinedColumnError`` and rolls back the whole chunk write (0 chunks
+        # persisted). It is re-added at
         # runtime *only* by ``PostgresOnlyStore.connect`` for the postgres
         # vector backend, which owns its own chunk-insert path.  Default False
         # keeps the ORM INSERT from ever naming the dropped column.

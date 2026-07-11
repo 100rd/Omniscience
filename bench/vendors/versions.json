@@ -13,12 +13,13 @@
     },
     "holmesgpt": {
       "kind": "docker-image",
-      "ref": "robusta/holmes:0.16.1",
-      "digest": "sha256:3a4b5c6d7e8f90112233445566778899aabbccddeeff00112233445566778899",
+      "version": "0.16.1",
+      "ref": "us-central1-docker.pkg.dev/genuine-flight-317411/devel/holmes@sha256:18823ff59520e0430e15ab57e016ded444009782b4cfd9a777facc1fed3f60f1",
+      "digest": "sha256:18823ff59520e0430e15ab57e016ded444009782b4cfd9a777facc1fed3f60f1",
       "endpoint_env": "HOLMESGPT_ENDPOINT",
       "endpoint_default": "http://localhost:8090",
       "source": "https://github.com/HolmesGPT/holmesgpt",
-      "notes": "Run via docker compose; binds to :8090. See holmesgpt_adapter.py docstring for setup."
+      "notes": "Official multi-arch image pinned by digest; server.py binds to container port 5050 and host port 8090."
     },
     "sourcegraph_mcp": {
       "kind": "git-sha",
