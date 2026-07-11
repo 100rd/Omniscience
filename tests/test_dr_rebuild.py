@@ -14,7 +14,9 @@ import os
 import sys
 import time
 import uuid
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -33,7 +35,7 @@ from dr_verify import (
     check_rto,
     verify_projections,
 )
-from rebuild_all_projections import _chunk_projection
+from rebuild_all_projections import _chunk_projection, _reset_qdrant_collections
 from seed_dr_drill import _chunk_row
 
 # ---------------------------------------------------------------------------
@@ -134,6 +136,24 @@ def test_dr_rebuild_projection_supports_current_and_legacy_chunk_schemas() -> No
     assert "embedding" not in current_keys
     assert legacy_keys == current_keys | {"embedding"}
     assert {"id", "document_id", "ord", "text", "metadata"} <= current_keys
+
+
+@pytest.mark.asyncio
+async def test_dr_qdrant_reset_rebootstraps_collection_after_wipe() -> None:
+    qdrant = AsyncMock()
+    qdrant.get_collections.return_value = SimpleNamespace(
+        collections=[
+            SimpleNamespace(name="omniscience__model__d384"),
+            SimpleNamespace(name="unmanaged"),
+        ]
+    )
+    store = AsyncMock()
+
+    await _reset_qdrant_collections(qdrant, store)
+
+    qdrant.delete_collection.assert_awaited_once_with("omniscience__model__d384")
+    store.close.assert_awaited_once_with()
+    store.connect.assert_awaited_once_with()
 
 
 def _perfect_fakes(

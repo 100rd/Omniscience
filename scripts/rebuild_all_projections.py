@@ -108,6 +108,21 @@ async def _has_legacy_embedding_column(db_session: Any) -> bool:
     return bool(result.scalar_one())
 
 
+async def _reset_qdrant_collections(
+    qdrant_client: AsyncQdrantClient,
+    vector_store: QdrantVectorStore,
+) -> None:
+    """Drop managed collections, then bootstrap the active collection again."""
+    for collection in (await qdrant_client.get_collections()).collections:
+        if collection.name.startswith(COLLECTION_NAME_PREFIX):
+            await qdrant_client.delete_collection(collection.name)
+            print(f"qdrant: dropped collection {collection.name}")
+
+    # connect() bootstraps only after close() clears the store's lifecycle state.
+    await vector_store.close()
+    await vector_store.connect()
+
+
 class EntityWrapper:
     """Duck-typed wrapper for Entity to expose required fields for Cypher upsert."""
 
@@ -403,10 +418,7 @@ async def main() -> None:
         print(f"neo4j: deleted {summary.counters.nodes_deleted} nodes")
 
     # 2. Wipe Qdrant
-    for c in (await qdrant_client.get_collections()).collections:
-        if c.name.startswith(COLLECTION_NAME_PREFIX):
-            await qdrant_client.delete_collection(c.name)
-            print(f"qdrant: dropped collection {c.name}")
+    await _reset_qdrant_collections(qdrant_client, vector_store)
 
     print("Rebuilding projections from Postgres...")
 
