@@ -1,10 +1,11 @@
 # SPEC-IN: Task SPEC Intake
-Status: draft · Depends on: none
+Status: ready · Depends on: none
+Readiness: human-approved by @100rd on 2026-07-11 under accepted ADR-0019
 
 ## Governing ADRs
 
-- genai-enablement ADR-0009 (proposed) - organizational ADR-to-SPEC governance
-- Omniscience ADR-0019 (proposed) - local SDD authority and bootstrap
+- genai-enablement ADR-0009 (accepted) - organizational ADR-to-SPEC governance
+- Omniscience ADR-0019 (accepted) - local SDD authority and bootstrap
 
 ## Goal
 
@@ -72,4 +73,3 @@ TaskClaim.claim(task_id, revision) -> claimed|already_claimed
 - P-IN-8 delivers one revision 100 times and observes one execution claim.
 - P-IN-9 injects tracker outage without changing task truth or duplicating work.
 - P-IN-10 proves no `spec-watch` claim is exposed until a real registered trigger passes.
-

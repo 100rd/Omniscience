@@ -1,10 +1,11 @@
 # SPEC-OPS: Operational Evidence & Trust Gates
-Status: draft · Depends on: SPEC-SOT, SPEC-EV, SPEC-ACL
+Status: ready · Depends on: SPEC-SOT, SPEC-EV, SPEC-ACL
+Readiness: human-approved by @100rd on 2026-07-11 under accepted ADR-0019
 
 ## Governing ADRs
 
 - ADR-0018 - DR exception and verification
-- ADR-0019 (proposed) - contract conformance and honest evidence
+- ADR-0019 (accepted) - contract conformance and honest evidence
 
 ## Goal
 
@@ -64,4 +65,3 @@ OperationalPosture.certify(scope, evidence) -> evaluation|governed|production-ha
 - P-OPS-7 injects API/ingestion/projection/source/backup failures and observes each SLI/alert.
 - P-OPS-8 mutates status/authority/tool docs and observes deterministic drift failure.
 - P-OPS-9 simulates repeated scheduled failures and verifies primary plus secondary human wake.
-

@@ -1,12 +1,13 @@
 # SPEC-EV: Retrieval Evidence Contract
-Status: draft · Depends on: SPEC-SOT, SPEC-ACL
+Status: ready · Depends on: SPEC-SOT, SPEC-ACL
+Readiness: human-approved by @100rd on 2026-07-11 under accepted ADR-0019
 
 ## Governing ADRs
 
 - ADR-0004 - staged retrieval
 - ADR-0008 - bitemporal semantics
 - ADR-0017 - per-source epoch pin
-- ADR-0019 (proposed) - explicit evidence fitness
+- ADR-0019 (accepted) - explicit evidence fitness
 
 ## Goal
 
@@ -64,4 +65,3 @@ EvidenceEnvelopeV1 = {
 - P-EV-7 composes two source epochs and exposes mixed-snapshot semantics.
 - P-EV-8 compares exact enumeration to complete seeded ground truth.
 - P-EV-9 rejects an unknown major envelope version without data loss or silent coercion.
-

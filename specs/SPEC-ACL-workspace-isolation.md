@@ -1,9 +1,10 @@
 # SPEC-ACL: Workspace & Tenant Isolation
-Status: draft · Depends on: SPEC-SOT
+Status: ready · Depends on: SPEC-SOT
+Readiness: human-approved by @100rd on 2026-07-11 under accepted ADR-0019
 
 ## Governing ADRs
 
-- ADR-0019 (proposed) - governed evidence boundary
+- ADR-0019 (accepted) - governed evidence boundary
 - hardening review 2026-06-10 - fail-closed workspace isolation evidence
 
 ## Goal
@@ -56,4 +57,3 @@ ScopedStore.operation(workspace_id, ...) -> result
 - P-ACL-6 injects identical ids across workspaces and proves cache/outbox/checkpoint isolation.
 - P-ACL-7 exercises least-privilege scope matrix for retrieval/admin/synthesis.
 - P-ACL-8 deletes/exports one workspace while another remains byte-for-byte accessible.
-

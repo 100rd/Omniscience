@@ -70,3 +70,51 @@ Status: draft
 
     assert any("REQ-XX-1 has no Fallback" in error for error in errors)
     assert any("REQ-XX-1 has no matching probe" in error for error in errors)
+
+
+def test_ready_capability_requires_accepted_adr_provenance_and_codeowner(
+    tmp_path: Path,
+) -> None:
+    specs = tmp_path / "specs"
+    adrs = tmp_path / "decisions"
+    specs.mkdir()
+    adrs.mkdir()
+    (specs / "SPEC-XX-example.md").write_text(
+        """# SPEC-XX: Example
+Status: ready
+[REQ-XX-1] A requirement. **Fallback:** stop.
+## Probes
+- P-XX-1: passes
+"""
+    )
+    (adrs / "0019-example.md").write_text("# ADR-0019: Example\n- **Status**: Proposed\n")
+    codeowners = tmp_path / "CODEOWNERS"
+    codeowners.write_text("/specs/ @someone-else\n")
+
+    errors = _validator().validate_capabilities(
+        specs,
+        adr_directory=adrs,
+        codeowners_path=codeowners,
+    )
+
+    assert any("no human readiness provenance" in error for error in errors)
+    assert any("requires accepted ADR-0019" in error for error in errors)
+
+    (specs / "SPEC-XX-example.md").write_text(
+        """# SPEC-XX: Example
+Status: ready
+Readiness: human-approved by @owner on 2026-07-11 under accepted ADR-0019
+[REQ-XX-1] A requirement. **Fallback:** stop.
+## Probes
+- P-XX-1: passes
+"""
+    )
+    (adrs / "0019-example.md").write_text("# ADR-0019: Example\n- **Status**: Accepted\n")
+
+    errors = _validator().validate_capabilities(
+        specs,
+        adr_directory=adrs,
+        codeowners_path=codeowners,
+    )
+
+    assert any("readiness owner @owner does not own /specs/" in error for error in errors)

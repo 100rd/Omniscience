@@ -1,10 +1,11 @@
 # SPEC-KP: Dark Factory Knowledge Plane
-Status: draft · Depends on: SPEC-EV, SPEC-ACL, SPEC-OPS
+Status: ready · Depends on: SPEC-EV, SPEC-ACL, SPEC-OPS
+Readiness: human-approved by @100rd on 2026-07-11 under accepted ADR-0019
 
 ## Governing ADRs
 
 - Omniscience ADR-0015 - MCP consumer/source integration without Experience ownership
-- Omniscience ADR-0019 (proposed) - read-only and severable Dark Factory boundary
+- Omniscience ADR-0019 (accepted) - read-only and severable Dark Factory boundary
 
 ## Goal
 
@@ -61,4 +62,3 @@ KnowledgePlane.severance_snapshot(envelope) -> PinnedEvidenceManifest
 - P-KP-6 rejects Experience/lesson writes while accepting factual Outcome/Return events as sources.
 - P-KP-7 arch-test permits retrieval and governed deterministic synthesis, never infrastructure action.
 - P-KP-8 verifies privileged consumer tokens receive the same evidence-fitness enforcement.
-

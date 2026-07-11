@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ADR_DIR = ROOT / "docs" / "decisions"
 CAPABILITY_DIR = ROOT / "specs"
 TASK_DIR = ROOT / "docs" / "specs"
+CODEOWNERS = ROOT / ".github" / "CODEOWNERS"
 
 ADR_FILE = re.compile(r"^(?P<number>\d{4})-[a-z0-9][a-z0-9-]*\.md$")
 ADR_HEADER = re.compile(r"^# ADR[- ](?P<number>\d{4})\b", re.MULTILINE)
@@ -21,6 +22,11 @@ ADR_STATUS = re.compile(r"\*{0,2}Status\*{0,2}\s*:\s*(?P<status>[A-Za-z-]+)")
 ALLOWED_ADR_STATUSES = {"proposed", "accepted", "implemented", "superseded", "deprecated"}
 CAPABILITY_FILE = re.compile(r"^SPEC-(?P<id>[A-Z]+)-[a-z0-9][a-z0-9-]*\.md$")
 REQ = re.compile(r"\[REQ-(?P<id>[A-Z]+)-(?P<number>\d+)\]")
+READY_PROVENANCE = re.compile(
+    r"^Readiness:\s*human-approved by (?P<owner>@[A-Za-z0-9-]+) "
+    r"on \d{4}-\d{2}-\d{2} under accepted ADR-0019$",
+    re.MULTILINE,
+)
 
 
 def _load_frontmatter(path: Path) -> dict[str, Any] | None:
@@ -60,8 +66,37 @@ def validate_adrs(directory: Path = ADR_DIR) -> list[str]:
     return errors
 
 
-def validate_capabilities(directory: Path = CAPABILITY_DIR) -> list[str]:
+def _adr_statuses(directory: Path) -> dict[str, str]:
+    statuses: dict[str, str] = {}
+    for path in directory.glob("[0-9][0-9][0-9][0-9]-*.md"):
+        file_match = ADR_FILE.fullmatch(path.name)
+        status_match = ADR_STATUS.search(path.read_text(encoding="utf-8"))
+        if file_match is not None and status_match is not None:
+            statuses[file_match.group("number")] = status_match.group("status").lower()
+    return statuses
+
+
+def _codeowners_grants_spec_readiness(path: Path, owner: str) -> bool:
+    if not path.is_file():
+        return False
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if fields[0] == "/specs/" and owner in fields[1:]:
+            return True
+    return False
+
+
+def validate_capabilities(
+    directory: Path = CAPABILITY_DIR,
+    *,
+    adr_directory: Path = ADR_DIR,
+    codeowners_path: Path = CODEOWNERS,
+) -> list[str]:
     errors: list[str] = []
+    adr_statuses = _adr_statuses(adr_directory)
     for path in sorted(directory.glob("SPEC-*.md")):
         if path.name == "SPEC-INDEX.md":
             continue
@@ -72,8 +107,19 @@ def validate_capabilities(directory: Path = CAPABILITY_DIR) -> list[str]:
         spec_id = match.group("id")
         text = path.read_text(encoding="utf-8")
         status_pattern = r"^Status:\s*(draft|ready|implemented|verified|superseded)\b"
-        if not re.search(status_pattern, text, re.M):
+        status_match = re.search(status_pattern, text, re.M)
+        if status_match is None:
             errors.append(f"{path}: missing or invalid capability status")
+        elif status_match.group(1) == "ready":
+            provenance = READY_PROVENANCE.search(text)
+            if provenance is None:
+                errors.append(f"{path}: ready capability has no human readiness provenance")
+            else:
+                owner = provenance.group("owner")
+                if not _codeowners_grants_spec_readiness(codeowners_path, owner):
+                    errors.append(f"{path}: readiness owner {owner} does not own /specs/")
+            if adr_statuses.get("0019") != "accepted":
+                errors.append(f"{path}: ready capability requires accepted ADR-0019")
 
         matches = list(REQ.finditer(text))
         if not matches:

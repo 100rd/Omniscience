@@ -1,9 +1,10 @@
 # ADR-0019: Adopt Dark Factory SDD and fix the knowledge-plane boundary
 
-- **Status**: Proposed
+- **Status**: Accepted
 - **Date**: 2026-07-11
 - **Deciders**: Omniscience human owners / CODEOWNERS
-- **Governing proposal**: genai-enablement ADR-0009, PR 100rd/genai-enablement#34
+- **Accepted by**: `@100rd` via explicit owner approval on 2026-07-11
+- **Governing decision**: accepted genai-enablement ADR-0009, merged in 100rd/genai-enablement#34
 - **Related**: ADR-0015, ADR-0016, ADR-0017
 
 ## Context
@@ -83,9 +84,9 @@ comments, PR prose, and issue priority cannot silently change architecture.
 
 ### D7 - Bootstrap is manual and claim-limited
 
-Until the local intake validator and CODEOWNERS readiness path are verified, capability and task SPECs
-remain draft and implementation is manually started by a human. No absent `spec-watch` automation may
-be claimed. Bootstrap expires only when real readiness provenance and trigger probes pass.
+The local intake validator and CODEOWNERS path enforce readiness metadata. During bootstrap, work is
+still started manually by a human; no absent `spec-watch` automation may be claimed. Automated intake
+may replace manual start only after its provenance, idempotency, and trigger probes pass.
 
 ## Consequences
 

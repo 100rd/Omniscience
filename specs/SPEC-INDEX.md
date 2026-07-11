@@ -3,7 +3,8 @@
 Capability SPECs translate accepted human ADR decisions into reusable agent-executable contracts.
 They do not authorize one task; bounded work lives in `docs/specs/` and cites these contracts.
 
-All initial SDD specs are `draft` while ADR-0019 is proposed.
+All initial SDD specs are `ready` under accepted ADR-0019 and explicit owner approval recorded in
+each contract. Implementation and verification remain separate states backed by their probes.
 
 | ID | Capability | Primary boundary |
 |---|---|---|
@@ -33,4 +34,3 @@ draft -> ready -> implemented -> verified -> superseded
 
 Only a human/CODEOWNER may mark `ready`. Only independent evidence may mark `verified`.
 Requirements and their probes keep stable ids across compatible revisions.
-

@@ -26,8 +26,7 @@ Statuses: `Proposed`, `Accepted`, `Implemented`, `Superseded`, `Deprecated`.
 | ADR-0016 | Postmortem synthesis governance | Accepted |
 | ADR-0017 | Per-source epoch pin | Accepted |
 | ADR-0018 | Rebuild direct-write DR exception | Accepted |
-| [ADR-0019](0019-dark-factory-sdd-and-knowledge-plane-boundary.md) | Dark Factory SDD and knowledge-plane boundary | Proposed |
+| [ADR-0019](0019-dark-factory-sdd-and-knowledge-plane-boundary.md) | Dark Factory SDD and knowledge-plane boundary | Accepted |
 
 `ADR-0018` was originally committed with the duplicate id `ADR-0015`. The rename is a
 registry repair, not a change to its accepted decision.
-

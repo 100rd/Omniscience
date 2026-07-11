@@ -1,12 +1,13 @@
 # SPEC-SOT: Authoritative Ledger & Query Projections
-Status: draft · Depends on: none
+Status: ready · Depends on: none
+Readiness: human-approved by @100rd on 2026-07-11 under accepted ADR-0019
 
 ## Governing ADRs
 
 - ADR-0005/0006/0008 - graph, vector, and temporal stores
 - ADR-0017 - per-source convergence semantics
 - ADR-0018 - sanctioned empty-store DR exception
-- ADR-0019 (proposed) - authoritative-ledger model
+- ADR-0019 (accepted) - authoritative-ledger model
 
 ## Goal
 
@@ -66,4 +67,3 @@ Rebuild.from_ledger(revision, empty_targets) -> VerificationReport
 - P-SOT-7 runs nightly rebuild, verify-only, hash/count/checkpoint and RTO assertions.
 - P-SOT-8 restores a backup into an empty environment and passes P-SOT-1.
 - P-SOT-9 lints README/architecture/operations language against the ledger/projection contract.
-
