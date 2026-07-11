@@ -11,9 +11,11 @@ TestDrIntegration            — integration test (OMNISCIENCE_DR_DRILL=1 only)
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -154,6 +156,21 @@ async def test_dr_qdrant_reset_rebootstraps_collection_after_wipe() -> None:
     qdrant.delete_collection.assert_awaited_once_with("omniscience__model__d384")
     store.close.assert_awaited_once_with()
     store.connect.assert_awaited_once_with()
+
+
+def test_dr_rebuild_advances_graph_checkpoint_for_empty_projection() -> None:
+    rebuild_source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "rebuild_all_projections.py"
+    ).read_text(encoding="utf-8")
+    call = re.search(
+        r"await graph_store\.upsert_graph\((?P<args>.*?)\n\s*\)",
+        rebuild_source,
+        re.DOTALL,
+    )
+
+    assert call is not None
+    assert "workspace_id=workspace_id" in call.group("args")
+    assert "if wrapped_entities" not in rebuild_source
 
 
 def _perfect_fakes(

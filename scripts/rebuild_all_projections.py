@@ -533,14 +533,16 @@ async def main() -> None:
                 wrapped_entities = [EntityWrapper(ent, workspace_id) for ent in entities]
                 wrapped_edges = [EdgeWrapper(edge, workspace_id) for edge in edges]
 
-                if wrapped_entities:
-                    await graph_store.upsert_graph(
-                        source_id=source.id,
-                        document_id=doc.id,
-                        entities=wrapped_entities,
-                        edges=wrapped_edges,
-                        version=doc.doc_version,
-                    )
+                # An empty graph projection is still a successfully processed
+                # document version and must advance the Neo4j checkpoint.
+                await graph_store.upsert_graph(
+                    source_id=source.id,
+                    document_id=doc.id,
+                    entities=wrapped_entities,
+                    edges=wrapped_edges,
+                    workspace_id=workspace_id,
+                    version=doc.doc_version,
+                )
 
     print("Rebuild complete.  Running post-rebuild verification...")
 
