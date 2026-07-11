@@ -31,6 +31,19 @@ def test_dr_migrations_run_from_alembic_project() -> None:
     assert "alembic upgrade head" in step["run"]
 
 
+def test_dr_rebuild_uses_the_configured_local_embedding_provider() -> None:
+    workflow = _workflow("dr-drill.yml")
+    rebuild = _step(workflow, "dr-drill", "Run DR rebuild with RTO enforcement")
+    verify = _step(workflow, "dr-drill", "Verify-only pass (idempotency check)")
+    integration = _step(workflow, "dr-drill", "Run DR unit + integration tests")
+
+    assert rebuild["env"]["EMBEDDING_PROVIDER"] == "local"
+    assert verify["env"]["EMBEDDING_PROVIDER"] == "local"
+    assert integration["env"]["EMBEDDING_PROVIDER"] == "local"
+    assert "OMNISCIENCE_EMBEDDING_PROVIDER" not in rebuild["env"]
+    assert "--recompute-embeddings" in rebuild["run"]
+
+
 def test_holmes_image_is_official_and_digest_pinned() -> None:
     versions = json.loads((ROOT / "bench" / "vendors" / "versions.json").read_text())
     holmes = versions["vendors"]["holmesgpt"]

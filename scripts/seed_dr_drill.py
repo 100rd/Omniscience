@@ -18,7 +18,7 @@ path.
 Now the seed stores NO embedding (``embedding=None``/empty).  When the
 drill runs ``rebuild_all_projections.py --recompute-embeddings``, every
 chunk will be re-embedded from its ``chunk.text`` via the live provider.
-When ``OMNISCIENCE_EMBEDDING_PROVIDER=local`` is set (the DR drill CI
+When ``EMBEDDING_PROVIDER=local`` is set (the DR drill CI
 env), the local model produces deterministic 384-dim vectors from the
 text, exercising the true rebuild-from-SoT path.
 
