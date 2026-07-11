@@ -5,6 +5,7 @@ delete resources that belong to workspace B.
 
 Endpoints under test:
   GET    /api/v1/sources            — list_sources
+  POST   /api/v1/sources            — create_source
   GET    /api/v1/sources/{id}       — get_source
   PATCH  /api/v1/sources/{id}       — update_source
   DELETE /api/v1/sources/{id}       — delete_source
@@ -20,6 +21,7 @@ Security invariants tested:
   6. Token for workspace A gets 404 for a document whose parent source is in workspace B.
   7. Legacy token (workspace_id=None) is rejected fail-closed with 403 on
      all read and write source endpoints, and on the document endpoint.
+  8. Source creation derives tenant_id from the token and ignores caller claims.
 """
 
 from __future__ import annotations
@@ -182,6 +184,22 @@ def _make_data_session(
     return session
 
 
+def _make_create_session() -> AsyncMock:
+    """Return a data session that simulates database-generated source fields."""
+    session = _make_data_session()
+
+    async def _refresh(source: Source) -> None:
+        source.id = source.id or uuid.uuid4()
+        source.last_sync_at = None
+        source.last_error = None
+        source.last_error_at = None
+        source.created_at = datetime.now(tz=UTC)
+        source.updated_at = datetime.now(tz=UTC)
+
+    session.refresh = AsyncMock(side_effect=_refresh)
+    return session
+
+
 def _build_app(
     token: ApiToken,
     data_session: AsyncMock,
@@ -202,6 +220,50 @@ def _build_app(
 async def _get_client(app: FastAPI) -> AsyncClient:
     transport = ASGITransport(app=app)
     return AsyncClient(transport=transport, base_url="http://test")
+
+
+# ---------------------------------------------------------------------------
+# create_source — server-derived workspace
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_create_source_uses_token_workspace_not_caller_tenant() -> None:
+    """POST /sources ignores a foreign tenant_id claimed by the request body."""
+    tok, pt = _make_token(workspace_id=_WS_A, scopes=["sources:write"])
+    data_session = _make_create_session()
+    app = _build_app(tok, data_session)
+
+    async with await _get_client(app) as client:
+        resp = await client.post(
+            "/api/v1/sources",
+            json={"type": "git", "name": "owned-source", "tenant_id": str(_WS_B)},
+            headers={"Authorization": f"Bearer {pt}"},
+        )
+
+    assert resp.status_code == 201
+    created = data_session.add.call_args.args[0]
+    assert created.tenant_id == _WS_A
+    assert resp.json()["tenant_id"] == str(_WS_A)
+
+
+@pytest.mark.asyncio
+async def test_create_source_legacy_token_rejected_before_write() -> None:
+    """POST /sources rejects a token without workspace_id before persistence."""
+    tok, pt = _make_token(workspace_id=None, scopes=["sources:write"])
+    data_session = _make_create_session()
+    app = _build_app(tok, data_session)
+
+    async with await _get_client(app) as client:
+        resp = await client.post(
+            "/api/v1/sources",
+            json={"type": "git", "name": "unscoped-source"},
+            headers={"Authorization": f"Bearer {pt}"},
+        )
+
+    assert resp.status_code == 403
+    assert resp.json()["error"]["code"] == "forbidden"
+    data_session.add.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

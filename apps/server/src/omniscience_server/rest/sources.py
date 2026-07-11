@@ -222,12 +222,14 @@ async def list_sources(
 async def create_source(
     payload: SourceCreate,
     request: Request,
+    token: ApiToken = _write_scope_dep,
 ) -> SourceRead:
     """Create a new ingestion source.
 
     Body is validated as a SourceCreate (type, name, config, optional secrets_ref).
     Requires scope: ``sources:write``
     """
+    workspace_id = _require_workspace(token)
     factory = _get_db_factory(request)
 
     db: AsyncSession
@@ -239,7 +241,7 @@ async def create_source(
             secrets_ref=payload.secrets_ref,
             status=payload.status,
             freshness_sla_seconds=payload.freshness_sla_seconds,
-            tenant_id=payload.tenant_id,
+            tenant_id=workspace_id,
         )
         db.add(source)
         await db.flush()
