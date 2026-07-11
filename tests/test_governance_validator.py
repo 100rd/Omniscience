@@ -56,6 +56,7 @@ rollback: {kind: revert-pr}
     assert any("absolute workstation path" in error for error in errors)
     assert any("criterion 1 must be structured" in error for error in errors)
     assert any("rollback requires kind and probe" in error for error in errors)
+    assert any("readiness requires approvedBy and approvedAt" in error for error in errors)
 
 
 def test_capability_requires_fallback_and_matching_probe(tmp_path: Path) -> None:

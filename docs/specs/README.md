@@ -12,6 +12,9 @@ Legacy prose specs without frontmatter are treated as drafts until migrated.
 id: stable-task-id
 title: Bounded outcome
 status: draft
+readiness:
+  approvedBy: "@github-owner"
+  approvedAt: YYYY-MM-DD
 source:
   kind: github|human
   ref: source-id
@@ -37,4 +40,3 @@ rollback:
 
 Agents may draft. Only authorized humans may transition `draft -> ready`; the executing identity cannot
 modify its ready revision, governing ADR/SPECs, probes, fixtures, policy, or waiver state.
-

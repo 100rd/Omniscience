@@ -1,14 +1,17 @@
 ---
 title: "Set sources.tenant_id from the token workspace on create"
 id: gh-issue-355
-status: draft
+status: ready
+readiness:
+  approvedBy: "@100rd"
+  approvedAt: 2026-07-11
 source: { kind: github, ref: "355", url: "https://github.com/100rd/Omniscience/issues/355" }
 governingAdrs:
   - Omniscience/ADR-0019
 capabilitySpecs:
   - SPEC-IN
   - SPEC-ACL
-sddMode: standard
+sddMode: full
 repo: 100rd/Omniscience
 scope:
   include:
@@ -39,7 +42,10 @@ rollback:
 ## Scope
 
 Set the source tenant from server-derived authentication context and add positive/cross-workspace
-regression coverage. This draft cannot become ready until ADR-0019 and SPEC-IN/ACL are human-ready.
+regression coverage. The organization owner approved this immutable Full-mode task after ADR-0019 and
+SPEC-IN/ACL became human-ready.
 
 ## Out of scope
-None specified.
+- schema migrations or backfill of existing NULL-tenant rows
+- connector-owned source bootstrap paths outside the REST endpoint
+- changes to accepted ADR, capability SPEC, probe, or branch-protection definitions

@@ -76,7 +76,7 @@ def _adr_statuses(directory: Path) -> dict[str, str]:
     return statuses
 
 
-def _codeowners_grants_spec_readiness(path: Path, owner: str) -> bool:
+def _codeowners_grants_readiness(path: Path, pattern: str, owner: str) -> bool:
     if not path.is_file():
         return False
     for raw_line in path.read_text(encoding="utf-8").splitlines():
@@ -84,7 +84,7 @@ def _codeowners_grants_spec_readiness(path: Path, owner: str) -> bool:
         if not line or line.startswith("#"):
             continue
         fields = line.split()
-        if fields[0] == "/specs/" and owner in fields[1:]:
+        if fields[0] == pattern and owner in fields[1:]:
             return True
     return False
 
@@ -116,7 +116,7 @@ def validate_capabilities(
                 errors.append(f"{path}: ready capability has no human readiness provenance")
             else:
                 owner = provenance.group("owner")
-                if not _codeowners_grants_spec_readiness(codeowners_path, owner):
+                if not _codeowners_grants_readiness(codeowners_path, "/specs/", owner):
                     errors.append(f"{path}: readiness owner {owner} does not own /specs/")
             if adr_statuses.get("0019") != "accepted":
                 errors.append(f"{path}: ready capability requires accepted ADR-0019")
@@ -155,7 +155,11 @@ def _contains_tbd(value: Any) -> bool:
     return False
 
 
-def validate_tasks(directory: Path = TASK_DIR) -> list[str]:
+def validate_tasks(
+    directory: Path = TASK_DIR,
+    *,
+    codeowners_path: Path = CODEOWNERS,
+) -> list[str]:
     errors: list[str] = []
     for path in sorted(directory.glob("*.md")):
         if path.name == "README.md":
@@ -179,6 +183,7 @@ def validate_tasks(directory: Path = TASK_DIR) -> list[str]:
             "scope",
             "acceptanceCriteria",
             "rollback",
+            "readiness",
         }
         missing = sorted(required - data.keys())
         if missing:
@@ -189,6 +194,18 @@ def validate_tasks(directory: Path = TASK_DIR) -> list[str]:
             errors.append(f"{path}: ready task repo must not be an absolute workstation path")
         if data.get("sddMode") not in {"quick", "standard", "full"}:
             errors.append(f"{path}: ready task has invalid sddMode")
+        readiness = data.get("readiness")
+        if not isinstance(readiness, dict) or not {"approvedBy", "approvedAt"}.issubset(readiness):
+            errors.append(f"{path}: ready task readiness requires approvedBy and approvedAt")
+        else:
+            owner = str(readiness["approvedBy"])
+            approved_at = str(readiness["approvedAt"])
+            if not re.fullmatch(r"@[A-Za-z0-9-]+", owner):
+                errors.append(f"{path}: ready task approvedBy must be a GitHub owner")
+            elif not _codeowners_grants_readiness(codeowners_path, "/docs/specs/", owner):
+                errors.append(f"{path}: readiness owner {owner} does not own /docs/specs/")
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", approved_at):
+                errors.append(f"{path}: ready task approvedAt must be YYYY-MM-DD")
         for field in ("governingAdrs", "capabilitySpecs"):
             if not isinstance(data.get(field), list) or not data[field]:
                 errors.append(f"{path}: ready task {field} must be a non-empty list")
