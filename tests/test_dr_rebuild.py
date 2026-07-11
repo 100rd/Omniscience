@@ -33,6 +33,7 @@ from dr_verify import (
     check_rto,
     verify_projections,
 )
+from rebuild_all_projections import _chunk_projection
 from seed_dr_drill import _chunk_row
 
 # ---------------------------------------------------------------------------
@@ -124,6 +125,15 @@ def test_dr_seed_chunk_row_omits_removed_embedding_column() -> None:
     assert "embedding" not in row
     assert row["text"]
     assert row["embedding_provider"] == "local"
+
+
+def test_dr_rebuild_projection_supports_current_and_legacy_chunk_schemas() -> None:
+    current_keys = {column.key for column in _chunk_projection(include_embedding=False)}
+    legacy_keys = {column.key for column in _chunk_projection(include_embedding=True)}
+
+    assert "embedding" not in current_keys
+    assert legacy_keys == current_keys | {"embedding"}
+    assert {"id", "document_id", "ord", "text", "metadata"} <= current_keys
 
 
 def _perfect_fakes(

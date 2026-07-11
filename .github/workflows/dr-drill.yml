@@ -134,6 +134,7 @@ jobs:
         run: |
           uv run python scripts/rebuild_all_projections.py \
             --yes \
+            --recompute-embeddings \
             --rto-seconds "${{ steps.rto.outputs.rto_seconds }}"
 
       - name: Verify-only pass (idempotency check)
