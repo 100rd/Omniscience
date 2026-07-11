@@ -10,7 +10,7 @@ When a cluster degrades at 03:00, the bottleneck is **context assembly, not the 
 
 ## What it does
 
-- **Hybrid knowledge graph** — **Neo4j** holds topology, ownership, dependency and causal edges plus temporal state; **Qdrant** holds semantic content (docs, Slack threads, post-mortems, commit messages, log narratives); **Postgres** holds operational metadata and lineage (sources, documents, chunk text, ingestion runs, tokens, workspaces).
+- **Hybrid knowledge graph** — **Postgres is the authoritative ingestion/recovery ledger** (content, lineage, versions, entity/outbox records, sources, runs, tokens, workspaces). **Neo4j** holds the graph projection and **Qdrant** the vector projection; both are written through the outbox, reconciled, epoch-filtered, and rebuildable from Postgres.
 - **GraphRAG composition** — the core query pattern: resolve the subject entity in the graph → traverse causal/ownership edges to candidate causes → scope a vector search to that candidate set → return a ranked, cited bundle. Substantively different from naive vector-only RAG and from static CMDB-style lookup.
 - **Bitemporal time-travel** — every entity and edge carries `valid_from` / `valid_to` (real-world time) plus `recorded_at` (ingestion time). Query the graph **as it was at any `as_of` timestamp** ([ADR-0008](docs/decisions/0008-bitemporal-schema-for-neo4j.md)).
 - **Cross-domain identity** — the same real-world thing gets one node identity across sources via declarative metadata (IaC address, ARN, labels), OpenTelemetry trace context, and ML clustering. Every cross-source link carries a **confidence score** with explicit strategy attribution.
@@ -62,12 +62,13 @@ flowchart TB
     P --> G["Extract entities + edges<br/>+ cross-source identity resolution"]
     E --> DEDUP["Content-hash dedup<br/>tombstones, not deletes"]
     G --> DEDUP
-    DEDUP --> PG[("Postgres<br/>sources · documents<br/>chunks (text + lineage)<br/>ingestion_runs · tokens")]
-    DEDUP --> QD[("Qdrant<br/>chunk embeddings<br/>+ payload index")]
-    DEDUP --> NEO[("Neo4j<br/>entities + edges<br/>bitemporal: valid_from/to · recorded_at")]
-    PG <-->|"consistency"| RC["Reconcile Worker"]
-    QD <--> RC
-    NEO <--> RC
+    DEDUP --> PG[("Postgres authoritative ledger<br/>content · lineage · versions<br/>entities · outbox · operations")]
+    PG --> OB["Outbox consumer<br/>ordered · idempotent · CAS"]
+    OB --> QD[("Qdrant vector projection<br/>chunk embeddings + payload")]
+    OB --> NEO[("Neo4j graph projection<br/>entities + edges · bitemporal")]
+    PG <-->|"compare + bounded re-emit"| RC["Reconcile Worker"]
+    QD --> RC
+    NEO --> RC
 ```
 
 ## How retrieval works
@@ -203,6 +204,7 @@ Then ask your AI assistant a question — it will call `search` (and, for incide
 - [Retrieval strategy (ADR 0004)](docs/decisions/0004-retrieval-strategy-staged.md) — hybrid → structural → GraphRAG-if-needed
 - [Bitemporal schema (ADR 0008)](docs/decisions/0008-bitemporal-schema-for-neo4j.md) — the `as_of` model
 - [Architecture decisions](docs/decisions/)
+- [Capability SPEC contracts](specs/SPEC-INDEX.md)
 - [MCP catalog submission tracker](docs/mcp-catalog-submission.md)
 
 ## Benchmarks
