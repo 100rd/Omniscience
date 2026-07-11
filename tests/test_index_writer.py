@@ -371,9 +371,7 @@ class TestAtomicity:
         # execute[0] = document SELECT (find); execute[1] = chunk Core INSERT → fails.
         scalar_result = MagicMock()
         scalar_result.scalar_one_or_none.return_value = None
-        session_mock.execute = AsyncMock(
-            side_effect=[scalar_result, RuntimeError("DB is down")]
-        )
+        session_mock.execute = AsyncMock(side_effect=[scalar_result, RuntimeError("DB is down")])
 
         writer = IndexWriter(factory)
         with pytest.raises(RuntimeError, match="DB is down"):

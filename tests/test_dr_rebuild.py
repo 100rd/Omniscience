@@ -11,10 +11,14 @@ TestDrIntegration            — integration test (OMNISCIENCE_DR_DRILL=1 only)
 from __future__ import annotations
 
 import os
+import re
 import sys
 import time
 import uuid
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -33,6 +37,8 @@ from dr_verify import (
     check_rto,
     verify_projections,
 )
+from rebuild_all_projections import _chunk_projection, _reset_qdrant_collections
+from seed_dr_drill import _chunk_row
 
 # ---------------------------------------------------------------------------
 # Fake protocol implementations (no real stores required)
@@ -115,6 +121,56 @@ class _FakeNeo4j:
 
 _WS = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 _SRC = str(uuid.UUID("bbbbbbbb-0000-0000-0000-000000000001"))
+
+
+def test_dr_seed_chunk_row_omits_removed_embedding_column() -> None:
+    row = _chunk_row(0, uuid.UUID("30000000-0000-0000-0000-000000000001"), 0)
+
+    assert "embedding" not in row
+    assert row["text"]
+    assert row["embedding_provider"] == "local"
+
+
+def test_dr_rebuild_projection_supports_current_and_legacy_chunk_schemas() -> None:
+    current_keys = {column.key for column in _chunk_projection(include_embedding=False)}
+    legacy_keys = {column.key for column in _chunk_projection(include_embedding=True)}
+
+    assert "embedding" not in current_keys
+    assert legacy_keys == current_keys | {"embedding"}
+    assert {"id", "document_id", "ord", "text", "metadata"} <= current_keys
+
+
+@pytest.mark.asyncio
+async def test_dr_qdrant_reset_rebootstraps_collection_after_wipe() -> None:
+    qdrant = AsyncMock()
+    qdrant.get_collections.return_value = SimpleNamespace(
+        collections=[
+            SimpleNamespace(name="omniscience__model__d384"),
+            SimpleNamespace(name="unmanaged"),
+        ]
+    )
+    store = AsyncMock()
+
+    await _reset_qdrant_collections(qdrant, store)
+
+    qdrant.delete_collection.assert_awaited_once_with("omniscience__model__d384")
+    store.close.assert_awaited_once_with()
+    store.connect.assert_awaited_once_with()
+
+
+def test_dr_rebuild_advances_graph_checkpoint_for_empty_projection() -> None:
+    rebuild_source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "rebuild_all_projections.py"
+    ).read_text(encoding="utf-8")
+    call = re.search(
+        r"await graph_store\.upsert_graph\((?P<args>.*?)\n\s*\)",
+        rebuild_source,
+        re.DOTALL,
+    )
+
+    assert call is not None
+    assert "workspace_id=workspace_id" in call.group("args")
+    assert "if wrapped_entities" not in rebuild_source
 
 
 def _perfect_fakes(

@@ -9,6 +9,12 @@ dependencies = [
     "omniscience-cli",
 ]
 
+[project.optional-dependencies]
+local = [
+    "omniscience-embeddings[local]",
+    "torch>=2.2",
+]
+
 [tool.uv.workspace]
 exclude = ["apps/admin"]
 members = [
@@ -27,6 +33,12 @@ omniscience-server               = { workspace = true }
 omniscience-cli                  = { workspace = true }
 omniscience-parsers              = { workspace = true }
 omniscience-plugin-example       = { workspace = true }
+torch                            = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [dependency-groups]
 dev = [

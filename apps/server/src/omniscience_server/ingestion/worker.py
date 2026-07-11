@@ -64,6 +64,7 @@ from omniscience_core.queue.consumer import QueueConsumer
 from omniscience_core.secrets import SecretsResolver
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_index.workspace import MissingWorkspaceError, resolve_source_workspace
+from omniscience_parsers.code.graph import extract_symbol_graph
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -81,7 +82,6 @@ from omniscience_server.ingestion.operator_graph import (
     OperatorEventEdge,
     route_operator_event_to_graph,
 )
-from omniscience_parsers.code.graph import extract_symbol_graph
 from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.run_tracker import RunTracker
 

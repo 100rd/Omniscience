@@ -34,9 +34,10 @@ recomputes all embeddings from ``chunk.text`` via the live embedding
 provider.  This exercises the true rebuild-from-SoT path (not
 restore-from-backup) as required by AP5 / consilium-v9.
 
-Default behaviour (flag absent): reuse stored embeddings when present,
-only calling the embedding provider for chunks with an empty ``embedding``
-field.  This is the fast path for non-DR-critical reindexing.
+Default behaviour (flag absent): reuse stored embeddings only when the
+legacy pre-v0.2 Postgres column still exists.  On the current schema,
+migration 0004 removed that column, so embeddings are regenerated from
+``chunk.text`` automatically.
 
 For true DR validation (where you need to prove that the embedding
 provider + SoT text can reproduce the stored vectors), always pass
@@ -68,10 +69,58 @@ from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_constants import COLLECTION_NAME_PREFIX
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 #: AP5 flag: exported so tests can assert the flag exists and is parseable.
 RECOMPUTE_EMBEDDINGS_FLAG: str = "--recompute-embeddings"
+
+
+def _chunk_projection(*, include_embedding: bool) -> list[Any]:
+    """Return an explicit chunk projection compatible with migration 0004."""
+    columns: list[Any] = [
+        Chunk.id.label("id"),
+        Chunk.document_id.label("document_id"),
+        Chunk.ord.label("ord"),
+        Chunk.text.label("text"),
+        Chunk.symbol.label("symbol"),
+        Chunk.embedding_model.label("embedding_model"),
+        Chunk.embedding_provider.label("embedding_provider"),
+        Chunk.parser_version.label("parser_version"),
+        Chunk.chunker_strategy.label("chunker_strategy"),
+        Chunk.chunk_metadata.label("metadata"),
+    ]
+    if include_embedding:
+        columns.append(Chunk.embedding.label("embedding"))
+    return columns
+
+
+async def _has_legacy_embedding_column(db_session: Any) -> bool:
+    """Return whether this database predates the Qdrant cutover migration."""
+    result = await db_session.execute(
+        text(
+            "SELECT EXISTS ("
+            "SELECT 1 FROM information_schema.columns "
+            "WHERE table_schema = current_schema() "
+            "AND table_name = 'chunks' AND column_name = 'embedding'"
+            ")"
+        )
+    )
+    return bool(result.scalar_one())
+
+
+async def _reset_qdrant_collections(
+    qdrant_client: AsyncQdrantClient,
+    vector_store: QdrantVectorStore,
+) -> None:
+    """Drop managed collections, then bootstrap the active collection again."""
+    for collection in (await qdrant_client.get_collections()).collections:
+        if collection.name.startswith(COLLECTION_NAME_PREFIX):
+            await qdrant_client.delete_collection(collection.name)
+            print(f"qdrant: dropped collection {collection.name}")
+
+    # connect() bootstraps only after close() clears the store's lifecycle state.
+    await vector_store.close()
+    await vector_store.connect()
 
 
 class EntityWrapper:
@@ -329,6 +378,8 @@ async def main() -> None:
     # Collect workspace IDs (tenant_id values from active sources)
     workspace_ids: list[uuid.UUID] = []
     async with session_factory() as db_session:
+        has_legacy_embedding = await _has_legacy_embedding_column(db_session)
+
         src_stmt = select(Source).where(Source.status == SourceStatus.active)
         src_result = await db_session.execute(src_stmt)
         sources_all = src_result.scalars().all()
@@ -367,10 +418,7 @@ async def main() -> None:
         print(f"neo4j: deleted {summary.counters.nodes_deleted} nodes")
 
     # 2. Wipe Qdrant
-    for c in (await qdrant_client.get_collections()).collections:
-        if c.name.startswith(COLLECTION_NAME_PREFIX):
-            await qdrant_client.delete_collection(c.name)
-            print(f"qdrant: dropped collection {c.name}")
+    await _reset_qdrant_collections(qdrant_client, vector_store)
 
     print("Rebuilding projections from Postgres...")
 
@@ -411,9 +459,13 @@ async def main() -> None:
                 print(f"  Rebuilding document: {doc.uri} (ext_id: {doc.external_id})")
 
                 # Chunks are ordered by ord (already stable per AP5 audit).
-                chunk_stmt = select(Chunk).where(Chunk.document_id == doc.id).order_by(Chunk.ord)
+                chunk_stmt = (
+                    select(*_chunk_projection(include_embedding=has_legacy_embedding))
+                    .where(Chunk.document_id == doc.id)
+                    .order_by(Chunk.ord)
+                )
                 chunk_result = await db_session.execute(chunk_stmt)
-                chunks = chunk_result.scalars().all()
+                chunks = chunk_result.mappings().all()
 
                 if not chunks:
                     continue
@@ -423,7 +475,8 @@ async def main() -> None:
                 for chunk in chunks:
                     # AP5 --recompute-embeddings: always recompute from text.
                     # Default path (flag absent): reuse stored embedding when present.
-                    if recompute_embeddings or not chunk.embedding:
+                    stored_embedding = chunk.get("embedding")
+                    if recompute_embeddings or not stored_embedding:
                         if recompute_embeddings:
                             print(
                                 f"    Recomputing embedding for chunk {chunk.id} from SoT text..."
@@ -433,14 +486,14 @@ async def main() -> None:
                         vectors = await embedding_provider.embed([chunk.text])
                         embedding = vectors[0]
                     else:
-                        embedding = chunk.embedding
+                        embedding = stored_embedding
 
                     payload: ChunkPayload = {
                         "ord": int(chunk.ord),
                         "text": str(chunk.text),
                         "embedding": list(embedding),
                         "symbol": chunk.symbol,
-                        "metadata": dict(chunk.chunk_metadata or {}),
+                        "metadata": dict(chunk.metadata or {}),
                         "embedding_model": str(chunk.embedding_model or ""),
                         "embedding_provider": str(chunk.embedding_provider or ""),
                         "parser_version": str(chunk.parser_version or ""),
@@ -480,14 +533,16 @@ async def main() -> None:
                 wrapped_entities = [EntityWrapper(ent, workspace_id) for ent in entities]
                 wrapped_edges = [EdgeWrapper(edge, workspace_id) for edge in edges]
 
-                if wrapped_entities:
-                    await graph_store.upsert_graph(
-                        source_id=source.id,
-                        document_id=doc.id,
-                        entities=wrapped_entities,
-                        edges=wrapped_edges,
-                        version=doc.doc_version,
-                    )
+                # An empty graph projection is still a successfully processed
+                # document version and must advance the Neo4j checkpoint.
+                await graph_store.upsert_graph(
+                    source_id=source.id,
+                    document_id=doc.id,
+                    entities=wrapped_entities,
+                    edges=wrapped_edges,
+                    workspace_id=workspace_id,
+                    version=doc.doc_version,
+                )
 
     print("Rebuild complete.  Running post-rebuild verification...")
 

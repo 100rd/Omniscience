@@ -84,9 +84,10 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra local
 
       - name: Run database migrations
+        working-directory: packages/core
         env:
           DATABASE_URL: postgresql+asyncpg://omniscience:dr_drill_test@localhost:5432/omniscience_dr_drill
         run: uv run alembic upgrade head
@@ -125,7 +126,7 @@ jobs:
           QDRANT_HOST: localhost
           QDRANT_HTTP_PORT: "6333"
           QDRANT_GRPC_PORT: "6334"
-          OMNISCIENCE_EMBEDDING_PROVIDER: local
+          EMBEDDING_PROVIDER: local
         # Exit codes:
         #   0 — rebuild + verification passed, RTO met
         #   2 — RTO exceeded
@@ -133,6 +134,7 @@ jobs:
         run: |
           uv run python scripts/rebuild_all_projections.py \
             --yes \
+            --recompute-embeddings \
             --rto-seconds "${{ steps.rto.outputs.rto_seconds }}"
 
       - name: Verify-only pass (idempotency check)
@@ -146,7 +148,7 @@ jobs:
           QDRANT_HOST: localhost
           QDRANT_HTTP_PORT: "6333"
           QDRANT_GRPC_PORT: "6334"
-          OMNISCIENCE_EMBEDDING_PROVIDER: local
+          EMBEDDING_PROVIDER: local
         run: |
           uv run python scripts/rebuild_all_projections.py \
             --verify-only \
@@ -161,6 +163,7 @@ jobs:
           QDRANT_HOST: localhost
           QDRANT_HTTP_PORT: "6333"
           QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
           OMNISCIENCE_DR_DRILL: "1"
         run: |
           uv run pytest tests/test_dr_rebuild.py -v --no-header

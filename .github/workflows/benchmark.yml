@@ -111,25 +111,35 @@ jobs:
         if: matrix.vendor == 'holmesgpt'
         run: |
           docker pull "${{ steps.pin.outputs.holmes_image }}"
-          docker run -d --name holmes -p 8090:8080 \
+          docker run -d --name holmes -p 8090:5050 \
             -e OPENAI_API_KEY="${OPENAI_API_KEY:-}" \
-            "${{ steps.pin.outputs.holmes_image }}" server
-          # Wait for /health (max 60s)
+            --entrypoint python \
+            "${{ steps.pin.outputs.holmes_image }}" /app/server.py
+          # HolmesGPT 0.16.1 exposes FastAPI docs but no dedicated health route.
           for _ in $(seq 1 30); do
-            if curl -sf http://localhost:8090/health > /dev/null; then break; fi
+            if curl -sf http://localhost:8090/docs > /dev/null; then break; fi
             sleep 2
           done
+          curl -sf http://localhost:8090/docs > /dev/null || {
+            docker logs holmes
+            exit 1
+          }
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
 
       - name: Start Omniscience via docker compose (for omniscience vendor only)
         if: matrix.vendor == 'omniscience'
         run: |
+          cp .env.example .env
           docker compose up -d
           for _ in $(seq 1 60); do
             if curl -sf http://localhost:8000/health > /dev/null; then break; fi
             sleep 2
           done
+          curl -sf http://localhost:8000/health > /dev/null || {
+            docker compose logs
+            exit 1
+          }
 
       - name: Run benchmark for ${{ matrix.vendor }}
         env:
@@ -147,6 +157,15 @@ jobs:
           name: bench-nightly-${{ matrix.vendor }}-${{ github.run_id }}
           path: bench-${{ matrix.vendor }}.json
           retention-days: 90
+
+      - name: Stop live vendor services
+        if: always()
+        run: |
+          if [ "${{ matrix.vendor }}" = "omniscience" ]; then
+            docker compose down -v
+          elif [ "${{ matrix.vendor }}" = "holmesgpt" ]; then
+            docker rm -f holmes 2>/dev/null || true
+          fi
 
   # -------------------------------------------------------------------
   # Roll up the per-vendor artifacts into one matrix.json after nightly.
