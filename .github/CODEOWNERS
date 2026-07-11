@@ -1,0 +1,6 @@
+# Human-owned architecture and execution contracts.
+/docs/decisions/ @100rd
+/specs/ @100rd
+/docs/specs/ @100rd
+/scripts/validate_governance.py @100rd
+/tests/test_governance_validator.py @100rd

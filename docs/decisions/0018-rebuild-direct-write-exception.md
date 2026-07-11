@@ -1,10 +1,14 @@
-# ADR-0015: Rebuild script as sanctioned DR exception to the single-writer invariant
+# ADR-0018: Rebuild script as sanctioned DR exception to the single-writer invariant
 
 **Status**: Accepted  
 **Date**: 2026-06-24  
 **Deciders**: Platform Engineering  
 **Supersedes**: —  
-**Related**: ADR-0012 (outbox pattern), consilium-v8 AP1
+**Related**: transactional outbox implementation, consilium-v8 AP1
+
+> **Registry repair (2026-07-11):** this accepted decision was originally assigned
+> `ADR-0015`, colliding with the earlier multiqlti integration ADR. It is now canonically
+> `ADR-0018`; git history preserves the legacy identifier. The decision itself is unchanged.
 
 ---
 

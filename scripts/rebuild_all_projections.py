@@ -19,13 +19,13 @@ single-writer invariant (AP1, consilium-v8).  This is permitted ONLY when:
 After the rebuild completes, trigger a reconcile scan to verify projections:
     POST /admin/reconcile/trigger
 
-See docs/decisions/0015-rebuild-direct-write-exception.md for rationale.
+See docs/decisions/0018-rebuild-direct-write-exception.md for rationale.
 
 RTO (Recovery Time Objective)
 ==============================
 Default budget: 900 seconds (15 minutes).  Override with --rto-seconds N.
 The script exits with code 2 if elapsed time exceeds the budget.
-See docs/decisions/0015-rebuild-direct-write-exception.md §RTO for guidance.
+See docs/decisions/0018-rebuild-direct-write-exception.md §RTO for guidance.
 
 --recompute-embeddings (AP5)
 =============================

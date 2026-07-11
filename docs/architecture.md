@@ -2,11 +2,11 @@
 
 > **Status as of v0.2 (Epic #96 cutover, #105).** The diagrams and
 > descriptions below have been updated to reflect the Neo4j +
-> Qdrant backend split. Postgres is retained for **operational
-> metadata only** — sources, documents (row-level), chunks (text
-> + lineage), ingestion runs, API tokens, workspaces. All
-> chunk-level embeddings live in Qdrant; all graph data (entities
-> + edges) lives in Neo4j. Hybrid search is composed by
+> Qdrant backend split. Postgres is the **authoritative ingestion and recovery
+> ledger** — content + lineage, versions, entities/outbox records, sources,
+> ingestion runs, API tokens, workspaces, and governance metadata. Qdrant and
+> Neo4j are rebuildable query projections; embeddings live in Qdrant and graph
+> data lives in Neo4j. Hybrid search is composed by
 > `GraphRAGComposer` (ADR-0005 / ADR-0006). For the original v0.1
 > layout with pgvector as the single store of truth, see the
 > `v0.1.x` tag.
@@ -24,7 +24,9 @@ flowchart TB
         QD["Qdrant<br/>embeddings + payload index"]
         PG["Postgres<br/>metadata · lineage · tokens"]
     end
-    ING["Ingestion Pipeline<br/>NATS → parse → chunk → embed → extract → index<br/>DLQ + retry · content-hash dedup · tombstones"] -->|"writes"| STORES
+    ING["Ingestion Pipeline<br/>NATS → parse → chunk → embed → extract → index<br/>DLQ + retry · content-hash dedup · tombstones"] -->|"atomic ledger + outbox"| PG
+    PG -->|"ordered projection"| NEO
+    PG -->|"ordered projection"| QD
     CONN["Source Connector Framework<br/>git · fs · Slack · Jira · Grafana · ArgoCD · k8s · AWS · tf-state<br/>push via webhooks · pull via polling · watch"] -->|"document.changed"| ING
 ```
 
@@ -58,9 +60,14 @@ Failures flow to DLQ. Retries are bounded with exponential backoff. Freshness SL
 
 **v0.2+ backend split** (ADR-0005 + ADR-0006; see also [ADR-0008](decisions/0008-bitemporal-schema-for-neo4j.md)):
 
-- **Postgres** (`documents`, `chunks`, `ingestion_runs`, `sources`) — operational metadata, lineage, content-hash dedup, tombstones. No embeddings column after cutover.
-- **Qdrant** — chunk embeddings (named vector `dense_primary`) + sparse BM25 vectors (named vector `sparse_bm25`) + per-point payload (workspace_id, source_id, text, metadata, bitemporal fields). One collection per embedding model × dimension.
-- **Neo4j** — entities, edges, ownership / dependency graph. Bitemporal properties (`valid_from`, `valid_to`, `recorded_at`) per ADR-0008.
+- **Postgres** — authoritative content/lineage, versions, entities/outbox records, sources, operations,
+  tombstones, and recovery/governance state. It is the source for reconciliation and projection rebuild.
+- **Qdrant** — replaceable vector projection: chunk embeddings (dense + sparse BM25) and payload indexes.
+- **Neo4j** — replaceable graph projection: entities, edges, ownership/dependency and bitemporal state.
+
+Normal graph/vector writes flow from the transactional outbox through the single projection consumer.
+Reconciliation compares ledger and projection checkpoints and boundedly re-emits drift. ADR-0018 permits
+one direct-write exception for human-operated rebuild into wiped projections.
 
 **Bitemporal write path** (Stage 1, `refactor/bitemporal-vector-hybrid`): when a document's `content_hash` changes, old Qdrant points are **end-dated** (`valid_to = now()`) rather than hard-deleted. `as_of=T` queries on Qdrant return the chunk version valid at T, consistent with the Neo4j graph state at T (ADR-0008 §6).
 
@@ -119,9 +126,8 @@ stack, see the [Lite deployment profile](#lite-deployment-profile) below.
 
 ### Managed Postgres
 
-Nothing in Omniscience requires the built-in Postgres. Postgres holds operational
-metadata only (sources, documents, chunk text + lineage, ingestion runs, tokens,
-workspaces) — embeddings live in Qdrant and the graph lives in Neo4j as of v0.2
+Nothing in Omniscience requires the built-in Postgres container, but a compatible Postgres service is
+load-bearing. It holds the authoritative ledger and recovery state; embeddings live in Qdrant and the graph lives in Neo4j as of v0.2
 (#105), so the `pgvector` extension is **no longer required**. Any standard
 Postgres 14+ works:
 

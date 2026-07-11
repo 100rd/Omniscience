@@ -38,7 +38,7 @@ through the outbox; sanction the rebuild script as a documented DR exception (AD
 - **REST** (`rest/entities.py:386,413`): replace direct `merge_nodes`/`unmerge_node` with `OutboxEvent(event_type="entity.merge"/"entity.unmerge", entity_id=..., payload=...)`. Inject `session_factory`. Response stays `200 {"success": true}` (queued semantics; up to 1 outbox tick before visible). Keep the existing AP6 admin-scope check on merge; ADD the same check to unmerge.
 - **Linker** (`linker.py:70-82`): inject `session_factory`; emit `OutboxEvent(event_type="edge.upsert", entity_id=ent_a.id, payload=EdgeUpsertEvent(...))` instead of `graph_store.upsert_edge()`.
 - **Operator-graph** (`ingestion/operator_graph.py:301`, wired from `worker.py:376`): add optional `session_factory` param; when present, emit one `entity.upsert`/`edge.upsert` OutboxEvent per entity/edge; else legacy direct write with deprecation log.
-- **Rebuild** (`scripts/rebuild_all_projections.py`): SANCTIONED exception. Add a structured warning header + new `docs/adrs/0015-rebuild-direct-write-exception.md` (precondition: empty/wiped stores; postcondition: run reconcile scan; rationale: NATS may be down during DR).
+- **Rebuild** (`scripts/rebuild_all_projections.py`): SANCTIONED exception. Realized by ADR-0018 (originally assigned the colliding legacy id ADR-0015): precondition empty/wiped stores; postcondition reconcile scan; NATS may be down during DR.
 
 ### Worker/consumer handlers + mypy fixes
 - `outbox_worker.py`: `OutboxEvent.processed == False` (not `not ...`); per-branch typed vars (line 93); add `entity.merge`/`entity.unmerge` routing to NATS subjects.

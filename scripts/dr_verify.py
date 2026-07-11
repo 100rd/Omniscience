@@ -34,7 +34,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 #: Default Recovery Time Objective for a full rebuild.
-#: Documented in docs/decisions/0015-rebuild-direct-write-exception.md.
+#: Documented in docs/decisions/0018-rebuild-direct-write-exception.md.
 #: Override at runtime with --rto-seconds N.
 DEFAULT_RTO_SECONDS: int = 900
 

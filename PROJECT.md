@@ -24,7 +24,8 @@ See [docs/vision.md](docs/vision.md) for the full project description.
 - **ORM**: SQLAlchemy 2 + Alembic (operational metadata)
 - **Graph store (target)**: **Neo4j** — topology, causal edges, temporal state
 - **Vector store (target)**: **Qdrant** — semantic embeddings
-- **Database (current)**: PostgreSQL 16 (operational metadata only)
+- **Authoritative ledger**: PostgreSQL 16 (content/lineage, versions, entities/outbox, operations/governance)
+- **Query projections**: Neo4j graph + Qdrant vectors, rebuilt/reconciled from the ledger
 - **Queue**: NATS JetStream
 - **Parsing**: tree-sitter, markdown-it-py
 - **Embeddings**: Ollama (default), OpenAI/Voyage (pluggable)
@@ -76,3 +77,5 @@ Wave 9: #20 (Deploy) + #21 (Integration guides)
 - [MCP API](docs/api/mcp.md)
 - [REST API](docs/api/rest.md)
 - [ADRs](docs/decisions/)
+- [Capability SPECs](specs/SPEC-INDEX.md)
+- [Task SPEC queue](docs/specs/README.md)
