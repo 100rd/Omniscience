@@ -9,6 +9,11 @@ dependencies = [
     "omniscience-core",
 ]
 
+[project.optional-dependencies]
+local = [
+    "sentence-transformers>=3.0,<6",
+]
+
 [tool.uv.sources]
 omniscience-core = { workspace = true }
 

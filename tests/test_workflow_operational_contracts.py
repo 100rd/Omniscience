@@ -33,10 +33,12 @@ def test_dr_migrations_run_from_alembic_project() -> None:
 
 def test_dr_rebuild_uses_the_configured_local_embedding_provider() -> None:
     workflow = _workflow("dr-drill.yml")
+    install = _step(workflow, "dr-drill", "Install dependencies")
     rebuild = _step(workflow, "dr-drill", "Run DR rebuild with RTO enforcement")
     verify = _step(workflow, "dr-drill", "Verify-only pass (idempotency check)")
     integration = _step(workflow, "dr-drill", "Run DR unit + integration tests")
 
+    assert "uv sync --frozen --extra local" in install["run"]
     assert rebuild["env"]["EMBEDDING_PROVIDER"] == "local"
     assert verify["env"]["EMBEDDING_PROVIDER"] == "local"
     assert integration["env"]["EMBEDDING_PROVIDER"] == "local"

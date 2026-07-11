@@ -84,7 +84,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: uv sync --frozen --extra local
 
       - name: Run database migrations
         working-directory: packages/core

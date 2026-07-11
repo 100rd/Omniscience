@@ -231,15 +231,19 @@ async def test_local_close_is_idempotent(local_provider: LocalEmbeddingProvider)
 
 def test_local_provider_import_error_when_st_missing() -> None:
     """Helpful ImportError raised when sentence-transformers is not installed."""
-    _remove_fake_st()
-    with pytest.raises(ImportError, match="sentence-transformers"):
+    with (
+        patch.dict(sys.modules, {"sentence_transformers": None}),
+        pytest.raises(ImportError, match="sentence-transformers"),
+    ):
         LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
 
 
 def test_local_provider_import_error_mentions_install_hint() -> None:
     """The ImportError message must include install instructions."""
-    _remove_fake_st()
-    with pytest.raises(ImportError, match="pip install sentence-transformers"):
+    with (
+        patch.dict(sys.modules, {"sentence_transformers": None}),
+        pytest.raises(ImportError, match="pip install sentence-transformers"),
+    ):
         LocalEmbeddingProvider(model_name="all-MiniLM-L6-v2")
 
 
