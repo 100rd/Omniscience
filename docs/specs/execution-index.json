@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "task_id": "gh-issue-355",
+      "task_spec": "docs/specs/gh-issue-355-set-sources-tenant-id-from-the-token-workspace-on-create.md",
+      "status": "implemented",
+      "pull_request": "https://github.com/100rd/Omniscience/pull/359",
+      "implementation_commit": "deffadb903b400a767dc3c4018b84a7a268344e0",
+      "merge_commit": "d050eba8ffe6d025cc0db75ebc4dfc5a60dba937",
+      "verification": {
+        "provenance": "reported-github",
+        "check_rollup": {
+          "success": 13,
+          "skipped": 2,
+          "other": 0
+        },
+        "test_evidence": {
+          "red": {"failed": 2, "passed": 15},
+          "green": {"passed": 17},
+          "broader": {"passed": 102},
+          "protected_ci": {"passed": 3535, "skipped": 6, "coverage_percent": 88}
+        }
+      }
+    }
+  ]
+}

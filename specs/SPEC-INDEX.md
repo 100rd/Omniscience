@@ -14,6 +14,7 @@ each contract. Implementation and verification remain separate states backed by 
 | [SPEC-SOT](SPEC-SOT-ledger-and-projections.md) | Ledger and projections | Postgres authority, outbox, Neo4j/Qdrant convergence |
 | [SPEC-ACL](SPEC-ACL-workspace-isolation.md) | Workspace isolation | server-derived tenant scope and non-disclosure |
 | [SPEC-OPS](SPEC-OPS-operational-evidence.md) | Operational evidence | CI, conformance, benchmark, DR, documentation consistency |
+| [SPEC-MCP](SPEC-MCP-stable-contract-v1.md) | Stable MCP v1 | content-addressed wire contract, freshness, token profile, severance |
 
 ## Dependency order
 
@@ -24,6 +25,7 @@ ADR-0019
    +--> SPEC-SOT --> SPEC-EV --> SPEC-KP
    +--> SPEC-ACL --------^       |
    +--> SPEC-OPS <---------------+
+   +--> SPEC-EV + SPEC-KP + SPEC-ACL + SPEC-OPS --> SPEC-MCP
 ```
 
 ## Capability SPEC states
