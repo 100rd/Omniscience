@@ -56,6 +56,17 @@ log = structlog.get_logger(__name__)
 # JSON-safe sentinel used instead of +inf for sources that have never synced.
 _INFINITY_JSON_SAFE: float = 1e15
 
+# Tools in this module that never read a Neo4j/Qdrant projection — they only
+# touch Postgres (via ``db_session_factory``), so their results cannot lag a
+# graph/vector projection and are always consistency-"converged". Consumed by
+# ``omniscience_server.mcp.metadata._consistency`` to decide fallback
+# requirements without hardcoding tool names a second time. If you add a read
+# of the graph store or a vector index to any of these three functions, you
+# MUST remove that tool's name from this set.
+NO_PROJECTION_READ_TOOLS: frozenset[str] = frozenset(
+    {"get_document", "list_sources", "source_stats"}
+)
+
 
 # ---------------------------------------------------------------------------
 # search

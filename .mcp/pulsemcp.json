@@ -74,14 +74,21 @@
     }
   },
   "tools": [
-    {"name": "search", "description": "Hybrid retrieval across all indexed sources; returns chunks with citations and freshness metadata."},
-    {"name": "fetch", "description": "Fetch a specific document/chunk by ID."},
-    {"name": "list_sources", "description": "List configured connectors and their freshness state."},
-    {"name": "describe_source", "description": "Describe a connector's schema, throughput, and last-sync time."},
-    {"name": "replay", "description": "Replay the retrieval result an agent would have seen at a past timestamp T."},
     {"name": "blast_radius", "description": "Given an incident or change, return the impacted resources via the topology graph."},
-    {"name": "suggest_runbook", "description": "Match an incident signature against indexed runbooks and return the top candidates with confidence."},
-    {"name": "timeline", "description": "Bitemporal timeline of changes for an entity, queryable as-of any past timestamp."}
+    {"name": "contract_info", "description": "Return the authenticated MCP v1 contract and content-digest pin."},
+    {"name": "find_similar_incidents", "description": "Rank related historical incidents with cited evidence."},
+    {"name": "generate_postmortem", "description": "Render a deterministic, review-only postmortem draft from incident evidence."},
+    {"name": "get_document", "description": "Fetch one complete document and its chunks by ID."},
+    {"name": "get_entity", "description": "Resolve one workspace entity, optionally at a historical as_of."},
+    {"name": "get_related_entities", "description": "Traverse workspace-scoped graph relationships from an entity."},
+    {"name": "incident_timeline", "description": "Reconstruct a cited bitemporal incident timeline."},
+    {"name": "list_entities", "description": "Deterministically enumerate workspace entities with filters."},
+    {"name": "list_sources", "description": "List configured connectors and their freshness state."},
+    {"name": "replay_context", "description": "Replay the evidence visible to a consumer at a historical time."},
+    {"name": "resolve_incident", "description": "Compose grounded incident context from linked sources."},
+    {"name": "search", "description": "Hybrid retrieval across indexed sources with citations, lineage, and freshness metadata."},
+    {"name": "source_stats", "description": "Return source ingestion and freshness details."},
+    {"name": "suggest_runbook", "description": "Match an incident signature against indexed runbooks and return the top candidates with confidence."}
   ],
   "tested_os": ["macos", "linux"],
   "maintainer": {

@@ -180,6 +180,33 @@ async def get_current_token(
         return token
 
 
+async def get_optional_current_token(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = _bearer_dep,
+) -> ApiToken | None:
+    """Resolve optional auth while rejecting any supplied invalid credential.
+
+    This is used only by one-way bootstrap endpoints: absence is meaningful,
+    but a malformed, expired, or revoked credential is never treated as absent.
+    """
+    plaintext, is_bearer = _extract_plaintext(credentials, request)
+    if plaintext is None:
+        return None
+    if not is_bearer:
+        _verify_csrf(request)
+    factory = getattr(request.app.state, "db_session_factory", None)
+    if factory is None:
+        raise _AUTH_ERROR
+    async with factory() as db:
+        token = await _lookup_token(db, plaintext)
+        if token is None:
+            raise _AUTH_ERROR
+        await _update_last_used(db, token)
+        await db.commit()
+        request.state.api_token = token
+        return token
+
+
 # Module-level singleton for use inside require_scope closure
 _current_token_dep: Any = Depends(get_current_token)
 
@@ -211,4 +238,9 @@ def require_scope(
     return _check
 
 
-__all__ = ["_lookup_token", "get_current_token", "require_scope"]
+__all__ = [
+    "_lookup_token",
+    "get_current_token",
+    "get_optional_current_token",
+    "require_scope",
+]

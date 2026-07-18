@@ -1,0 +1,1 @@
+{"$id":"https://omniscience.dev/mcp/v1/schemas/get-document.response.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","allOf":[{"$ref":"response.schema.json"}],"properties":{"chunks":{"items":{"type":"object"},"type":"array"},"document":{"type":"object"}},"required":["document","chunks","meta"],"type":"object"}

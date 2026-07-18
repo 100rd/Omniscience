@@ -121,8 +121,10 @@ def create_mcp_asgi_app(app: FastAPI) -> ASGIApp:
     """
     set_fastapi_app(app)
     # Serve the transport at the sub-app root so, mounted at "/mcp" in the
-    # parent, the endpoint is "/mcp" — not the default "/mcp/mcp" (FastMCP's
-    # streamable_http_path defaults to "/mcp", which doubles under the mount).
+    # parent, the canonical endpoint is "/mcp/" — not the default
+    # "/mcp/mcp" (FastMCP's streamable_http_path defaults to "/mcp", which
+    # doubles under the mount). Starlette redirects the non-canonical
+    # "/mcp" path; credentialed clients must use "/mcp/" directly.
     mcp_server.settings.streamable_http_path = "/"
     starlette_app = mcp_server.streamable_http_app()
     return McpSessionTelemetryMiddleware(starlette_app)

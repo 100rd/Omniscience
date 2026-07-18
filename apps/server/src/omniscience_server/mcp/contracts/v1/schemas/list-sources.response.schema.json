@@ -1,0 +1,1 @@
+{"$id":"https://omniscience.dev/mcp/v1/schemas/list-sources.response.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","allOf":[{"$ref":"response.schema.json"}],"properties":{"sources":{"items":{"type":"object"},"type":"array"}},"required":["sources","meta"],"type":"object"}

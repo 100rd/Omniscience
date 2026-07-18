@@ -1,0 +1,23 @@
+{
+  "$id": "https://omniscience.dev/mcp/v1/schemas/contract-info.response.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "capabilities": {"type": "object"},
+    "commit": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+    "manifest_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "manifest": {"type": "object"},
+    "meta": {"$ref": "meta.schema.json"},
+    "schema_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "schema_digests": {
+      "additionalProperties": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+      "minProperties": 1,
+      "type": "object"
+    },
+    "token_profile_id": {"const": "omniscience-mcp-read-v1"},
+    "tool_registry_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "version": {"const": "1.0.0"}
+  },
+  "required": ["version", "commit", "manifest", "manifest_sha256", "schema_sha256", "schema_digests", "tool_registry_sha256", "token_profile_id", "capabilities", "meta"],
+  "type": "object"
+}

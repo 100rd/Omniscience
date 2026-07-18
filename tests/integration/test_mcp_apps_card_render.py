@@ -29,7 +29,7 @@ AP4 contract (issue #238 update):
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -182,7 +182,9 @@ def _auth_token(workspace_id: uuid.UUID | None) -> tuple[MagicMock, str]:
     token.scopes = [Scope.search.value]
     token.token_prefix = prefix
     token.hashed_token = hash_token(plaintext)
-    token.expires_at = None
+    token.profile_id = "omniscience-mcp-read-v1"
+    token.created_at = datetime.now(UTC)
+    token.expires_at = token.created_at + timedelta(days=30)
     token.is_active = True
     return token, plaintext
 
@@ -446,6 +448,10 @@ class TestMcpAppsCardRender:
             assert key in apps_response
             if key == "effective_as_of":
                 assert isinstance(apps_response[key], str)
+                continue
+            if key == "meta":
+                assert apps_response[key]["contract"] == value["contract"]
+                assert apps_response[key]["fallback"] == value["fallback"]
                 continue
             assert apps_response[key] == value
         # And the Apps response has exactly one extra key.

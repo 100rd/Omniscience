@@ -16,10 +16,11 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import omniscience_server.routes.tokens as token_routes
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
-from omniscience_core.auth.tokens import generate_token, hash_token
+from omniscience_core.auth.tokens import MCP_READ_PROFILE_ID, generate_token, hash_token
 from omniscience_core.db.models import ApiToken
 from omniscience_core.db.schemas import ApiTokenRead
 from omniscience_server.routes.tokens import router as tokens_router
@@ -73,7 +74,7 @@ def _make_session(
 ) -> AsyncMock:
     session = AsyncMock()
 
-    async def _execute(_stmt: Any) -> Any:
+    async def _execute(_stmt: Any, _params: Any = None) -> Any:
         result = MagicMock()
         items = scalars or []
         result.scalars.return_value.all.return_value = items
@@ -97,6 +98,7 @@ def _build_app(
     *,
     include_db: bool = True,
     include_settings: bool = False,
+    authenticated: bool = True,
 ) -> FastAPI:
     app = FastAPI()
     if include_db:
@@ -107,6 +109,10 @@ def _build_app(
         settings.environment = "production"
         app.state.settings = settings
     app.include_router(tokens_router)
+    if authenticated:
+        admin = _make_token_obj(scopes=["admin"])
+        app.dependency_overrides[token_routes._admin_dep.dependency] = lambda: admin
+        app.dependency_overrides[token_routes._optional_token_dep.dependency] = lambda: admin
     return app
 
 
@@ -181,6 +187,161 @@ async def test_create_token_with_expiry() -> None:
             )
 
     assert resp.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_admin_bootstrap_never_reopens_after_any_token_row() -> None:
+    existing_admin = _make_token_obj(scopes=["admin"], is_active=False)
+    session = _make_session(scalars=[existing_admin])
+    app = _build_app(session, authenticated=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post(
+            "/api/v1/tokens",
+            json={"name": "second-admin", "scopes": ["admin"]},
+        )
+
+    assert response.status_code == 401
+    session.add.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_empty_database_bootstrap_allows_only_exact_admin() -> None:
+    session = _make_session(scalars=[])
+    admin = _make_token_obj(scopes=["admin"])
+    with (
+        patch(
+            "omniscience_server.routes.tokens.generate_token", return_value=("secret", "sk_boot_")
+        ),
+        patch("omniscience_server.routes.tokens.hash_token", return_value="hash"),
+        patch(
+            "omniscience_server.routes.tokens.ApiTokenRead.model_validate",
+            return_value=_make_read_model(admin),
+        ),
+    ):
+        app = _build_app(session, authenticated=False)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            rejected = await client.post(
+                "/api/v1/tokens", json={"name": "search", "scopes": ["search"]}
+            )
+            accepted = await client.post(
+                "/api/v1/tokens", json={"name": "admin", "scopes": ["admin"]}
+            )
+
+    assert rejected.status_code == 403
+    assert accepted.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_acquires_advisory_lock_before_emptiness_check() -> None:
+    """The bootstrap path takes the advisory xact-lock before the emptiness SELECT.
+
+    A genuine concurrent-request race is not reproducible on this single
+    mocked session / one ASGI harness (see FIX 1 report note), so this test
+    proves the code path taken rather than observed concurrent behavior:
+    ``pg_advisory_xact_lock`` is the first statement executed on the
+    bootstrap path, using the named constant lock key.
+    """
+    session = _make_session(scalars=[])
+    executed: list[tuple[Any, Any]] = []
+    original_execute = session.execute
+
+    async def _spy_execute(stmt: Any, params: Any = None) -> Any:
+        executed.append((stmt, params))
+        return await original_execute(stmt, params)
+
+    session.execute = _spy_execute
+    admin = _make_token_obj(scopes=["admin"])
+
+    with (
+        patch(
+            "omniscience_server.routes.tokens.generate_token",
+            return_value=("secret", "sk_boot_"),
+        ),
+        patch("omniscience_server.routes.tokens.hash_token", return_value="hash"),
+        patch(
+            "omniscience_server.routes.tokens.ApiTokenRead.model_validate",
+            return_value=_make_read_model(admin),
+        ),
+    ):
+        app = _build_app(session, authenticated=False)
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.post(
+                "/api/v1/tokens", json={"name": "boot", "scopes": ["admin"]}
+            )
+
+    assert resp.status_code == 201
+    assert len(executed) >= 2
+    first_stmt, first_params = executed[0]
+    assert "pg_advisory_xact_lock" in str(first_stmt)
+    assert first_params == {"k": token_routes._BOOTSTRAP_ADVISORY_LOCK_KEY}
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_closes_immediately_after_first_created_token() -> None:
+    """A second sequential bootstrap attempt is rejected once a row exists.
+
+    Exercises the lock-guarded bootstrap path end-to-end for the invariant
+    FIX 1 protects: after any row appears in ``api_tokens``, bootstrap never
+    reopens. True inter-request concurrency can't be reproduced on one
+    mocked session (see module docstring / FIX 1 report note); this proves
+    the sequential-request invariant instead.
+    """
+    created_admin = _make_token_obj(scopes=["admin"])
+    first_session = _make_session(scalars=[])
+    second_session = _make_session(scalars=[created_admin])
+
+    app = FastAPI()
+    app.state.db_session_factory = MagicMock(side_effect=[first_session, second_session])
+    app.include_router(tokens_router)
+
+    with (
+        patch(
+            "omniscience_server.routes.tokens.generate_token",
+            return_value=("secret", "sk_boot_"),
+        ),
+        patch("omniscience_server.routes.tokens.hash_token", return_value="hash"),
+        patch(
+            "omniscience_server.routes.tokens.ApiTokenRead.model_validate",
+            return_value=_make_read_model(created_admin),
+        ),
+    ):
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            first = await client.post(
+                "/api/v1/tokens", json={"name": "boot-1", "scopes": ["admin"]}
+            )
+            second = await client.post(
+                "/api/v1/tokens", json={"name": "boot-2", "scopes": ["admin"]}
+            )
+
+    assert first.status_code == 201
+    assert second.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_create_token_with_invalid_bearer_is_401_not_bootstrap() -> None:
+    """A supplied-but-invalid Bearer token 401s and never falls through to bootstrap.
+
+    ``get_optional_current_token`` must raise on a malformed/unrecognized
+    credential rather than treat it as "no credential supplied" — otherwise
+    an attacker holding a garbage token could still hit the bootstrap path.
+    """
+    session = _make_session(scalars=[])
+    app = _build_app(session, authenticated=False)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.post(
+            "/api/v1/tokens",
+            json={"name": "attempt", "scopes": ["admin"]},
+            headers={"Authorization": "Bearer sk_bad_0000000000000000000000"},
+        )
+
+    assert resp.status_code == 401
+    # The route body (which would mint a bootstrap admin token) must never run.
+    session.add.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -314,6 +475,27 @@ async def test_delete_token_not_found_returns_404() -> None:
 
     assert resp.status_code == 404
     assert resp.json()["detail"] == "Token not found"
+
+
+@pytest.mark.asyncio
+async def test_delete_token_with_mcp_read_profile_id_returns_409() -> None:
+    """DELETE on a token with the MCP read profile_id is rejected with 409.
+
+    Such tokens must be revoked via the dedicated admin-authenticated
+    profile-revoke endpoint (DELETE .../profiles/omniscience-mcp-read-v1/{id}),
+    not the generic token-delete route.
+    """
+    token_id = uuid.uuid4()
+    tok = _make_token_obj(token_id=token_id)
+    tok.profile_id = MCP_READ_PROFILE_ID
+
+    session = _make_session(get_result=tok)
+    app = _build_app(session)
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.delete(f"/api/v1/tokens/{token_id}")
+
+    assert resp.status_code == 409
 
 
 @pytest.mark.asyncio

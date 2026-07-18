@@ -47,7 +47,10 @@ def _make_token(
     token.workspace_id = workspace_id
     token.token_prefix = "sk_t"
     token.is_active = True
-    token.expires_at = None
+    token.profile_id = "omniscience-mcp-read-v1"
+    issued_at = datetime.now(UTC)
+    token.created_at = issued_at
+    token.expires_at = issued_at + timedelta(days=30)
     return token
 
 
@@ -80,6 +83,17 @@ def _mock_factory() -> MagicMock:
     factory.return_value.__aenter__ = AsyncMock(return_value=session)
     factory.return_value.__aexit__ = AsyncMock(return_value=False)
     return factory
+
+
+def _assert_v1_additive_response(
+    result: dict[str, Any],
+    legacy: dict[str, Any],
+) -> None:
+    """Assert legacy top-level fields survive and the v1 envelope is additive."""
+    for key, value in legacy.items():
+        assert result[key] == value
+    assert result["meta"]["contract"]["version"] == "1.0.0"
+    assert result["meta"]["workspace_id"] == str(_WS_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -370,7 +384,7 @@ async def test_search_tool_happy_path() -> None:
     ):
         result = await tool_fn(query="hello", ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -433,7 +447,7 @@ async def test_get_document_tool_happy_path() -> None:
     ):
         result = await tool_fn(document_id=str(uuid.uuid4()), ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -540,7 +554,7 @@ async def test_get_related_entities_happy_path() -> None:
     ):
         result = await tool_fn(entity_name="svc.api", ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -649,7 +663,7 @@ async def test_get_entity_happy_path() -> None:
     ):
         result = await tool_fn(entity_name="svc.api", ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -714,7 +728,7 @@ async def test_list_sources_happy_path() -> None:
     from omniscience_server.mcp.server import list_sources
 
     tool_fn = getattr(list_sources, "fn", list_sources)
-    token = _make_token(scopes=["sources:read"])
+    token = _make_token(scopes=["search"])
     expected: dict[str, Any] = {"sources": []}
 
     with (
@@ -733,7 +747,7 @@ async def test_list_sources_happy_path() -> None:
     ):
         result = await tool_fn(ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 # ---------------------------------------------------------------------------
@@ -747,7 +761,7 @@ async def test_source_stats_happy_path() -> None:
     from omniscience_server.mcp.server import source_stats
 
     tool_fn = getattr(source_stats, "fn", source_stats)
-    token = _make_token(scopes=["sources:read"])
+    token = _make_token(scopes=["search"])
     src_id = str(uuid.uuid4())
     expected: dict[str, Any] = {"source_id": src_id, "doc_count": 42}
 
@@ -767,7 +781,7 @@ async def test_source_stats_happy_path() -> None:
     ):
         result = await tool_fn(source_id=src_id, ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -776,7 +790,7 @@ async def test_source_stats_source_not_found_reraises() -> None:
     from omniscience_server.mcp.server import source_stats
 
     tool_fn = getattr(source_stats, "fn", source_stats)
-    token = _make_token(scopes=["sources:read"])
+    token = _make_token(scopes=["search"])
     src_id = str(uuid.uuid4())
 
     with (
@@ -803,7 +817,7 @@ async def test_source_stats_other_valueerror_reraises() -> None:
     from omniscience_server.mcp.server import source_stats
 
     tool_fn = getattr(source_stats, "fn", source_stats)
-    token = _make_token(scopes=["sources:read"])
+    token = _make_token(scopes=["search"])
 
     with (
         patch(
@@ -959,7 +973,7 @@ async def test_resolve_incident_happy_path() -> None:
     ):
         result = await tool_fn(alert_id="alert://pd/INC-1", ctx=_make_ctx())
 
-    assert result == wrapped
+    _assert_v1_additive_response(result, wrapped)
 
 
 @pytest.mark.asyncio
@@ -1102,7 +1116,7 @@ async def test_blast_radius_happy_path() -> None:
             action_type=ACTION_TYPES[0],
         )
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -1303,7 +1317,7 @@ async def test_suggest_runbook_happy_path() -> None:
     ):
         result = await tool_fn(alert_id="alert://pd/INC-1", ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -1465,7 +1479,7 @@ async def test_find_similar_incidents_happy_path() -> None:
     ):
         result = await tool_fn(incident_id="alert://pd/INC-1", ctx=_make_ctx())
 
-    assert result == expected
+    _assert_v1_additive_response(result, expected)
 
 
 @pytest.mark.asyncio
@@ -1797,6 +1811,7 @@ async def test_generate_postmortem_happy_path() -> None:
     mock_report.incident_id = "INC-1"
     mock_report.alert_id = "alert://pd/INC-1"
     mock_report.template_id = "blameless"
+    mock_report.effective_as_of = _NOW
     mock_report.model_dump.return_value = {"incident_id": "INC-1"}
 
     with (
@@ -1865,22 +1880,29 @@ async def test_generate_postmortem_postmortem_error_rewraps() -> None:
 
 
 @pytest.mark.asyncio
-async def test_incident_timeline_shim_delegates() -> None:
-    """The incident_timeline shim in server.py delegates to incident_timeline_tool."""
+async def test_incident_timeline_shim_finalizes_v1_response() -> None:
+    """The incident_timeline shim authorizes once and adds the v1 envelope."""
     from omniscience_server.mcp.server import incident_timeline
 
     tool_fn = getattr(incident_timeline, "fn", incident_timeline)
+    token = _make_token()
     expected: dict[str, Any] = {"events": []}
 
     with (
         patch(
-            "omniscience_server.mcp.server.incident_timeline_tool",
+            "omniscience_server.mcp.server._resolve_token",
+            new_callable=AsyncMock,
+            return_value=token,
+        ),
+        patch(
+            "omniscience_server.mcp.server.mcp_incident_timeline",
             new_callable=AsyncMock,
             return_value=expected,
-        ) as mock_delegate,
+        ) as mock_tool,
         patch("omniscience_server.mcp.server._get_app", return_value=_make_app()),
+        patch("omniscience_server.mcp.server._record_tool_invocation"),
     ):
         result = await tool_fn(alert_id="alert://pd/INC-1", ctx=_make_ctx())
 
-    assert result == expected
-    mock_delegate.assert_awaited_once()
+    _assert_v1_additive_response(result, expected)
+    mock_tool.assert_awaited_once()

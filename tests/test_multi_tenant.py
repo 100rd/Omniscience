@@ -69,6 +69,8 @@ def _make_token(
     tok.name = "test-token"
     tok.token_prefix = "sk_dev_x"
     tok.scopes = scopes or ["search"]
+    tok.profile_id = None
+    tok.rotated_from_id = None
     tok.workspace_id = workspace_id
     tok.created_at = datetime.now(tz=UTC)
     tok.expires_at = None

@@ -104,7 +104,7 @@
   "remotes": [
     {
       "type": "streamable-http",
-      "url": "https://{host}/mcp",
+      "url": "https://{host}/mcp/",
       "headers": [
         {
           "name": "Authorization",
@@ -121,6 +121,7 @@
       "publishedAt": "2026-05-24T00:00:00Z"
     },
     "io.github.100rd/omniscience": {
+      "contractVersion": "1.0.0",
       "categories": [
         "devtools",
         "retrieval",
@@ -141,14 +142,21 @@
       ],
       "license": "Apache-2.0",
       "tools": [
-        "search",
-        "fetch",
-        "list_sources",
-        "describe_source",
-        "replay",
         "blast_radius",
-        "suggest_runbook",
-        "timeline"
+        "contract_info",
+        "find_similar_incidents",
+        "generate_postmortem",
+        "get_document",
+        "get_entity",
+        "get_related_entities",
+        "incident_timeline",
+        "list_entities",
+        "list_sources",
+        "replay_context",
+        "resolve_incident",
+        "search",
+        "source_stats",
+        "suggest_runbook"
       ],
       "screenshots": [
         "https://raw.githubusercontent.com/100rd/Omniscience/main/docs/assets/screenshots/search.png",
