@@ -616,9 +616,7 @@ def _validate_execution_index_entry(
 
             test_evidence = verification.get("test_evidence")
             if not isinstance(test_evidence, dict) or not test_evidence:
-                errors.append(
-                    f"{surface}: entries[{index}] verification missing test_evidence"
-                )
+                errors.append(f"{surface}: entries[{index}] verification missing test_evidence")
                 well_formed = False
 
     return task_id if well_formed and isinstance(task_id, str) else None

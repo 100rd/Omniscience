@@ -219,11 +219,7 @@ def _consistency(
             "degraded_subsystems": degraded,
             "projection_lag_versions": lag,
         }, "projection_divergence"
-    if (
-        has_lag_evidence
-        or has_watermark_evidence
-        or tool_name in NO_PROJECTION_READ_TOOLS
-    ):
+    if has_lag_evidence or has_watermark_evidence or tool_name in NO_PROJECTION_READ_TOOLS:
         return {
             "status": "converged",
             "degraded_subsystems": [],

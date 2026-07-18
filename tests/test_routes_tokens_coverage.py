@@ -268,9 +268,7 @@ async def test_bootstrap_acquires_advisory_lock_before_emptiness_check() -> None
         app = _build_app(session, authenticated=False)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.post(
-                "/api/v1/tokens", json={"name": "boot", "scopes": ["admin"]}
-            )
+            resp = await client.post("/api/v1/tokens", json={"name": "boot", "scopes": ["admin"]})
 
     assert resp.status_code == 201
     assert len(executed) >= 2
