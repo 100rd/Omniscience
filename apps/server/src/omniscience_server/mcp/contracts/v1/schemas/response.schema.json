@@ -1,0 +1,10 @@
+{
+  "$id": "https://omniscience.dev/mcp/v1/schemas/response.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "meta": {"$ref": "meta.schema.json"}
+  },
+  "required": ["meta"],
+  "type": "object"
+}

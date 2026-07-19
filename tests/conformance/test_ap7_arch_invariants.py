@@ -122,6 +122,8 @@ def test_qdrant_client_only_imported_in_stores() -> None:
 # Retrieval tools: read-only graph / vector / DB lookups.
 _RETRIEVAL_TOOLS = frozenset(
     {
+        # Authenticated read-only contract discovery; no synthesis or write path.
+        "contract_info",
         "search",
         "get_document",
         "get_entity",

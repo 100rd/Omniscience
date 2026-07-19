@@ -152,7 +152,9 @@ def _make_token(
     token.workspace_id = workspace_id
     token.token_prefix = "sk_t"
     token.is_active = True
-    token.expires_at = None
+    token.profile_id = "omniscience-mcp-read-v1"
+    token.created_at = datetime.now(UTC)
+    token.expires_at = token.created_at + timedelta(days=30)
     return token
 
 
@@ -254,7 +256,9 @@ async def test_list_entities_happy_path_delegates() -> None:
             kind="StorageClass", ctx=_make_ctx(), cluster="prod-eu", name="gold"
         )
 
-    assert result == expected
+    assert result["entities"] == expected["entities"]
+    assert result["effective_as_of"] == expected["effective_as_of"]
+    assert result["meta"]["contract"]["version"] == "1.0.0"
     call_kwargs = mock_fn.call_args[1]
     assert call_kwargs["kind"] == "StorageClass"
     assert call_kwargs["cluster"] == "prod-eu"

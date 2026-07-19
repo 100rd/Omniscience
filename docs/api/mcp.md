@@ -2,6 +2,157 @@
 
 Primary interface to Omniscience. Designed for consumption by AI clients: Claude Code, Cursor, Gemini, multiqlti pipelines, custom agents.
 
+**Stable contract:** `1.0.0`
+**Registry:** `15` tools
+**Token profile:** `omniscience-mcp-read-v1`
+
+MCP v0 is superseded by this stable public v1 contract. Compatible additions follow semver; a wire
+removal, rename, type change, or changed field meaning requires a new major contract version. Detailed
+tool examples below retain implementation-era version notes where useful, but the wire boundary is the
+v1 manifest and schemas under `apps/server/src/omniscience_server/mcp/contracts/v1/`.
+
+## Stable v1 tool registry
+
+| Tool | Purpose |
+|---|---|
+| `blast_radius` | Traverse affected topology and impact evidence |
+| `contract_info` | Return the authenticated version/commit/schema/registry pin and capabilities |
+| `find_similar_incidents` | Rank related historical incidents |
+| `generate_postmortem` | Render a governed deterministic postmortem draft |
+| `get_document` | Retrieve one complete document and chunks |
+| `get_entity` | Resolve one workspace entity, optionally at `as_of` |
+| `get_related_entities` | Traverse workspace-scoped graph relationships |
+| `incident_timeline` | Reconstruct a bitemporal incident timeline |
+| `list_entities` | Deterministically enumerate workspace entities |
+| `list_sources` | List used/configured sources and freshness state |
+| `replay_context` | Replay what a consumer could see at a historical time |
+| `resolve_incident` | Compose grounded incident context |
+| `search` | Hybrid retrieval with citations and lineage |
+| `source_stats` | Return source ingestion/freshness details |
+| `suggest_runbook` | Rank matching runbooks with citations |
+
+The committed `tool-registry.json` is authoritative for exact names, scope, workspace requirement,
+and content-addressed input/output schemas. Tool descriptions are explicitly non-normative; wire
+arguments, response fields, and their types are pinned. Documentation and `.mcp` catalogs are checked
+against the registry offline.
+
+## Contract publication and handshake
+
+The committed manifest template includes the contract version, canonical schema-set digest,
+per-schema SHA-256, tool-registry SHA-256, tool count, token-profile id, supported capabilities, and a
+release provenance descriptor. A release bundle is materialized from Git rather than from mutable
+worktree bytes:
+
+```bash
+uv run python -m omniscience_server.mcp.materialize \
+  --source-commit "$(git rev-parse HEAD)"
+```
+
+Materialization requires a clean worktree and an exact non-zero `HEAD`, reads every schema, registry,
+and template byte through that commit, recomputes their digests, and writes an idempotent bundle below
+`build/mcp-v1/sha256/<manifest-sha256>/`. Dirty, historical, malformed, or digest-drifted sources fail
+without publishing a bundle.
+
+After that exact bundle is deployed, qualify the runtime before pinning any consumer:
+
+```bash
+export OMNISCIENCE_MCP_CANARY_TOKEN='<one-time v1 read token>'
+export OMNISCIENCE_MCP_CANARY_WORKSPACE_ID='<token workspace uuid>'
+uv run python -m omniscience_server.mcp.canary \
+  --bundle-dir 'build/mcp-v1/sha256/<manifest-sha256>' \
+  --endpoint 'https://omniscience.example/mcp/'
+```
+
+The canary independently validates the bundle address, manifest, registry, every schema digest, the
+official Streamable HTTP initialization, the exact 15-tool surface and input schemas, and the
+authenticated `contract_info` workspace and pins. The bearer is accepted only through the environment;
+redirects, URL credentials/query strings, non-TLS remote endpoints, and `/mcp` without its canonical
+trailing slash fail closed. Success emits a non-secret JSON receipt. This local mechanism does not itself
+publish a bundle, activate a canary, pin omnius, or constitute the live severance/human evidence required
+to complete the task.
+
+Release builds must set `OMNISCIENCE_RELEASE_BUILD=true`, inject the same commit through
+`OMNISCIENCE_MCP_SOURCE_COMMIT`, and point `OMNISCIENCE_MCP_MANIFEST_PATH` at that bundle's canonical
+`manifest.json`. Runtime accepts neither the commit environment variable alone nor a non-canonical,
+symlinked, commit-mismatched, or package-mismatched manifest. In local development the all-zero sentinel
+remains schema-valid but `fallback.required=true` marks the handshake unpinnable.
+
+`contract_info` is authenticated and returns:
+
+```json
+{
+  "version": "1.0.0",
+  "commit": "<release-git-sha>",
+  "manifest": {
+    "source_commit": {"git_commit": "<release-git-sha>"}
+  },
+  "manifest_sha256": "<sha256>",
+  "schema_sha256": "<aggregate-schema-sha256>",
+  "schema_digests": {
+    "schemas/search.response.schema.json": "<sha256>"
+  },
+  "tool_registry_sha256": "<sha256>",
+  "token_profile_id": "omniscience-mcp-read-v1",
+  "capabilities": {},
+  "meta": {}
+}
+```
+
+Consumers compare all pins with their materialized release manifest before use. An absent handshake,
+development sentinel, version/commit/digest mismatch, or unsupported capability sets
+`fallback.required=true` in consumer policy and selects direct authoritative sources. This worktree
+publication is not terminal execution evidence: although the worktree contains the fail-closed
+materializer, a final bundle and consumer pin require the real clean commit produced by the release
+workflow.
+
+## MCP v1 response metadata
+
+Every successful response preserves its existing top-level payload fields and adds:
+
+```json
+{
+  "meta": {
+    "contract": {
+      "version": "1.0.0",
+      "commit": "<release-git-sha>",
+      "schema_sha256": "<tool-output-schema-sha256>"
+    },
+    "workspace_id": "<token-derived-uuid>",
+    "generated_at": "<utc>",
+    "effective_as_of": "<utc>",
+    "freshness": {
+      "status": "fresh|stale|unknown|degraded",
+      "evaluated_at": "<utc>",
+      "oldest_source_age_seconds": 0,
+      "stale_source_ids": []
+    },
+    "consistency": {
+      "status": "converged|degraded|unknown",
+      "degraded_subsystems": [],
+      "projection_lag_versions": 0
+    },
+    "fallback": {
+      "required": false,
+      "reason": null
+    }
+  }
+}
+```
+
+Freshness uses only complete lineage for sources that actually contributed to the response. Missing
+lineage and never-synced sources are `unknown`, never implicitly fresh. A stale used source, missing
+lineage, relevant Neo4j/Qdrant divergence, or another unusable evidence state returns
+`fallback.required=true`; consumers query direct authoritative sources. The legacy
+`staleness_seconds` payload may remain temporarily, but projection distance is expressed only as
+an explicit integer `projection_lag_versions` in v1 metadata and is never inferred from that legacy
+field. Historical freshness is measured at `effective_as_of`; a current source snapshot newer than the
+requested boundary is insufficient historical lineage and returns `unknown`. Proved source ages are
+conservatively rounded up to integer seconds for portable consumers.
+
+A successful result must be finite JSON and fit the fixed 80,000-byte UTF-8 payload budget. Invalid,
+non-finite, recursive, or oversized output becomes a stable `response_invalid` or `response_too_large`
+MCP tool error; the server never replaces it with a schema-invalid successful truncation object.
+
 ## Transports
 
 - **stdio** — for local CLI-style clients (Claude Code, Cursor)
@@ -14,7 +165,19 @@ All requests require an API token. Clients pass it as:
 - **stdio**: environment variable `OMNISCIENCE_TOKEN`
 - **http**: `Authorization: Bearer <token>` header
 
-Tokens are scoped: `search`, `sources:read`, `sources:write`, `admin`. See [schema.md](../schema.md#api_tokens).
+Stable v1 consumers use exactly the `omniscience-mcp-read-v1` profile: Omniscience admin token API
+issuer, mandatory server-bound workspace, exactly scope `search`, mandatory expiry no more than 30
+days, at most 24 hours of rotation overlap, and audited create/rotate/revoke. Legacy tokens, missing
+workspace/expiry, overlong lifetime, revoked tokens, or any extra scope are rejected. Administrative
+and ingestion APIs may use other profiles, but those profiles are not valid MCP v1 consumer tokens.
+Each rotation creates exactly one successor: the predecessor row is locked, its overlap is shortened,
+and a unique lineage constraint rejects repeated or racing rotation attempts.
+See [schema.md](../schema.md#api_tokens).
+
+The server is pinned to the current stable Python MCP SDK v1 line (`mcp>=1.27,<2`). Moving to SDK v2
+requires a deliberate compatibility review rather than an unconstrained dependency upgrade. The offline
+contract drift gate verifies both the direct server requirement and the resolved `uv.lock` SDK major,
+along with the canary's direct `httpx` client dependency.
 
 ## Tools
 
@@ -158,10 +321,12 @@ Resolve a single entity by name within the caller's workspace. Workspace-scoped 
     "valid_to": null,
     "recorded_at": "2026-04-12T08:00:00Z"
   },
-  "effective_as_of": "2026-04-12T19:25:00Z",
-  "meta": null
+  "effective_as_of": "2026-04-12T19:25:00Z"
 }
 ```
+
+The body fragment above omits the mandatory v1 `meta` block shown in
+[MCP v1 response metadata](#mcp-v1-response-metadata).
 
 When the entity cannot be resolved at the supplied `as_of` (pre-history), `entity` is `null` and `meta.degraded_response = "as_of_before_recorded_history"`.
 
@@ -226,10 +391,12 @@ Compose a recommendation bundle for a single alert: the alert itself, the affect
     }
   ],
   "confidence_score": 0.9,
-  "effective_as_of": "2026-04-12T19:30:00Z",
-  "meta": null
+  "effective_as_of": "2026-04-12T19:30:00Z"
 }
 ```
+
+The body fragment above omits the mandatory v1 `meta` block shown in
+[MCP v1 response metadata](#mcp-v1-response-metadata).
 
 **Confidence score** (v0.1 placeholder; calibrated model lands in [#155](https://github.com/100rd/Omniscience/issues/155)):
 
@@ -302,4 +469,6 @@ All tools return standard MCP error objects. Notable codes:
 
 ## Versioning
 
-MCP API is **v0** until v0.2. Breaking changes allowed. After v0.2, semver applies.
+MCP contract `1.0.0` is stable. Additive optional fields and tools follow semver compatibility rules;
+breaking wire changes ship only in a new major version with a separately pinned manifest and consumer
+migration. MCP v0 remains historical documentation and is not negotiated automatically.

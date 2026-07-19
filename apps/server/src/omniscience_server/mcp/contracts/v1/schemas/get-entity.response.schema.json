@@ -1,0 +1,1 @@
+{"$id":"https://omniscience.dev/mcp/v1/schemas/get-entity.response.schema.json","$schema":"https://json-schema.org/draft/2020-12/schema","allOf":[{"$ref":"response.schema.json"}],"properties":{"effective_as_of":{"format":"date-time","type":"string"},"entity":{"type":["object","null"]}},"required":["entity","effective_as_of","meta"],"type":"object"}

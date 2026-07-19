@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import omniscience_server.routes.tokens as token_routes
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
@@ -92,6 +93,8 @@ def _build_app(session: AsyncMock) -> FastAPI:
     app = FastAPI()
     app.state.db_session_factory = MagicMock(return_value=session)
     app.include_router(tokens_router)
+    admin = _make_token_obj(scopes=["admin"])
+    app.dependency_overrides[token_routes._optional_token_dep.dependency] = lambda: admin
     return app
 
 

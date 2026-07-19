@@ -373,6 +373,12 @@ class ApiToken(Base):
     hashed_token: Mapped[str] = mapped_column(Text, nullable=False)
     token_prefix: Mapped[str] = mapped_column(Text, nullable=False)
     scopes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    profile_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    rotated_from_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("api_tokens.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workspaces.id", ondelete="SET NULL"),
@@ -387,7 +393,11 @@ class ApiToken(Base):
 
     workspace: Mapped[Workspace | None] = relationship("Workspace", back_populates="api_tokens")
 
-    __table_args__ = (Index("ix_api_tokens_workspace_id", "workspace_id"),)
+    __table_args__ = (
+        Index("ix_api_tokens_workspace_id", "workspace_id"),
+        Index("ix_api_tokens_profile_id", "profile_id"),
+        Index("ix_api_tokens_rotated_from_id", "rotated_from_id", unique=True),
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -7,6 +7,37 @@ Two cross-cutting concerns that determine how much **trust** a caller can place 
 
 Together these let an AI client decide: *"is this chunk trustworthy enough for my task, and can I explain the answer to my user?"*
 
+## MCP v1 evidence fitness
+
+The stable MCP `1.0.0` envelope evaluates freshness over **only sources actually used** to form the
+answer. An unrelated stale source in the same workspace does not poison the response. The four states
+are:
+
+```text
+fresh | stale | unknown | degraded
+```
+
+- `fresh`: complete used-source lineage exists and every used source is within its freshness bound.
+- `stale`: at least one used source exceeds its bound; only those ids appear in `stale_source_ids`.
+- `unknown`: freshness cannot be proved, including never-synced evidence or missing lineage.
+- `degraded`: a relevant source/store failure makes the freshness result partial or unreliable.
+
+`oldest_source_age_seconds` is the greatest evaluated age among used sources, conservatively rounded
+up to an integer. It is `null` when no source age can be proved. An explicit historical `as_of` remains
+historical evidence: age is measured at that boundary, and a current source snapshot recorded after it
+cannot prove historical lineage, so the result is `unknown` rather than fresh.
+
+Consistency is separate from age. Postgres is authoritative; Neo4j and Qdrant are projections. Their
+distance is a version delta named `projection_lag_versions`, never seconds. The legacy
+`staleness_seconds` field may remain during compatibility migration but does not define v1 projection
+semantics and is never copied into the v1 field. Without explicit integer version evidence, consistency
+remains honestly unknown or degraded and selects fallback.
+
+Stale used evidence, missing lineage, never-synced required evidence, relevant store divergence, and
+unusable unknown/degraded states set `fallback.required=true` with a stable reason. Consumers then use
+direct authoritative sources. Omniscience output remains evidence rather than the sole oracle for merge,
+apply, incident action, or terminal workflow decisions.
+
 ## Freshness
 
 ### Per-source SLO

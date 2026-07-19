@@ -1,15 +1,10 @@
 """FastMCP server setup for Omniscience.
 
-Registers seven tools:
-- search              (requires scope: search)
-- get_document        (requires scope: search)
-- get_entity          (requires scope: search + workspace-scoped token)
-- get_related_entities (requires scope: search + workspace-scoped token)
-- list_entities       (requires scope: search + workspace-scoped token)
-- list_sources        (requires scope: sources:read)
-- source_stats        (requires scope: sources:read)
-- resolve_incident    (requires scope: search + workspace-scoped token)
-- blast_radius        (requires scope: search + workspace-scoped token)
+Registers the 15 tools in the stable MCP v1 registry: contract discovery,
+search/document/source/entity reads, incident analysis, replay, runbook,
+similar-incident, and postmortem operations.  Every tool requires the exact
+``omniscience-mcp-read-v1`` profile: a workspace-bound token with only the
+``search`` scope and a finite lifetime of at most 30 days.
 
 Auth:
 - HTTP transport: Bearer token from Authorization header
@@ -42,6 +37,10 @@ from fastapi import FastAPI
 from mcp.server.fastmcp import Context, FastMCP
 from omniscience_core.auth.middleware import _lookup_token
 from omniscience_core.auth.scopes import Scope, check_scopes
+from omniscience_core.auth.tokens import (
+    McpReadTokenValidationError,
+    validate_mcp_read_token,
+)
 from omniscience_core.auth.workspace import get_workspace_id
 from omniscience_core.db.models import ApiToken
 from omniscience_core.telemetry.clients import (
@@ -72,6 +71,10 @@ from omniscience_server.blast_radius import (
 from omniscience_server.blast_radius import (
     MIN_MAX_DEPTH as BLAST_MIN_MAX_DEPTH,
 )
+from omniscience_server.incident_timeline import (
+    TIMELINE_MAX_DEPTH,
+    mcp_incident_timeline,
+)
 from omniscience_server.incidents import (
     ALERT_NOT_FOUND_CODE,
     DEFAULT_MAX_DEPTH,
@@ -82,10 +85,8 @@ from omniscience_server.incidents import (
 from omniscience_server.mcp.apps import (
     wrap_resolve_incident_response,
 )
-from omniscience_server.mcp.incident_timeline import (
-    TIMELINE_MAX_DEPTH,
-    incident_timeline_tool,
-)
+from omniscience_server.mcp.contract import build_contract_info
+from omniscience_server.mcp.metadata import attach_runtime_meta
 from omniscience_server.mcp.tools import (
     mcp_get_document,
     mcp_get_entity,
@@ -136,26 +137,26 @@ mcp_server: FastMCP[None] = FastMCP("omniscience")
 # FastAPI app reference — set via set_fastapi_app() before first request
 _fastapi_app: FastAPI | None = None
 
-#: Global budget in characters for limited MCP tools (approx 20,000 tokens).
-MCP_GLOBAL_BUDGET_CHARS = 80000
+#: Global UTF-8 JSON budget for one successful MCP tool result.
+MCP_GLOBAL_BUDGET_BYTES = 80_000
 
 
 def _apply_mcp_budget(result: dict[str, Any]) -> dict[str, Any]:
-    """Ensure the JSON serialized size of the result does not exceed the global MCP budget.
-    If it exceeds, truncate and add a truncation warning."""
+    """Reject non-JSON or oversized results before FastMCP emits a success."""
     import json
 
-    s = json.dumps(result)
-    if len(s) <= MCP_GLOBAL_BUDGET_CHARS:
-        return result
-    return {
-        "error": "budget_exceeded",
-        "message": (
-            "The tool output exceeded the global MCP character budget."
-            " Please refine your query or use depth limits."
-        ),
-        "truncated": True,
-    }
+    try:
+        encoded = json.dumps(
+            result,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
+        raise ValueError("response_invalid:MCP tool response is not finite JSON") from exc
+    if len(encoded) > MCP_GLOBAL_BUDGET_BYTES:
+        raise ValueError("response_too_large:MCP tool response exceeds the fixed byte budget")
+    return result
 
 
 def set_fastapi_app(app: FastAPI) -> None:
@@ -216,6 +217,21 @@ def _require_scope(token: ApiToken | None, scope: Scope) -> None:
     granted = {Scope(s) for s in token.scopes if s in Scope.__members__.values()}
     if not check_scopes({scope}, granted):
         raise ValueError(f"forbidden:Token lacks required scope '{scope}'")
+
+
+def _require_v1_profile(token: ApiToken | None, scope: Scope = Scope.search) -> None:
+    """Require scope plus the exact workspace-bound MCP v1 token profile."""
+    _require_scope(token, scope)
+    assert token is not None  # noqa: S101 - narrowed by _require_scope
+    try:
+        validate_mcp_read_token(token)
+    except McpReadTokenValidationError as exc:
+        log.warning(
+            "mcp_v1_token_rejected",
+            token_prefix=token.token_prefix,
+            reason=str(exc),
+        )
+        raise ValueError("forbidden:Token does not satisfy omniscience-mcp-read-v1") from exc
 
 
 def _require_workspace(
@@ -288,6 +304,47 @@ def _record_tool_invocation(*, tool_name: str, token: ApiToken | None) -> None:
         log.warning("mcp_tool_invocation_record_failed", error=str(exc))
 
 
+async def _finalize_success(
+    *,
+    tool_name: str,
+    payload: dict[str, Any],
+    token: ApiToken,
+    effective_as_of: datetime | None = None,
+) -> dict[str, Any]:
+    """Attach the v1 envelope to a successful response and apply its budget."""
+    workspace_id = validate_mcp_read_token(token)
+    result = await attach_runtime_meta(
+        app=_get_app(),
+        tool_name=tool_name,
+        payload=payload,
+        workspace_id=workspace_id,
+        effective_as_of=effective_as_of,
+    )
+    return _apply_mcp_budget(result)
+
+
+# ---------------------------------------------------------------------------
+# Tool: contract_info
+# ---------------------------------------------------------------------------
+
+
+@mcp_server.tool(
+    name="contract_info",
+    description=(
+        "Return the authenticated MCP v1 contract pin, schema and registry "
+        "digests, token profile, and supported severance capabilities."
+    ),
+)
+async def contract_info(ctx: Context[Any, Any, Any]) -> dict[str, Any]:
+    """Return source-free contract metadata for a conforming v1 token."""
+    token = await _resolve_token(ctx)
+    _require_v1_profile(token)
+    _record_tool_invocation(tool_name="contract_info", token=token)
+    assert token is not None  # noqa: S101 - narrowed by _require_v1_profile
+    workspace_id = validate_mcp_read_token(token)
+    return _apply_mcp_budget(build_contract_info(workspace_id))
+
+
 # ---------------------------------------------------------------------------
 # Tool: search
 # ---------------------------------------------------------------------------
@@ -320,34 +377,39 @@ async def search(
     When the calling token is workspace-scoped the ``workspace_id`` is
     forwarded to :func:`mcp_search` so the :class:`GraphRAGComposer`
     (issue #107) can enforce its ACL invariant and, when the backend
-    stack permits it, run the GraphRAG composed pipeline.  Tokens
-    without a workspace still get legacy-path results.
+    stack permits it, run the GraphRAG composed pipeline.  MCP v1 tokens
+    are always workspace-bound; unbound and legacy tokens are rejected.
 
     The optional ``as_of`` parameter (issue #133) is an ISO-8601
     timezone-aware UTC datetime; non-UTC and naive values are rejected
     with the structured ``invalid_timezone`` error code.
     """
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="search", token=token)
-    workspace_id = get_workspace_id(token) if token is not None else None
+    assert token is not None  # noqa: S101 - narrowed by _require_v1_profile
+    workspace_id = validate_mcp_read_token(token)
     parsed_as_of = _parse_as_of(as_of)
 
-    return _apply_mcp_budget(
-        await mcp_search(
-            app=_get_app(),
-            query=query,
-            top_k=top_k,
-            sources=sources,
-            types=types,
-            max_age_seconds=max_age_seconds,
-            filters=filters,
-            include_tombstoned=include_tombstoned,
-            retrieval_strategy=retrieval_strategy,
-            workspace_id=workspace_id,
-            as_of=parsed_as_of,
-            cursor=cursor,
-        )
+    payload = await mcp_search(
+        app=_get_app(),
+        query=query,
+        top_k=top_k,
+        sources=sources,
+        types=types,
+        max_age_seconds=max_age_seconds,
+        filters=filters,
+        include_tombstoned=include_tombstoned,
+        retrieval_strategy=retrieval_strategy,
+        workspace_id=workspace_id,
+        as_of=parsed_as_of,
+        cursor=cursor,
+    )
+    return await _finalize_success(
+        tool_name="search",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
     )
 
 
@@ -366,12 +428,12 @@ async def get_document(
 ) -> dict[str, Any]:
     """get_document tool — requires scope 'search'."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="get_document", token=token)
-
-    workspace_id = get_workspace_id(token) if token is not None else None
+    assert token is not None  # noqa: S101 - narrowed by _require_v1_profile
+    workspace_id = validate_mcp_read_token(token)
     try:
-        return await mcp_get_document(
+        payload = await mcp_get_document(
             app=_get_app(), document_id=document_id, workspace_id=workspace_id
         )
     except ValueError as exc:
@@ -379,6 +441,7 @@ async def get_document(
         if msg.startswith("document_not_found:"):
             raise ValueError(f"source_not_found:{document_id}") from exc
         raise
+    return await _finalize_success(tool_name="get_document", payload=payload, token=token)
 
 
 # ---------------------------------------------------------------------------
@@ -415,7 +478,7 @@ async def get_related_entities(
     error envelope.
     """
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="get_related_entities", token=token)
     # _require_scope raised if token is None, so it is non-None here.
     assert token is not None  # noqa: S101 — narrows type for mypy
@@ -428,7 +491,7 @@ async def get_related_entities(
 
     parsed_as_of = _parse_as_of(as_of)
     try:
-        return await mcp_get_related_entities(
+        payload = await mcp_get_related_entities(
             app=_get_app(),
             entity_name=entity_name,
             workspace_id=workspace_id,
@@ -441,6 +504,12 @@ async def get_related_entities(
         if msg.startswith("entity_not_found:"):
             raise
         raise
+    return await _finalize_success(
+        tool_name="get_related_entities",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -470,7 +539,7 @@ async def get_entity(
     issue #133 contract and forwarded to ``GraphStore.get_entity``.
     """
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="get_entity", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -481,11 +550,17 @@ async def get_entity(
     )
 
     parsed_as_of = _parse_as_of(as_of)
-    return await mcp_get_entity(
+    payload = await mcp_get_entity(
         app=_get_app(),
         entity_name=entity_name,
         workspace_id=workspace_id,
         as_of=parsed_as_of,
+    )
+    return await _finalize_success(
+        tool_name="get_entity",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
     )
 
 
@@ -523,7 +598,7 @@ async def list_entities(
     ADR-0008 §5 contract and forwarded to the bitemporal store query.
     """
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="list_entities", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -534,13 +609,19 @@ async def list_entities(
     )
 
     parsed_as_of = _parse_as_of(as_of)
-    return await mcp_list_entities(
+    payload = await mcp_list_entities(
         app=_get_app(),
         workspace_id=workspace_id,
         kind=kind,
         cluster=cluster,
         name=name,
         as_of=parsed_as_of,
+    )
+    return await _finalize_success(
+        tool_name="list_entities",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
     )
 
 
@@ -556,13 +637,14 @@ async def list_entities(
 async def list_sources(
     ctx: Context[Any, Any, Any],
 ) -> dict[str, Any]:
-    """list_sources tool — requires scope 'sources:read'."""
+    """list_sources tool — MCP v1 requires exact scope 'search'."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.sources_read)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="list_sources", token=token)
-
-    workspace_id = get_workspace_id(token) if token is not None else None
-    return _apply_mcp_budget(await mcp_list_sources(app=_get_app(), workspace_id=workspace_id))
+    assert token is not None  # noqa: S101 - narrowed by _require_v1_profile
+    workspace_id = validate_mcp_read_token(token)
+    payload = await mcp_list_sources(app=_get_app(), workspace_id=workspace_id)
+    return await _finalize_success(tool_name="list_sources", payload=payload, token=token)
 
 
 # ---------------------------------------------------------------------------
@@ -578,21 +660,22 @@ async def source_stats(
     source_id: str,
     ctx: Context[Any, Any, Any],
 ) -> dict[str, Any]:
-    """source_stats tool — requires scope 'sources:read'."""
+    """source_stats tool — MCP v1 requires exact scope 'search'."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.sources_read)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="source_stats", token=token)
-
-    workspace_id = get_workspace_id(token) if token is not None else None
+    assert token is not None  # noqa: S101 - narrowed by _require_v1_profile
+    workspace_id = validate_mcp_read_token(token)
     try:
-        return _apply_mcp_budget(
-            await mcp_source_stats(app=_get_app(), source_id=source_id, workspace_id=workspace_id)
+        payload = await mcp_source_stats(
+            app=_get_app(), source_id=source_id, workspace_id=workspace_id
         )
     except ValueError as exc:
         msg = str(exc)
         if msg.startswith("source_not_found:"):
             raise
         raise
+    return await _finalize_success(tool_name="source_stats", payload=payload, token=token)
 
 
 # ---------------------------------------------------------------------------
@@ -627,7 +710,7 @@ async def resolve_incident(
     §D / #117).
     """
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="resolve_incident", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -658,7 +741,13 @@ async def resolve_incident(
     # advertised the ``omniscience/apps`` experimental capability, attach
     # the rendered card under ``_meta``; otherwise the legacy response
     # passes through byte-for-byte (backwards-compat invariant).
-    return _apply_mcp_budget(wrap_resolve_incident_response(legacy_response, ctx=ctx))
+    payload = wrap_resolve_incident_response(legacy_response, ctx=ctx)
+    return await _finalize_success(
+        tool_name="resolve_incident",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -693,21 +782,31 @@ async def incident_timeline(
     fail-closed, no existence leak for cross-workspace alert ids
     (issue #117 / ADR-0005).
     """
-    return _apply_mcp_budget(
-        await incident_timeline_tool(
-            app=_get_app(),
-            ctx=ctx,
-            resolve_token=_resolve_token,
-            require_scope=_require_scope,
-            parse_as_of=_parse_as_of,
-            record_invocation=_record_tool_invocation,
-            alert_id=alert_id,
-            from_ts=from_ts,
-            to_ts=to_ts,
-            entity_types=entity_types,
-            as_of=as_of,
-            max_depth=max_depth,
-        )
+    token = await _resolve_token(ctx)
+    _require_v1_profile(token)
+    _record_tool_invocation(tool_name="incident_timeline", token=token)
+    assert token is not None  # noqa: S101 - narrowed by _require_v1_profile
+    workspace_id = _require_workspace(
+        token,
+        log_event="mcp_incident_timeline_rejected_no_workspace",
+        forbidden_message="Incident timeline requires a workspace-scoped token",
+    )
+    parsed_as_of = _parse_as_of(as_of)
+    payload = await mcp_incident_timeline(
+        app=_get_app(),
+        alert_id=alert_id,
+        workspace_id=workspace_id,
+        as_of=parsed_as_of,
+        from_ts=_parse_as_of(from_ts),
+        to_ts=_parse_as_of(to_ts),
+        entity_types=entity_types,
+        max_depth=max(1, min(max_depth, 5)),
+    )
+    return await _finalize_success(
+        tool_name="incident_timeline",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
     )
 
 
@@ -746,7 +845,7 @@ async def blast_radius(
     to avoid leaking entity existence (issue #117 / #234 §ACL).
     """
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="blast_radius", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -766,15 +865,13 @@ async def blast_radius(
     parsed_as_of = _parse_as_of(as_of)
     clamped_depth = max(BLAST_MIN_MAX_DEPTH, min(max_depth, BLAST_MAX_MAX_DEPTH))
     try:
-        return _apply_mcp_budget(
-            await mcp_blast_radius(
-                app=_get_app(),
-                entity_id=entity_id,
-                workspace_id=workspace_id,
-                action_type=typed_action,
-                as_of=parsed_as_of,
-                max_depth=clamped_depth,
-            )
+        payload = await mcp_blast_radius(
+            app=_get_app(),
+            entity_id=entity_id,
+            workspace_id=workspace_id,
+            action_type=typed_action,
+            as_of=parsed_as_of,
+            max_depth=clamped_depth,
         )
     except ValueError as exc:
         msg = str(exc)
@@ -785,6 +882,12 @@ async def blast_radius(
         if msg.startswith(f"{BLAST_ENTITY_NOT_FOUND_CODE}:"):
             raise
         raise
+    return await _finalize_success(
+        tool_name="blast_radius",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -813,7 +916,7 @@ async def replay_context_tool(
 ) -> dict[str, Any]:
     """replay_context tool — requires scope 'search' AND workspace token."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="replay_context", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -870,7 +973,13 @@ async def replay_context_tool(
     except AuditLogNotFoundError as exc:
         raise ValueError(f"audit_log_not_found:{exc}") from exc
 
-    return envelope_to_dict(result)
+    payload = envelope_to_dict(result)
+    return await _finalize_success(
+        tool_name="replay_context",
+        payload=payload,
+        token=token,
+        effective_as_of=result.at_time,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -900,7 +1009,7 @@ async def suggest_runbook(
 ) -> dict[str, Any]:
     """suggest_runbook tool requires scope 'search' AND workspace token."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="suggest_runbook", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -913,7 +1022,7 @@ async def suggest_runbook(
     parsed_as_of = _parse_as_of(as_of)
     clamped_top_k = max(1, min(top_k, RUNBOOK_MAX_TOP_K))
     try:
-        return await mcp_suggest_runbook(
+        payload = await mcp_suggest_runbook(
             app=_get_app(),
             alert_id=alert_id,
             workspace_id=workspace_id,
@@ -927,6 +1036,12 @@ async def suggest_runbook(
         if msg.startswith(f"{RUNBOOK_ALERT_NOT_FOUND_CODE}:"):
             raise
         raise
+    return await _finalize_success(
+        tool_name="suggest_runbook",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -955,7 +1070,7 @@ async def find_similar_incidents(
 ) -> dict[str, Any]:
     """find_similar_incidents tool — requires scope 'search' AND workspace token."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="find_similar_incidents", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -968,13 +1083,19 @@ async def find_similar_incidents(
     parsed_as_of = _parse_as_of(as_of)
     clamped_limit = max(1, min(limit, SIMILAR_MAX_LIMIT))
     clamped_since = max(1, min(since_days, SIMILAR_MAX_SINCE_DAYS))
-    return await mcp_find_similar_incidents(
+    payload = await mcp_find_similar_incidents(
         app=_get_app(),
         incident_id=incident_id,
         workspace_id=workspace_id,
         limit=clamped_limit,
         since_days=clamped_since,
         as_of=parsed_as_of,
+    )
+    return await _finalize_success(
+        tool_name="find_similar_incidents",
+        payload=payload,
+        token=token,
+        effective_as_of=parsed_as_of,
     )
 
 
@@ -1023,7 +1144,7 @@ async def generate_postmortem_tool(
 ) -> dict[str, Any]:
     """generate_postmortem tool — requires scope 'search' + workspace token."""
     token = await _resolve_token(ctx)
-    _require_scope(token, Scope.search)
+    _require_v1_profile(token)
     _record_tool_invocation(tool_name="generate_postmortem", token=token)
     assert token is not None  # noqa: S101 — narrows type for mypy
 
@@ -1052,7 +1173,7 @@ async def generate_postmortem_tool(
         # envelope FastMCP serialises into a tool-error response.
         raise ValueError(str(exc)) from exc
 
-    return {
+    payload = {
         "incident_id": report.incident_id,
         "alert_id": report.alert_id,
         "template": report.template_id,
@@ -1060,3 +1181,9 @@ async def generate_postmortem_tool(
         "rendered": rendered,
         "report": report.model_dump(mode="json"),
     }
+    return await _finalize_success(
+        tool_name="generate_postmortem",
+        payload=payload,
+        token=token,
+        effective_as_of=report.effective_as_of,
+    )

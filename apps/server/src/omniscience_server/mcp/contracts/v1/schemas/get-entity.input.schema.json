@@ -1,0 +1,1 @@
+{"properties":{"as_of":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"As Of"},"entity_name":{"title":"Entity Name","type":"string"}},"required":["entity_name"],"title":"get_entityArguments","type":"object"}

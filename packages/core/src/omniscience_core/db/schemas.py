@@ -238,6 +238,8 @@ class ApiTokenCreate(BaseModel):
     hashed_token: str
     token_prefix: str
     scopes: list[str] = Field(default_factory=list)
+    profile_id: str | None = None
+    rotated_from_id: uuid.UUID | None = None
     expires_at: datetime | None = None
     workspace_id: uuid.UUID | None = None
 
@@ -251,6 +253,8 @@ class ApiTokenRead(BaseModel):
     name: str
     token_prefix: str
     scopes: list[str]
+    profile_id: str | None = None
+    rotated_from_id: uuid.UUID | None = None
     workspace_id: uuid.UUID | None
     created_at: datetime
     expires_at: datetime | None

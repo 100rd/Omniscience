@@ -1,0 +1,1 @@
+{"properties":{"as_of":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"As Of"},"incident_id":{"title":"Incident Id","type":"string"},"limit":{"default":5,"title":"Limit","type":"integer"},"since_days":{"default":90,"title":"Since Days","type":"integer"}},"required":["incident_id"],"title":"find_similar_incidentsArguments","type":"object"}
