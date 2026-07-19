@@ -1,0 +1,13 @@
+{{- if .Values.production.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "omniscience.fullname" . }}
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+spec:
+  maxUnavailable: {{ .Values.production.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "omniscience.selectorLabels" . | nindent 6 }}
+{{- end }}

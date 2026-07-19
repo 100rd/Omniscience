@@ -1,0 +1,99 @@
+name: HA Qualification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/omniscience/**'
+      - 'tests/test_helm*.py'
+      - 'tests/test_production_ha*.py'
+      - '.github/workflows/ha-qualification.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'helm/omniscience/**'
+      - 'tests/test_helm*.py'
+      - 'tests/test_production_ha*.py'
+      - '.github/workflows/ha-qualification.yml'
+
+permissions:
+  contents: read
+
+# Shared --set overrides for a fully evidenced, guard-satisfying production-HA
+# profile (see docs/runbooks/production-ha.md "Supplying production evidence").
+env:
+  PROD_SET: >-
+    --set secrets.postgresPassword=ci-test
+    --set serviceAccount.create=false
+    --set postgres.enabled=false
+    --set retention.enabled=true
+    --set production.enabled=true
+    --set postgresql.enabled=false
+    --set neo4j.enabled=false
+    --set qdrant.enabled=false
+    --set nats.enabled=false
+    --set replicaCount=3
+    --set production.evidence.account=111111111111
+    --set production.evidence.cluster=ci-eks
+    --set production.evidence.region=us-east-1
+    --set production.evidence.zones[0]=us-east-1a
+    --set production.evidence.zones[1]=us-east-1b
+    --set production.evidence.zones[2]=us-east-1c
+    --set production.evidence.rds.endpoint=ci-rds.example.internal
+    --set production.evidence.rds.multiAz=true
+    --set production.evidence.jetstream.externalUrl=nats://ci-jetstream.example.internal:4222
+    --set production.evidence.jetstream.replicas=3
+    --set production.evidence.neo4j.topology=causal-cluster
+    --set production.evidence.neo4j.entitlementRef=secret/neo4j-license#key
+    --set production.evidence.qdrant.topology=distributed
+    --set production.evidence.qdrant.nodes=3
+  EVAL_SET: >-
+    --set secrets.postgresPassword=ci-test
+    --set serviceAccount.create=false
+    --set postgres.enabled=false
+    --set retention.enabled=true
+
+jobs:
+  helm:
+    name: Helm lint + template + qualification tests (#350)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install python deps
+        run: pip install pyyaml pytest
+
+      - name: helm lint (default evaluation profile)
+        run: helm lint helm/omniscience $EVAL_SET
+
+      - name: helm lint (production-HA profile, fully evidenced)
+        run: helm lint helm/omniscience $PROD_SET
+
+      - name: helm template (evaluation profile)
+        run: |
+          helm template omniscience helm/omniscience $EVAL_SET > /tmp/rendered-eval.yaml
+          test -s /tmp/rendered-eval.yaml
+
+      - name: helm template (production-HA profile)
+        run: |
+          helm template omniscience helm/omniscience $PROD_SET > /tmp/rendered-prod.yaml
+          test -s /tmp/rendered-prod.yaml
+
+      - name: Production-HA qualification tests (#350)
+        run: pytest tests/test_production_ha_render.py tests/test_helm_posture.py -v -o addopts=""
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: kubeconform -strict (production-HA profile, #350)
+        run: |
+          helm template omniscience helm/omniscience $PROD_SET \
+          | kubeconform -strict -summary -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'

@@ -6,6 +6,16 @@ image:
   pullPolicy: IfNotPresent
   tag: "latest"
 
+serviceAccount:
+  create: false
+  name: ""
+  annotations: {}
+
+# Secret values consumed by templates/secret.yaml. postgresPassword has no
+# default (templates/secret.yaml `required`-gates it) — supply it via --set
+# or a values override file.
+secrets: {}
+
 service:
   type: ClusterIP
   port: 8000
@@ -20,32 +30,72 @@ ingress:
         - path: /
           pathType: ImplementationSpecific
 
-# Built-in dependencies (sub-charts)
+# Bundled stateful sub-charts. Disabled by default (issue #350 AC-HA-5):
+# a plain `helm install` no longer bundles stateful services in-cluster —
+# see docs/runbooks/production-ha.md for the evaluation/governed/production-ha
+# posture model and the known postgres/postgresql key-naming mismatch.
 postgresql:
-  enabled: true
+  enabled: false
   auth:
     database: omniscience
     username: omniscience
     password: "change-me"
 
 neo4j:
-  enabled: true
+  enabled: false
   neo4j:
     password: "change-me"
 
 qdrant:
-  enabled: true
+  enabled: false
 
 nats:
-  enabled: true
+  enabled: false
   nats:
     jetstream:
       enabled: true
+
+# Custom (non-subchart) Postgres wiring referenced by templates/pvc.yaml and
+# _helpers.tpl. Pre-existing postgres/postgresql naming mismatch — see
+# docs/runbooks/production-ha.md "Known pre-existing chart defects" (not
+# fixed here; out of scope for issue #350's HA-render unblock).
+postgres:
+  enabled: false
+  storageSize: "10Gi"
+  storageClass: ""
+
+# Retention worker (ADR-0009, issue #135). templates/configmap.yaml reads
+# this top-level block, not config.retention below (same pre-existing
+# mismatch as postgres/postgresql — flagged, not fixed here).
+retention:
+  enabled: true
+  hotDays: 90
+  warmDays: 365
+  archiveYears: 7
+  tickSeconds: 21600
+  dryRun: false
+  batchSize: 500
+  sampleSize: 20
+  archiveBucket: ""
+  archiveKmsKeyArn: ""
+  archiveS3EndpointUrl: ""
+  archiveS3Region: "us-east-1"
 
 # Application Config
 config:
   logLevel: "INFO"
   environment: "production"
+  embeddingsProvider: "ollama"
+  embeddingModel: "nomic-embed-text"
+  mcpTransport: "streamable-http"
+  freshnessSloSeconds: 300
+  ollamaUrl: ""
+  openaiBaseUrl: ""
+  corsOrigins: ""
+  # Reconciliation worker toggle (REQ-OPS-6): disabling it, like retention,
+  # cannot be presented as a production-ha posture — see
+  # omniscience.posture / _production_guards.tpl.
+  reconcileEnabled: true
   storage:
     graph: "neo4j"
     vector: "qdrant"
@@ -55,3 +105,46 @@ config:
     warmDays: 365
   discovery:
     intervalSeconds: 3600
+
+# Production HA qualification profile (issue #350). Opt-in and additive: the
+# default install (production.enabled=false) is unaffected and stays an
+# evaluation/governed posture. When enabled, the chart fails closed (Helm
+# `fail`) unless every evidence field below is supplied and the scheduling
+# policy meets the HA floor — see docs/runbooks/production-ha.md.
+production:
+  enabled: false
+
+  # Scheduling policy floor (AC-HA-2). Only rendered/enforced when enabled.
+  topologySpreadConstraints:
+    maxSkew: 1
+    topologyKey: topology.kubernetes.io/zone
+    whenUnsatisfiable: DoNotSchedule
+  podDisruptionBudget:
+    maxUnavailable: 1
+  autoscaling:
+    minReplicas: 3
+    maxReplicas: 9
+    targetCPUUtilizationPercentage: 70
+  priorityClass:
+    value: 100000
+
+  # Immutable environment + stateful-dependency evidence (AC-HA-1, AC-HA-3).
+  # entitlementRef fields are references (Secret key, plan id, ticket URL) —
+  # never a literal license key or credential.
+  evidence:
+    account: ""
+    cluster: ""
+    region: ""
+    zones: []
+    rds:
+      endpoint: ""
+      multiAz: false
+    jetstream:
+      externalUrl: ""
+      replicas: 0
+    neo4j:
+      topology: ""
+      entitlementRef: ""
+    qdrant:
+      topology: ""
+      nodes: 0

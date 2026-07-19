@@ -38,6 +38,43 @@ helm.sh/chart: {{ include "omniscience.chart" . }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+omniscience.io/posture: {{ include "omniscience.posture" . }}
+{{- end }}
+
+{{/*
+Posture — evaluation | governed | production-ha (AC-HA-5, REQ-OPS-6).
+
+Derived, not user-settable. REQ-OPS-6 mapping:
+
+  - "production-ha" requires production.enabled=true, which in turn only
+    renders (see _production_guards.tpl, included from deployment.yaml) once
+    every AC-HA-1/2/3 evidence/policy guard passes AND retention +
+    reconciliation stay enabled — REQ-OPS-6 forbids presenting a build with
+    reconciliation/retention disabled as production healthy. A caller cannot
+    `--set` this label directly to claim production-ha without satisfying
+    those guards first — the guard `fail`s the render before this helper
+    would ever compute "production-ha" for an unqualified install.
+  - "governed" is the explicit intermediate signal: production.enabled is
+    still false, but at least one production.evidence.* field has been
+    populated by hand (an external stateful dependency wired in ahead of a
+    full production cutover) — hardened beyond the bare default, but not a
+    qualified production claim.
+  - "evaluation" is the REQ-OPS-6 fallback: no production.enabled and no
+    evidence signal at all resolves to evaluation-only. An unrecognized/
+    unpopulated configuration never silently resolves to something stronger.
+*/}}
+{{- define "omniscience.posture" -}}
+{{- if .Values.production.enabled -}}
+production-ha
+{{- else -}}
+{{- $ev := .Values.production.evidence -}}
+{{- $hasEvidenceSignal := or $ev.account $ev.cluster $ev.region (gt (len $ev.zones) 0) $ev.rds.endpoint $ev.rds.multiAz $ev.jetstream.externalUrl (gt (int $ev.jetstream.replicas) 0) $ev.neo4j.topology $ev.neo4j.entitlementRef $ev.qdrant.topology (gt (int $ev.qdrant.nodes) 0) -}}
+{{- if $hasEvidenceSignal -}}
+governed
+{{- else -}}
+evaluation
+{{- end -}}
+{{- end -}}
 {{- end }}
 
 {{/*

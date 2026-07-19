@@ -1,0 +1,11 @@
+{{- if .Values.production.enabled }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ include "omniscience.fullname" . }}-critical-read
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+value: {{ .Values.production.priorityClass.value }}
+globalDefault: false
+description: "Critical-read priority for the Omniscience production-HA application pods (AC-HA-2)."
+{{- end }}

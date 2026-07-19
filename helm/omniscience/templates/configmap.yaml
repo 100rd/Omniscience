@@ -41,3 +41,5 @@ data:
   RETENTION_ARCHIVE_S3_ENDPOINT_URL: {{ .Values.retention.archiveS3EndpointUrl | quote }}
   {{- end }}
   RETENTION_ARCHIVE_S3_REGION: {{ .Values.retention.archiveS3Region | quote }}
+  # Reconciliation worker (REQ-OPS-6) — see omniscience.posture.
+  RECONCILE_ENABLED: {{ .Values.config.reconcileEnabled | toString | quote }}
