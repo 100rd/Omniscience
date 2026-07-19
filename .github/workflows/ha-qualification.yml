@@ -65,8 +65,12 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
+      - uses: astral-sh/setup-uv@v3
       - name: Install python deps
-        run: pip install pyyaml pytest
+        # Full project dev deps (not bare pip): the shared tests/conftest.py
+        # imports pytest_asyncio, so a minimal `pip install pytest` fails
+        # collection with ModuleNotFoundError.
+        run: uv sync --frozen --extra dev
 
       - name: helm lint (default evaluation profile)
         run: helm lint helm/omniscience $EVAL_SET
@@ -85,7 +89,7 @@ jobs:
           test -s /tmp/rendered-prod.yaml
 
       - name: Production-HA qualification tests (#350)
-        run: pytest tests/test_production_ha_render.py tests/test_helm_posture.py -v -o addopts=""
+        run: uv run pytest tests/test_production_ha_render.py tests/test_helm_posture.py -v -o addopts=""
 
       - name: Install kubeconform
         run: |

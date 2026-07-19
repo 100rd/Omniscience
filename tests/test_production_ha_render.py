@@ -39,7 +39,7 @@ import yaml
 CHART_PATH = Path(__file__).resolve().parents[1] / "helm" / "omniscience"
 HELM = shutil.which("helm") or "helm"
 
-_FAIL_LOG_RE = re.compile(r'msg="funcMap fail" message="(?P<msg>.*)"\s*$')
+_FAIL_TEMPLATE_RE = re.compile(r"execution error at \([^)]*\):\s*(?P<msg>.+)")
 
 # Routes around pre-existing nil-pointer gaps in values.yaml that are
 # unrelated to production-HA (serviceAccount/postgres/retention keys the
@@ -105,7 +105,15 @@ def _set_string_args(overrides: dict[str, str]) -> list[str]:
 def _lint_fail_message(
     overrides: dict[str, str], *, string_keys: frozenset[str] = frozenset()
 ) -> str | None:
-    """Return the `fail()` guard message `helm lint` logged, if any fired.
+    """Return the `fail()` guard message helm surfaces, if any guard fired.
+
+    Uses `helm template` (deterministic: a `fail()` guard makes it exit
+    non-zero with the message on the `Error: execution error at (...): <msg>`
+    stderr line) rather than `helm lint`, whose `funcMap fail` log format
+    varies across helm versions and is silent on some — so lint-stderr
+    parsing returned `None` on the CI runner's default helm even though the
+    guard fired. Requires no `helm dependency build` (the four dead subchart
+    dependencies were removed).
 
     `string_keys` selects which override keys go through `--set-string`
     (literal-string, no auto-typing) instead of `--set` (Helm auto-types
@@ -118,16 +126,25 @@ def _lint_fail_message(
     plain = {k: v for k, v in overrides.items() if k not in string_keys}
     stringy = {k: v for k, v in overrides.items() if k in string_keys}
     proc = subprocess.run(
-        [HELM, "lint", str(CHART_PATH), *_set_args(plain), *_set_string_args(stringy)],
+        [
+            HELM,
+            "template",
+            "release-name",
+            str(CHART_PATH),
+            *_set_args(plain),
+            *_set_string_args(stringy),
+        ],
         text=True,
         capture_output=True,
         check=False,
     )
+    if proc.returncode == 0:
+        return None
     for line in proc.stderr.splitlines():
-        match = _FAIL_LOG_RE.search(line)
+        match = _FAIL_TEMPLATE_RE.search(line)
         if match:
-            return match.group("msg")
-    return None
+            return match.group("msg").strip()
+    return proc.stderr.strip() or None
 
 
 def _helm_available() -> bool:
@@ -151,9 +168,13 @@ _needs_helm = pytest.mark.skipif(
     reason="helm binary not found on PATH — install helm to run rendered-object assertions",
 )
 
+# Every assertion in this module shells out to `helm`; skip the whole file
+# cleanly where the binary is absent rather than erroring on a missing exe.
+pytestmark = _needs_helm
+
 
 # ── Fail-closed guard messages (AC-HA-1, AC-HA-2, AC-HA-3, AC-HA-5) ──────────
-# Deps-independent: uses `helm lint`, which tolerates a missing charts/ dir.
+# Uses `helm template` (deterministic non-zero exit + message); no charts/.
 
 
 def test_valid_production_config_triggers_no_guard():
