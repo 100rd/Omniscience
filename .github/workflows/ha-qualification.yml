@@ -67,10 +67,12 @@ jobs:
           python-version: '3.11'
       - uses: astral-sh/setup-uv@v3
       - name: Install python deps
-        # Full project dev deps (not bare pip): the shared tests/conftest.py
+        # Full project deps (not bare pip): the shared tests/conftest.py
         # imports pytest_asyncio, so a minimal `pip install pytest` fails
-        # collection with ModuleNotFoundError.
-        run: uv sync --frozen --extra dev
+        # collection with ModuleNotFoundError. The root project has no `dev`
+        # extra — plain `uv sync --frozen` already includes the test deps
+        # (matches the main `test` job).
+        run: uv sync --frozen
 
       - name: helm lint (default evaluation profile)
         run: helm lint helm/omniscience $EVAL_SET
