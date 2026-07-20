@@ -1,0 +1,156 @@
+name: Admission Qualification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'helm/omniscience/**'
+      - 'apps/server/src/omniscience_server/admission/**'
+      - 'apps/server/src/omniscience_server/rest/rate_limit.py'
+      - 'packages/core/src/omniscience_core/config.py'
+      - 'tests/test_admission*.py'
+      - '.github/workflows/admission-qualification.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'helm/omniscience/**'
+      - 'apps/server/src/omniscience_server/admission/**'
+      - 'apps/server/src/omniscience_server/rest/rate_limit.py'
+      - 'packages/core/src/omniscience_core/config.py'
+      - 'tests/test_admission*.py'
+      - '.github/workflows/admission-qualification.yml'
+
+permissions:
+  contents: read
+
+# Shared --set overrides for a fully evidenced, guard-satisfying production-HA
+# + shared-admission profile (see docs/runbooks/read-admission.md
+# "Supplying admission evidence"). production.admission is gated
+# independently of production.enabled — EVAL_SET and PROD_SET below both
+# leave admission off; ADMISSION_SET layers the admission evidence on top
+# of PROD_SET to prove the two gates compose.
+env:
+  PROD_SET: >-
+    --set secrets.postgresPassword=ci-test
+    --set serviceAccount.create=false
+    --set postgres.enabled=false
+    --set retention.enabled=true
+    --set production.enabled=true
+    --set postgresql.enabled=false
+    --set neo4j.enabled=false
+    --set qdrant.enabled=false
+    --set nats.enabled=false
+    --set replicaCount=3
+    --set production.evidence.account=111111111111
+    --set production.evidence.cluster=ci-eks
+    --set production.evidence.region=us-east-1
+    --set production.evidence.zones[0]=us-east-1a
+    --set production.evidence.zones[1]=us-east-1b
+    --set production.evidence.zones[2]=us-east-1c
+    --set production.evidence.rds.endpoint=ci-rds.example.internal
+    --set production.evidence.rds.multiAz=true
+    --set production.evidence.jetstream.externalUrl=nats://ci-jetstream.example.internal:4222
+    --set production.evidence.jetstream.replicas=3
+    --set production.evidence.neo4j.topology=causal-cluster
+    --set production.evidence.neo4j.entitlementRef=secret/neo4j-license#key
+    --set production.evidence.qdrant.topology=distributed
+    --set production.evidence.qdrant.nodes=3
+  ADMISSION_SET: >-
+    --set production.admission.enabled=true
+    --set production.admission.backend=shared-redis-lease
+    --set production.admission.backendIdentity=redis://ci-admission.example.internal:6379/0
+    --set production.admission.laneIncidentBudget=120
+    --set production.admission.laneBackgroundBudget=60
+    --set production.admission.queueDepthMax=500
+    --set production.admission.latencyThresholdMs=250
+    --set production.admission.errorRateThreshold=0.01
+    --set production.admission.failureReserveFraction=0.2
+  EVAL_SET: >-
+    --set secrets.postgresPassword=ci-test
+    --set serviceAccount.create=false
+    --set postgres.enabled=false
+    --set retention.enabled=true
+
+jobs:
+  helm:
+    name: Helm lint + template + qualification tests (#350 AC-SCALE-5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.15.4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: astral-sh/setup-uv@v3
+      - name: Install python deps
+        # Full project deps (not bare pip): tests/conftest.py imports
+        # pytest_asyncio, so a minimal `pip install pytest` fails collection
+        # with ModuleNotFoundError. No `dev` extra on this project — plain
+        # `uv sync --frozen` already includes the test deps.
+        run: uv sync --frozen
+
+      - name: helm lint (evaluation profile — admission untouched)
+        run: helm lint helm/omniscience $EVAL_SET
+
+      - name: helm lint (production-HA profile, admission still off)
+        run: helm lint helm/omniscience $PROD_SET
+
+      - name: helm lint (production-HA + shared-admission, fully evidenced)
+        run: helm lint helm/omniscience $PROD_SET $ADMISSION_SET
+
+      - name: helm template (evaluation profile)
+        run: |
+          helm template omniscience helm/omniscience $EVAL_SET > /tmp/rendered-eval.yaml
+          test -s /tmp/rendered-eval.yaml
+          if grep -q '^  ADMISSION_' /tmp/rendered-eval.yaml; then
+            echo "evaluation profile must not render any ADMISSION_* env vars" >&2
+            exit 1
+          fi
+
+      - name: helm template (production-HA profile, admission still off)
+        run: |
+          helm template omniscience helm/omniscience $PROD_SET > /tmp/rendered-prod.yaml
+          test -s /tmp/rendered-prod.yaml
+          if grep -q '^  ADMISSION_' /tmp/rendered-prod.yaml; then
+            echo "production.admission.enabled=false must not render ADMISSION_* env vars" >&2
+            exit 1
+          fi
+
+      - name: helm template (production-HA + shared-admission, fully evidenced)
+        run: |
+          helm template omniscience helm/omniscience $PROD_SET $ADMISSION_SET > /tmp/rendered-admission.yaml
+          test -s /tmp/rendered-admission.yaml
+          grep -q '^  ADMISSION_BACKEND: "shared-redis-lease"$' /tmp/rendered-admission.yaml
+
+      - name: helm template (admission enabled, evidence missing) must fail closed
+        run: |
+          set +e
+          helm template omniscience helm/omniscience $PROD_SET \
+            --set production.admission.enabled=true \
+            > /tmp/rendered-admission-guard-fail.yaml 2>/tmp/rendered-admission-guard-fail.err
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "expected the render to fail closed (missing admission evidence) but it succeeded" >&2
+            exit 1
+          fi
+          grep -q "production.admission.backend is required" /tmp/rendered-admission-guard-fail.err
+
+      - name: Admission qualification tests (#350)
+        run: uv run pytest tests/test_admission_backend.py tests/test_admission_lanes.py tests/test_admission_fail_closed.py tests/test_admission_config.py tests/test_admission_qualification.py tests/test_mcp_admission_contract.py -v -o addopts=""
+
+      - name: REST/MCP admission-conformance regression check
+        run: uv run pytest tests/test_rest_api.py tests/test_mcp*.py -q -o addopts=""
+
+      - name: Install kubeconform
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz -C /usr/local/bin kubeconform
+
+      - name: kubeconform -strict (production-HA + shared-admission profile, #350)
+        run: |
+          helm template omniscience helm/omniscience $PROD_SET $ADMISSION_SET \
+          | kubeconform -strict -summary -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json'

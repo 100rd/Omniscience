@@ -43,3 +43,19 @@ data:
   RETENTION_ARCHIVE_S3_REGION: {{ .Values.retention.archiveS3Region | quote }}
   # Reconciliation worker (REQ-OPS-6) — see omniscience.posture.
   RECONCILE_ENABLED: {{ .Values.config.reconcileEnabled | toString | quote }}
+  # Shared read admission (issue #350, AC-SCALE-1..5). Only rendered when
+  # production.admission.enabled=true, which (via omniscience.admissionGuards)
+  # guarantees every field below is populated. Independent of
+  # production.enabled — the default/eval and plain production-HA installs
+  # render none of these, so Settings keeps its "disabled" default
+  # (packages/core/.../config.py).
+  {{- if .Values.production.admission.enabled }}
+  ADMISSION_BACKEND: {{ .Values.production.admission.backend | quote }}
+  ADMISSION_BACKEND_IDENTITY: {{ .Values.production.admission.backendIdentity | quote }}
+  ADMISSION_LANE_INCIDENT_BUDGET: {{ .Values.production.admission.laneIncidentBudget | toString | quote }}
+  ADMISSION_LANE_BACKGROUND_BUDGET: {{ .Values.production.admission.laneBackgroundBudget | toString | quote }}
+  ADMISSION_QUEUE_DEPTH_MAX: {{ .Values.production.admission.queueDepthMax | toString | quote }}
+  ADMISSION_LATENCY_THRESHOLD_MS: {{ .Values.production.admission.latencyThresholdMs | toString | quote }}
+  ADMISSION_ERROR_RATE_THRESHOLD: {{ .Values.production.admission.errorRateThreshold | toString | quote }}
+  ADMISSION_FAILURE_RESERVE_FRACTION: {{ .Values.production.admission.failureReserveFraction | toString | quote }}
+  {{- end }}

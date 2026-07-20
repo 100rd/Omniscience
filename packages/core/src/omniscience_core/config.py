@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -459,3 +459,152 @@ class Settings(BaseSettings):
             "and publishes re-sync triggers. Defaults to 300 (5 minutes)."
         ),
     )
+
+    # --- Rate limiting (default/unnamed lane) ---
+    rate_limit_rpm: int = Field(
+        default=60,
+        ge=1,
+        description=(
+            "Requests-per-minute budget for the default (unnamed) admission lane "
+            "used by apps/server/.../rest/rate_limit.py::rate_limit_dependency. "
+            "Previously read via getattr(..., default=60) with no backing Settings "
+            "field, so the env var was silently a dead knob; this is the real field."
+        ),
+    )
+
+    # --- Shared read admission (issue #350, AC-SCALE-1..5) ---
+    #
+    # `admission_backend="disabled"` is the only value with a working
+    # implementation today (ProcessLocalAdmissionBackend, the pre-#350
+    # single-process posture, unchanged). A human-approved shared backend
+    # (e.g. Redis SET NX PX / Lua CAS — see docs/runbooks/read-admission.md
+    # "Backend recommendation") is a future value; selecting one activates
+    # a fail-closed stub (SharedAdmissionBackend) rather than a silent
+    # fallback to process-local state, so this is never a self-authorizing
+    # activation. The fields below are the "required env inputs" the task
+    # spec names (backend identity, lane budgets, queue bounds, latency/
+    # error thresholds, failure reserve): they take NO code default and
+    # `_validate_admission_backend_requirements` fails boot if any is unset
+    # while `admission_backend != "disabled"`.
+    admission_backend: Literal["disabled", "shared-redis-lease"] = Field(
+        default="disabled",
+        description=(
+            "Read-admission backend identity selector. 'disabled' (default) "
+            "uses ProcessLocalAdmissionBackend — the current single-process "
+            "MVP posture, unaffected. 'shared-redis-lease' selects the "
+            "SharedAdmissionBackend stub, which fails closed (never falls "
+            "back to process-local) until a human wires a real "
+            "implementation — see docs/runbooks/read-admission.md."
+        ),
+    )
+    admission_backend_identity: str | None = Field(
+        default=None,
+        description=(
+            "Human-approved concrete backend descriptor (e.g. a Redis "
+            "connection identity or managed-service plan id) — REQUIRED "
+            "when admission_backend != 'disabled'. Never defaulted: an "
+            "unset value means no backend has actually been approved."
+        ),
+    )
+    admission_lane_incident_budget: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "SRE incident-lane requests-per-minute budget (AC-SCALE-2). "
+            "REQUIRED when admission_backend != 'disabled'. When unset in "
+            "the default 'disabled' posture, rate_limit_dependency falls "
+            "back to rate_limit_rpm uniformly for both lanes (today's "
+            "single-budget behaviour, unchanged)."
+        ),
+    )
+    admission_lane_background_budget: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Background (default agent/search) lane requests-per-minute "
+            "budget (AC-SCALE-2) — must degrade before the incident lane "
+            "under overload. REQUIRED when admission_backend != 'disabled'."
+        ),
+    )
+    admission_queue_depth_max: int | None = Field(
+        default=None,
+        ge=1,
+        description=(
+            "Bounded admission queue depth ceiling (AC-SCALE-2/5). Matches "
+            "the >= 1 floor helm/omniscience/templates/_admission_guards.tpl "
+            "enforces for production.admission.queueDepthMax — 0 is not a "
+            "valid bound on either side. Enforced by the shared backend / "
+            "checked by the qualification harness "
+            "(admission.qualification.score_queue_depth_from_settings), not "
+            "by an in-process queue — try_admit is a synchronous "
+            "accept/reject, never a queue. REQUIRED when admission_backend "
+            "!= 'disabled'."
+        ),
+    )
+    admission_latency_threshold_ms: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "p99 latency threshold (milliseconds) the incident lane must "
+            "stay under during an overload/fairness qualification probe "
+            "(AC-SCALE-2/5). REQUIRED when admission_backend != 'disabled'."
+        ),
+    )
+    admission_error_rate_threshold: float | None = Field(
+        default=None,
+        gt=0,
+        le=1,
+        description=(
+            "Maximum acceptable incident-lane error rate (fraction, 0-1] "
+            "during an overload/fairness qualification probe (AC-SCALE-2/5). "
+            "Matches the > 0.0 floor "
+            "helm/omniscience/templates/_admission_guards.tpl enforces for "
+            "production.admission.errorRateThreshold — an SLO threshold of "
+            "exactly 0 is not a meaningful bound. REQUIRED when "
+            "admission_backend != 'disabled'."
+        ),
+    )
+    admission_failure_reserve_fraction: float | None = Field(
+        default=None,
+        gt=0,
+        le=1,
+        description=(
+            "Fraction of admission_lane_incident_budget kept as the bounded "
+            "incident reserve when the shared backend is lost (AC-SCALE-4) "
+            "— never unbounded, and only granted when a LeaseAuthority "
+            "proves authority (see admission.state_machine). REQUIRED when "
+            "admission_backend != 'disabled'."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _validate_admission_backend_requirements(self) -> Settings:
+        """Fail boot when a non-'disabled' admission backend is selected
+        without every required env input (issue #350). This is the first
+        Python-side fail-boot Settings validator in this codebase — prior
+        "required in non-dev" checks live in Helm guard templates
+        (_production_guards.tpl) or in app.py::_lifespan's raise-before-
+        connect idiom, not in Settings itself. No code defaults are
+        substituted here; a missing input is a hard ValueError, never a
+        silently-assumed value."""
+        if self.admission_backend == "disabled":
+            return self
+
+        required: dict[str, object | None] = {
+            "admission_backend_identity": self.admission_backend_identity,
+            "admission_lane_incident_budget": self.admission_lane_incident_budget,
+            "admission_lane_background_budget": self.admission_lane_background_budget,
+            "admission_queue_depth_max": self.admission_queue_depth_max,
+            "admission_latency_threshold_ms": self.admission_latency_threshold_ms,
+            "admission_error_rate_threshold": self.admission_error_rate_threshold,
+            "admission_failure_reserve_fraction": self.admission_failure_reserve_fraction,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(
+                f"admission_backend={self.admission_backend!r} requires explicit "
+                f"values for: {', '.join(missing)} (issue #350 AC-SCALE — HA-posture "
+                "admission inputs take no code default; see "
+                "docs/runbooks/read-admission.md)."
+            )
+        return self
