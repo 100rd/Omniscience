@@ -22,6 +22,92 @@
           "protected_ci": {"passed": 3535, "skipped": 6, "coverage_percent": 88}
         }
       }
+    },
+    {
+      "task_id": "gh-issue-350-mcp-v1",
+      "task_spec": "docs/specs/gh-issue-350-mcp-contract-v1.md",
+      "status": "implemented",
+      "pull_request": "https://github.com/100rd/Omniscience/pull/361",
+      "implementation_commit": "b5c653e5e64d2c14e0f35eca6f4a2443181a06b8",
+      "merge_commit": "498492013f1900118bdf1c68bff09a7acefbb41c",
+      "verification": {
+        "provenance": "reported-github",
+        "check_rollup": {"success": 14, "skipped": 2, "other": 0},
+        "test_evidence": {
+          "local_focused": {"passed": 103},
+          "protected_ci": {"success": 14, "skipped": 2}
+        }
+      },
+      "notes": "Implemented repo-local AC-MCP-1..4 (contract 1.0.0, 15-tool registry, freshness/consistency/fallback meta, omniscience-mcp-read-v1 profile). NOT verified: AC-MCP-5 (live severance/canary drill, omnius consumer pin, human verification) is a decision-return blocked on external evidence."
+    },
+    {
+      "task_id": "gh-issue-350-consumer-severance",
+      "task_spec": "docs/specs/gh-issue-350-consumer-severance.md",
+      "status": "implemented",
+      "pull_request": "https://github.com/100rd/Omniscience/pull/362",
+      "implementation_commit": "50d6e111c827b1ffcd10eeb73d5371584814c634",
+      "merge_commit": "09d86cdb58f3b8dd31a21db2a0ed6d2b14e45d1c",
+      "verification": {
+        "provenance": "reported-github",
+        "check_rollup": {"success": 12, "skipped": 0, "other": 0},
+        "test_evidence": {
+          "local_kit": {"passed": 124},
+          "local_broad": {"passed": 168, "skipped": 5},
+          "protected_ci": {"success": 12}
+        }
+      },
+      "notes": "Implemented repo-local AC-SEV-1/4/5 (fixture matrix, read-only verifier, oracle boundary). NOT verified: AC-SEV-2/3 (real Omnius/SRE immutable revisions + content-addressed receipts, live severance drill) are decision-returns blocked on external evidence."
+    },
+    {
+      "task_id": "gh-issue-350-production-ha",
+      "task_spec": "docs/specs/gh-issue-350-production-ha.md",
+      "status": "implemented",
+      "pull_request": "https://github.com/100rd/Omniscience/pull/363",
+      "implementation_commit": "1a81f9572aa488fd6ec774fc18dbb5b7606b63b8",
+      "merge_commit": "e3d7eaa38c25891ef5c20901fbbb6e87b192d5ea",
+      "verification": {
+        "provenance": "reported-github",
+        "check_rollup": {"success": 13, "skipped": 0, "other": 0},
+        "test_evidence": {
+          "local": {"passed": 38},
+          "protected_ci": {"success": 13}
+        }
+      },
+      "notes": "Implemented repo-local AC-HA-1/2/3/5 (fail-closed evidence profile, scheduling policy, per-service records, derived posture). NOT verified: AC-HA-4 (live pod/node/AZ fault-domain probe with measured SLO) and Neo4j/Qdrant licensing/plan entitlements are decision-returns requiring a disposable cluster and human procurement."
+    },
+    {
+      "task_id": "gh-issue-350-backup-restore",
+      "task_spec": "docs/specs/gh-issue-350-backup-restore.md",
+      "status": "implemented",
+      "pull_request": "https://github.com/100rd/Omniscience/pull/364",
+      "implementation_commit": "f2ace802cd5205afacd27eafe4501b522a0b6202",
+      "merge_commit": "8d89a8fc2f572e22c3f14ac04d1d1649605dfd2a",
+      "verification": {
+        "provenance": "reported-github",
+        "check_rollup": {"success": 14, "skipped": 0, "other": 0},
+        "test_evidence": {
+          "local": {"passed": 142, "skipped": 4},
+          "protected_ci": {"success": 14}
+        }
+      },
+      "notes": "Implemented repo-local AC-DR-1/2/3/5/6 (backup-policy evidence, approval envelope with replay-safe nonce ledger, destructive-safety refusal + pre-wipe guard, tamper-evident manifest, deterministic CI fixtures). NOT verified: live destructive restore, cloud-identity binding, and the full measured RPO/RTO drill are decision-returns requiring an isolated recovery environment and a fresh one-shot human approval bound to the command digest."
+    },
+    {
+      "task_id": "gh-issue-350-read-scaling-priority",
+      "task_spec": "docs/specs/gh-issue-350-read-scaling-priority.md",
+      "status": "implemented",
+      "pull_request": "https://github.com/100rd/Omniscience/pull/365",
+      "implementation_commit": "9464ba64ed2cf8f533c23fe8cfcb1006b8c4600b",
+      "merge_commit": "50b3c95eda6028d7f2f778e75e1e9313481e2ede",
+      "verification": {
+        "provenance": "reported-github",
+        "check_rollup": {"success": 15, "skipped": 2, "other": 0},
+        "test_evidence": {
+          "local": {"passed": 124},
+          "protected_ci": {"success": 15, "skipped": 2}
+        }
+      },
+      "notes": "Implemented repo-local AC-SCALE-1..5 logic (shared admission interface behind a disabled activation gate, SRE incident lane, overload contract, fail-closed controller, qualification scoring). NOT verified: live 2+-replica measured evidence, acceptance/provisioning of a concrete shared backend, and live fairness/backend-outage proof are decision-returns. MCP tool-dispatch admission wiring is a scope-bounded follow-up (mcp/server.py is out of this task's scope)."
     }
   ]
 }
