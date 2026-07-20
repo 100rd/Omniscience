@@ -188,6 +188,43 @@ For an even lower-ops path, combine the lite profile with **managed Postgres**
 (above): point `DATABASE_URL` at RDS/Cloud SQL/Neon and drop the `postgres`
 service, leaving only NATS + Neo4j + Qdrant to self-host.
 
+### Production-HA posture (Helm)
+
+The `helm/omniscience` chart's default install is an **evaluation** posture:
+`replicaCount: 1` and the four stateful-dependency toggles (`postgresql`,
+`neo4j`, `qdrant`, `nats`) all default `false` — no subchart dependency is
+declared in `Chart.yaml`, so the container talks to external/pre-existing
+stateful services via `postgres.*`/`nats.*` connection settings. That shape
+is intentionally never presented as production-ready — see
+[issue #350](https://github.com/100rd/Omniscience/issues/350) and the
+[production-HA runbook](runbooks/production-ha.md) for the qualified
+profile, its evidence requirements, and what remains a decision-return.
+
+Three postures exist, computed by the chart itself (`omniscience.posture`
+helper in `_helpers.tpl`) and rendered as the `omniscience.io/posture` label
+on every chart object — a caller cannot set this label directly. This is the
+REQ-OPS-6 mapping (`specs/SPEC-OPS-operational-evidence.md`: "Evaluation/
+lite, governed, and production-HA deployment postures have explicit claims
+and required evidence... **Fallback:** unknown posture is evaluation-only."):
+
+| Posture | Trigger | Meaning |
+|---|---|---|
+| `evaluation` | REQ-OPS-6 fallback — `production.enabled=false` and no `production.evidence.*` field populated | disposable, non-HA default |
+| `governed` | `production.enabled=false` but at least one `production.evidence.*` field populated by hand | hardened beyond the default, not HA-qualified |
+| `production-ha` | `production.enabled=true` **and** every AC-HA-1/2/3/5 + REQ-OPS-6 guard passes | dedicated-account target, ≥3-zone HA scheduling, external Multi-AZ/HA stateful dependencies, reconciliation + retention both enabled |
+
+`production-ha` is fail-closed: setting `production.enabled=true` without a
+complete evidence set (account/cluster/region/zones, external RDS Multi-AZ,
+external JetStream ×3, Neo4j HA topology + entitlement reference, Qdrant
+distributed ×3 nodes), without disabling the stateful-dependency toggles, or
+with retention/reconciliation disabled (REQ-OPS-6 — disabling either cannot
+be presented as production healthy) aborts the Helm render entirely
+(`fail()` in `templates/_production_guards.tpl`, naming the exact missing
+field) rather than silently downgrading to a lesser posture. Failure-domain
+qualification (live pod/node/AZ fault injection with measured SLOs) and the
+Neo4j/Qdrant entitlement decision itself are out of this chart's scope —
+see the runbook's "blocked on external" section.
+
 ## Agent layer (for AgenticConnector only)
 
 Most of Omniscience is deterministic. The exception is **AgenticConnector** — a connector variant whose `discover()` phase uses an LLM to decide what to index (see [ADR 0003](decisions/0003-agent-framework-langgraph-primary.md)).

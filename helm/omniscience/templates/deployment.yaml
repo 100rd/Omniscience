@@ -1,3 +1,4 @@
+{{- include "omniscience.productionGuards" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,6 +30,9 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       serviceAccountName: {{ include "omniscience.serviceAccountName" . }}
+      {{- if .Values.production.enabled }}
+      priorityClassName: {{ include "omniscience.fullname" . }}-critical-read
+      {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
       containers:
@@ -70,4 +74,13 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.production.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ .Values.production.topologySpreadConstraints.maxSkew }}
+          topologyKey: {{ .Values.production.topologySpreadConstraints.topologyKey }}
+          whenUnsatisfiable: {{ .Values.production.topologySpreadConstraints.whenUnsatisfiable }}
+          labelSelector:
+            matchLabels:
+              {{- include "omniscience.selectorLabels" . | nindent 14 }}
       {{- end }}
