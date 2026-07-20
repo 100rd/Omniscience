@@ -328,8 +328,12 @@ def test_governance_drift_gate_rejects_each_index_surface(
         old = '"provenance": "reported-github"'
         new = '"provenance": "unverified-local"'
     content = target.read_text(encoding="utf-8")
-    assert content.count(old) == 1
-    target.write_text(content.replace(old, new), encoding="utf-8")
+    # The execution index now holds one entry per delivered task, so a
+    # governance surface like `"provenance": "reported-github"` legitimately
+    # appears more than once. Corrupting a single occurrence is enough to
+    # prove the drift gate rejects it.
+    assert content.count(old) >= 1
+    target.write_text(content.replace(old, new, 1), encoding="utf-8")
     errors = []
     CHECKER._validate_governance(tmp_path, errors)
 
