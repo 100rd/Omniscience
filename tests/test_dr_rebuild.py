@@ -173,6 +173,24 @@ def test_dr_rebuild_advances_graph_checkpoint_for_empty_projection() -> None:
     assert "if wrapped_entities" not in rebuild_source
 
 
+def test_rebuild_pre_wipe_safety_guard_runs_before_wipe() -> None:
+    """AC-DR-3 / P-SOT-6: the destructive-safety guard must run — and be
+    able to abort — before any wipe command executes. CI-portable source
+    check; the live behaviour is exercised by
+    TestDrIntegration::test_pre_wipe_refusal_aborts_on_non_empty_without_drill_context.
+    """
+    rebuild_source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "rebuild_all_projections.py"
+    ).read_text(encoding="utf-8")
+
+    guard_idx = rebuild_source.index("check_destructive_safety(")
+    wipe_idx = rebuild_source.index('print("Wiping Neo4j and Qdrant...")')
+
+    assert guard_idx < wipe_idx, "destructive-safety guard must run before the wipe begins"
+    assert "sys.exit(4)" in rebuild_source
+    assert "OMNISCIENCE_DR_DRILL" in rebuild_source
+
+
 def _perfect_fakes(
     *,
     chunk_count: int = 9,
@@ -480,4 +498,47 @@ class TestDrIntegration:
 
         assert versions[0] == versions[1], (
             f"Non-deterministic rebuild: run 1={versions[0]}, run 2={versions[1]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_pre_wipe_refusal_aborts_on_non_empty_without_drill_context(self) -> None:
+        """AC-DR-3 / P-SOT-6: a rebuild against already-populated projections
+        must abort BEFORE wipe when OMNISCIENCE_DR_DRILL is not set. The
+        ordinary sanctioned-drill path (env var present, exercised by every
+        other test in this class) is unaffected.
+        """
+        import subprocess
+
+        rebuild_cmd = [
+            sys.executable,
+            "scripts/rebuild_all_projections.py",
+            "--yes",
+            "--rto-seconds",
+            "120",
+        ]
+
+        # Ensure Neo4j/Qdrant are populated by a normal, drill-sanctioned rebuild.
+        populate = subprocess.run(rebuild_cmd, capture_output=True, text=True)
+        assert populate.returncode == 0, (
+            f"setup rebuild failed (exit {populate.returncode}):\n"
+            f"{populate.stdout}\n{populate.stderr}"
+        )
+
+        # Strip only the drill marker; keep DATABASE_URL/NEO4J_*/QDRANT_* so
+        # the process can still reach the (now non-empty) stores.
+        env = os.environ.copy()
+        env.pop("OMNISCIENCE_DR_DRILL", None)
+        refused = subprocess.run(rebuild_cmd, capture_output=True, text=True, env=env)
+        assert refused.returncode == 4, (
+            f"expected pre-wipe refusal exit code 4, got {refused.returncode}:\n"
+            f"{refused.stdout}\n{refused.stderr}"
+        )
+        assert "non_empty_projections" in refused.stdout
+
+        # Restore a known-good state (drill-sanctioned) for any test that
+        # runs after this one in the same session.
+        cleanup = subprocess.run(rebuild_cmd, capture_output=True, text=True)
+        assert cleanup.returncode == 0, (
+            f"cleanup rebuild failed (exit {cleanup.returncode}):\n"
+            f"{cleanup.stdout}\n{cleanup.stderr}"
         )
