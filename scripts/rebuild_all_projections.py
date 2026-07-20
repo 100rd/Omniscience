@@ -27,6 +27,23 @@ Default budget: 900 seconds (15 minutes).  Override with --rto-seconds N.
 The script exits with code 2 if elapsed time exceeds the budget.
 See docs/decisions/0018-rebuild-direct-write-exception.md §RTO for guidance.
 
+Pre-wipe destructive-safety refusal (AC-DR-3 / P-SOT-6)
+=========================================================
+Before wiping Neo4j/Qdrant, the script measures each store's current point/
+node count and refuses to proceed if either is non-empty, UNLESS the
+OMNISCIENCE_DR_DRILL=1 environment variable is set (the same sanctioned-drill
+marker scripts/seed_dr_drill.py already requires).  This closes the gap where
+`--yes` alone wiped whatever it found with no precondition check at all
+(REQ-SOT-6: "unmet precondition aborts before destructive action").  A
+routine drill run (dr-drill.yml) is unaffected: its Neo4j/Qdrant containers
+start empty, so the check passes trivially even without the env var; the env
+var only matters for a repeat rebuild against already-populated projections.
+Exit code 4 on refusal.  See scripts/qualify_backup_restore.py for the shared
+check_destructive_safety() implementation and docs/runbooks/backup-restore.md
+for the full safety-interlock picture (production-name/disposable-tag/
+writer-lease/credential-ambiguity checks are available there but are not
+wired into this script — no target-identity config surface exists yet).
+
 --recompute-embeddings (AP5)
 =============================
 When set, the rebuild IGNORES stored ``chunk.embedding`` values and
@@ -48,6 +65,7 @@ this flag.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 import time
 import uuid
@@ -69,6 +87,7 @@ from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_constants import COLLECTION_NAME_PREFIX
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
 from qdrant_client import AsyncQdrantClient
+from qualify_backup_restore import VerificationResult, check_destructive_safety
 from sqlalchemy import func, select, text
 
 #: AP5 flag: exported so tests can assert the flag exists and is parseable.
@@ -121,6 +140,30 @@ async def _reset_qdrant_collections(
     # connect() bootstraps only after close() clears the store's lifecycle state.
     await vector_store.close()
     await vector_store.connect()
+
+
+async def _pre_wipe_counts(
+    qdrant_client: AsyncQdrantClient,
+    graph_store: Neo4jGraphStore,
+) -> tuple[int, int]:
+    """Return (total_qdrant_points, total_neo4j_nodes) across managed stores.
+
+    Measured immediately before a wipe so check_destructive_safety() can
+    refuse to proceed against a non-empty target outside a sanctioned drill
+    context (AC-DR-3 / P-SOT-6).
+    """
+    qdrant_total = 0
+    for collection in (await qdrant_client.get_collections()).collections:
+        if collection.name.startswith(COLLECTION_NAME_PREFIX):
+            count_result = await qdrant_client.count(collection_name=collection.name, exact=True)
+            qdrant_total += count_result.count
+
+    async with graph_store._driver.session(database=graph_store._config.database) as session:
+        result = await session.run("MATCH (n) RETURN count(n) AS c")
+        record = await result.single()
+        neo4j_total = int(record["c"]) if record is not None else 0
+
+    return qdrant_total, neo4j_total
 
 
 class EntityWrapper:
@@ -409,6 +452,31 @@ async def main() -> None:
     # ------------------------------------------------------------------
     # Full rebuild path
     # ------------------------------------------------------------------
+
+    # Pre-wipe destructive-safety refusal (AC-DR-3 / P-SOT-6). Measure
+    # current store occupancy and refuse to wipe a non-empty target unless
+    # a sanctioned drill context authorizes it (see module docstring).
+    drill_context = os.environ.get("OMNISCIENCE_DR_DRILL") == "1"
+    pre_qdrant_count, pre_neo4j_count = await _pre_wipe_counts(qdrant_client, graph_store)
+    safety: VerificationResult = check_destructive_safety(
+        qdrant_chunk_count=pre_qdrant_count,
+        neo4j_entity_count=pre_neo4j_count,
+        drill_context=drill_context,
+    )
+    if not safety.is_green:
+        print("Refusing to wipe: destructive-safety precondition failed (AC-DR-3 / P-SOT-6).")
+        for reason in safety.reasons:
+            print(f"  - {reason}")
+        print(
+            "Set OMNISCIENCE_DR_DRILL=1 to authorize wiping already-populated projections "
+            "in a sanctioned drill/DR context."
+        )
+        await vector_store.close()
+        await graph_store.close()
+        await qdrant_client.close()
+        await engine.dispose()
+        sys.exit(4)
+
     print("Wiping Neo4j and Qdrant...")
 
     # 1. Wipe Neo4j

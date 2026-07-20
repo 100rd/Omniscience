@@ -1,0 +1,309 @@
+name: Restore Qualification
+
+# AC-DR-6: deterministic, reproducible-without-production-credentials CI
+# fixtures for the backup/restore qualification harness (issue #350,
+# docs/specs/gh-issue-350-backup-restore.md).
+#
+# Two independent jobs:
+#   unit-checks   — refusal/approval/manifest/policy logic, pure fixtures,
+#                   no service containers, no cloud credentials.
+#   convergence   — seeds a fixture dataset, exercises the pre-wipe safety
+#                   guard + rebuild + idempotent verify-only (mirrors
+#                   dr-drill.yml's service/dependency shape), then asserts
+#                   the documented breach (exit 2) and mismatch (exit 3)
+#                   exit codes on deliberately broken fixtures.
+#
+# This workflow never touches a real cloud account and never performs a
+# live destructive restore — see docs/runbooks/backup-restore.md
+# "Blocked on external — decision returns".
+
+on:
+  workflow_dispatch:
+    inputs:
+      rto_seconds:
+        description: "RTO budget in seconds for the convergence job (default: 120 for fixture dataset)"
+        required: false
+        default: "120"
+  push:
+    branches: [main]
+    paths:
+      - "scripts/qualify_backup_restore.py"
+      - "scripts/rebuild_all_projections.py"
+      - "scripts/dr_verify.py"
+      - "scripts/seed_dr_drill.py"
+      - "tests/test_backup_restore*.py"
+      - "tests/test_dr_rebuild.py"
+      - ".github/workflows/restore-qualification.yml"
+  pull_request:
+    paths:
+      - "scripts/qualify_backup_restore.py"
+      - "scripts/rebuild_all_projections.py"
+      - "scripts/dr_verify.py"
+      - "scripts/seed_dr_drill.py"
+      - "tests/test_backup_restore*.py"
+      - "tests/test_dr_rebuild.py"
+      - ".github/workflows/restore-qualification.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  unit-checks:
+    name: Refusal / approval / manifest / policy unit checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra local
+
+      - name: Run backup/restore unit tests (no services, no credentials)
+        run: uv run pytest tests/test_backup_restore*.py -v --no-header
+
+  convergence:
+    name: Pre-wipe guard + rebuild convergence + breach/mismatch handling
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: omniscience_restore_qual
+          POSTGRES_USER: omniscience
+          POSTGRES_PASSWORD: restore_qual_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      neo4j:
+        image: neo4j:5.19-community
+        env:
+          NEO4J_AUTH: neo4j/restore_qual_password
+          NEO4J_server_memory_heap_initial__size: 512m
+          NEO4J_server_memory_heap_max__size: 1G
+          NEO4J_server_memory_pagecache_size: 256m
+        ports:
+          - 7687:7687
+          - 7474:7474
+        options: >-
+          --health-cmd "wget -q -O - http://localhost:7474 > /dev/null"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 10
+          --health-start-period 45s
+
+      qdrant:
+        image: qdrant/qdrant:v1.12.4
+        ports:
+          - 6333:6333
+          - 6334:6334
+        options: >-
+          --health-cmd "bash -c '</dev/tcp/localhost/6333'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+          --health-start-period 20s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --frozen --extra local
+
+      - name: Run database migrations
+        working-directory: packages/core
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+        run: uv run alembic upgrade head
+
+      - name: Seed fixture dataset
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          OMNISCIENCE_DR_DRILL: "1"
+        run: uv run python scripts/seed_dr_drill.py
+
+      - name: Determine RTO budget
+        id: rto
+        env:
+          RTO_SECONDS_INPUT: ${{ github.event.inputs.rto_seconds }}
+        run: |
+          RTO="$RTO_SECONDS_INPUT"
+          if [ -z "$RTO" ]; then
+            RTO=120
+          fi
+          echo "rto_seconds=$RTO" >> "$GITHUB_OUTPUT"
+
+      - name: Run rebuild with pre-wipe guard + RTO enforcement
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
+          OMNISCIENCE_DR_DRILL: "1"
+          RTO_SECONDS: ${{ steps.rto.outputs.rto_seconds }}
+        # Exit codes: 0 pass, 2 RTO exceeded, 3 verification mismatch,
+        # 4 pre-wipe safety refusal (see docs/runbooks/backup-restore.md).
+        run: |
+          uv run python scripts/rebuild_all_projections.py \
+            --yes \
+            --recompute-embeddings \
+            --rto-seconds "$RTO_SECONDS"
+
+      - name: Verify-only pass (idempotency check)
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
+          RTO_SECONDS: ${{ steps.rto.outputs.rto_seconds }}
+        run: |
+          uv run python scripts/rebuild_all_projections.py \
+            --verify-only \
+            --rto-seconds "$RTO_SECONDS"
+
+      - name: Run DR + backup-restore integration tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
+          OMNISCIENCE_DR_DRILL: "1"
+        # Includes TestDrIntegration::test_pre_wipe_refusal_aborts_on_non_empty_without_drill_context
+        # (AC-DR-3 / P-SOT-6 live behaviour) and leaves the fixture dataset
+        # in a passing, populated state for the breach/mismatch steps below.
+        run: |
+          uv run pytest tests/test_dr_rebuild.py -v --no-header
+
+      - name: Breach handling — deliberately tiny RTO budget exits 2
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
+          OMNISCIENCE_DR_DRILL: "1"
+        run: |
+          set +e
+          uv run python scripts/rebuild_all_projections.py \
+            --yes \
+            --recompute-embeddings \
+            --rto-seconds 0
+          code=$?
+          set -e
+          if [ "$code" -ne 2 ]; then
+            echo "expected exit code 2 (RTO exceeded), got $code"
+            exit 1
+          fi
+          echo "breach handling OK: exit code 2 as documented"
+
+      - name: Restore a passing dataset before the mismatch step
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
+          OMNISCIENCE_DR_DRILL: "1"
+          RTO_SECONDS: ${{ steps.rto.outputs.rto_seconds }}
+        run: |
+          uv run python scripts/rebuild_all_projections.py \
+            --yes \
+            --recompute-embeddings \
+            --rto-seconds "$RTO_SECONDS"
+
+      - name: Corrupt-fixture handling — Postgres/Qdrant divergence exits 3
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+        run: |
+          uv run python -c "
+          import asyncio
+          from omniscience_core.config import Settings
+          from omniscience_core.db import create_async_engine, create_session_factory
+          from sqlalchemy import text
+
+
+          async def corrupt() -> None:
+              settings = Settings()
+              engine = create_async_engine(settings)
+              session_factory = create_session_factory(engine)
+              async with session_factory() as session, session.begin():
+                  await session.execute(
+                      text(
+                          'DELETE FROM chunks WHERE id = ('
+                          'SELECT id FROM chunks ORDER BY document_id, ord LIMIT 1)'
+                      )
+                  )
+              await engine.dispose()
+
+
+          asyncio.run(corrupt())
+          "
+
+      - name: Assert corrupted fixture fails verify-only with exit 3
+        env:
+          DATABASE_URL: postgresql+asyncpg://omniscience:restore_qual_test@localhost:5432/omniscience_restore_qual
+          NEO4J_URI: bolt://localhost:7687
+          NEO4J_USERNAME: neo4j
+          NEO4J_PASSWORD: restore_qual_password
+          QDRANT_HOST: localhost
+          QDRANT_HTTP_PORT: "6333"
+          QDRANT_GRPC_PORT: "6334"
+          EMBEDDING_PROVIDER: local
+          RTO_SECONDS: ${{ steps.rto.outputs.rto_seconds }}
+        run: |
+          set +e
+          uv run python scripts/rebuild_all_projections.py \
+            --verify-only \
+            --rto-seconds "$RTO_SECONDS"
+          code=$?
+          set -e
+          if [ "$code" -ne 3 ]; then
+            echo "expected exit code 3 (verification mismatch), got $code"
+            exit 1
+          fi
+          echo "mismatch handling OK: exit code 3 as documented"
