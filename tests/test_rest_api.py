@@ -37,7 +37,11 @@ from omniscience_core.db.models import (
 )
 from omniscience_retrieval.models import QueryStats, SearchHit, SearchResult
 from omniscience_server.app import create_app
-from omniscience_server.rest.rate_limit import check_rate_limit, clear_all_buckets
+from omniscience_server.rest.rate_limit import (
+    check_rate_limit,
+    clear_all_buckets,
+    reset_admission_controller_cache,
+)
 
 _WS_A = uuid.UUID("aaaaaaaa-0000-0000-0000-000000000001")
 
@@ -155,6 +159,7 @@ def admin_token() -> tuple[ApiToken, str]:
 def reset_rate_buckets() -> None:
     """Clear rate-limit state between every test."""
     clear_all_buckets()
+    reset_admission_controller_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -393,12 +398,13 @@ def test_rate_limit_refills_over_time() -> None:
     assert allowed_empty is False
 
     # Fast-forward by patching time.monotonic to simulate 1 second elapsed
-    # After 1 second at 1 tok/sec, bucket gains 1 token
-    from omniscience_server.rest import rate_limit as rl_module
+    # After 1 second at 1 tok/sec, bucket gains 1 token. The bucket math
+    # lives in admission.process_local (issue #350 refactor) — patch there.
+    from omniscience_server.admission import process_local as admission_process_local
 
-    original_time = rl_module.time.monotonic  # type: ignore[attr-defined]
+    original_time = admission_process_local.time.monotonic
     fake_now = original_time() + 2.0  # advance by 2 seconds
-    with patch.object(rl_module.time, "monotonic", return_value=fake_now):
+    with patch.object(admission_process_local.time, "monotonic", return_value=fake_now):
         allowed_refilled, _ = check_rate_limit(token_id, rpm=rpm)
     assert allowed_refilled is True
 
@@ -429,6 +435,185 @@ async def test_rate_limit_endpoint_returns_429() -> None:
     body = resp.json()
     assert body["error"]["code"] == "rate_limited"
     assert "Retry-After" in resp.headers
+
+
+@pytest.mark.asyncio
+async def test_incident_lane_has_separate_budget_from_background_lane() -> None:
+    """AC-SCALE-2: a token carrying incidents:write resolves to the
+    incident lane, a separately-bounded budget from a search-only token's
+    background lane — draining one lane's bucket must not affect the
+    other's, even though both share the same process-local backend."""
+    from omniscience_core.config import Settings
+
+    def _app_for(token: ApiToken) -> FastAPI:
+        settings = Settings(
+            database_url="postgresql+asyncpg://test:test@localhost:5432/test",
+            nats_url="nats://localhost:4222",
+            log_level="WARNING",
+            otlp_endpoint=None,
+            environment="test",
+            admission_lane_incident_budget=2,
+            admission_lane_background_budget=2,
+        )
+        app = create_app(settings=settings)
+        app.state.db_session_factory = MagicMock(return_value=_make_session(scalars=[token]))
+        return app
+
+    tok_background, pt_background = _make_token(["search"])
+    tok_background.id = uuid.uuid4()
+    tok_incident, pt_incident = _make_token(["search", "incidents:write"])
+    tok_incident.id = uuid.uuid4()
+
+    clear_all_buckets()
+
+    background_app = _app_for(tok_background)
+    async with await _client_for(background_app) as client:
+        for _ in range(2):
+            await client.post(
+                "/api/v1/search",
+                json={"query": "hello"},
+                headers={"Authorization": f"Bearer {pt_background}"},
+            )
+        exhausted = await client.post(
+            "/api/v1/search",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {pt_background}"},
+        )
+    assert exhausted.status_code == 429
+
+    incident_app = _app_for(tok_incident)
+    async with await _client_for(incident_app) as client:
+        allowed = await client.post(
+            "/api/v1/search",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {pt_incident}"},
+        )
+    assert allowed.status_code != 429
+
+
+@pytest.mark.asyncio
+async def test_admission_backend_unavailable_returns_503() -> None:
+    """AC-SCALE-3/4: selecting a non-'disabled' admission backend activates
+    the fail-closed SharedAdmissionBackend stub — every request degrades to
+    a stable 503 admission_backend_unavailable, never a silent process-local
+    fallback and never a 429 (which would imply the backend was consulted
+    and merely exhausted, not lost)."""
+    from omniscience_core.config import Settings
+
+    tok, pt = _make_token(["search"])
+    tok.id = uuid.uuid4()
+    settings = Settings(
+        database_url="postgresql+asyncpg://test:test@localhost:5432/test",
+        nats_url="nats://localhost:4222",
+        log_level="WARNING",
+        otlp_endpoint=None,
+        environment="test",
+        admission_backend="shared-redis-lease",
+        admission_backend_identity="redis://admission.internal:6379/0",
+        admission_lane_incident_budget=10,
+        admission_lane_background_budget=10,
+        admission_queue_depth_max=100,
+        admission_latency_threshold_ms=250.0,
+        admission_error_rate_threshold=0.01,
+        admission_failure_reserve_fraction=0.2,
+    )
+    app = create_app(settings=settings)
+    app.state.db_session_factory = MagicMock(return_value=_make_session(scalars=[tok]))
+
+    async with await _client_for(app) as client:
+        resp = await client.post(
+            "/api/v1/search",
+            json={"query": "hello"},
+            headers={"Authorization": f"Bearer {pt}"},
+        )
+
+    assert resp.status_code == 503
+    body = resp.json()
+    assert body["error"]["code"] == "admission_backend_unavailable"
+
+
+def test_default_disabled_posture_has_no_lane_split() -> None:
+    """BP review MEDIUM #3 backward-compat proof: the true zero-touch
+    default (admission_backend="disabled", no lane budgets set) resolves
+    every lane to the single pre-#350 shared bucket at rate_limit_rpm
+    capacity — lane-split only activates once a lane budget is explicitly
+    configured (see docs/runbooks/read-admission.md "Posture model")."""
+    from omniscience_core.config import Settings
+    from omniscience_server.admission.lanes import BACKGROUND_LANE, INCIDENT_LANE
+    from omniscience_server.rest.rate_limit import _DEFAULT_LANE, _lane_capacity_and_bucket
+
+    settings = Settings(
+        database_url="postgresql+asyncpg://test:test@localhost:5432/test",
+        nats_url="nats://localhost:4222",
+        log_level="WARNING",
+        otlp_endpoint=None,
+        environment="test",
+    )
+    assert settings.admission_backend == "disabled"
+    assert settings.admission_lane_incident_budget is None
+    assert settings.admission_lane_background_budget is None
+
+    incident_capacity, incident_bucket = _lane_capacity_and_bucket(settings, INCIDENT_LANE)
+    background_capacity, background_bucket = _lane_capacity_and_bucket(settings, BACKGROUND_LANE)
+
+    assert incident_bucket == _DEFAULT_LANE
+    assert background_bucket == _DEFAULT_LANE
+    assert incident_capacity == settings.rate_limit_rpm
+    assert background_capacity == settings.rate_limit_rpm
+
+
+def test_controller_for_caches_shared_backend_across_calls() -> None:
+    """BP review MEDIUM #5: a non-'disabled' admission backend must not be
+    rebuilt (and any future connection-pool/lease state discarded) on every
+    request — the same config must resolve to the same cached controller."""
+    from omniscience_core.config import Settings
+    from omniscience_server.rest.rate_limit import (
+        _controller_for,
+        reset_admission_controller_cache,
+    )
+
+    reset_admission_controller_cache()
+    settings = Settings(
+        database_url="postgresql+asyncpg://test:test@localhost:5432/test",
+        nats_url="nats://localhost:4222",
+        log_level="WARNING",
+        otlp_endpoint=None,
+        environment="test",
+        admission_backend="shared-redis-lease",
+        admission_backend_identity="redis://admission.internal:6379/0",
+        admission_lane_incident_budget=10,
+        admission_lane_background_budget=10,
+        admission_queue_depth_max=100,
+        admission_latency_threshold_ms=250.0,
+        admission_error_rate_threshold=0.01,
+        admission_failure_reserve_fraction=0.2,
+    )
+
+    first = _controller_for(settings)
+    second = _controller_for(settings)
+    assert first is second
+
+    other_identity_settings = Settings(
+        database_url="postgresql+asyncpg://test:test@localhost:5432/test",
+        nats_url="nats://localhost:4222",
+        log_level="WARNING",
+        otlp_endpoint=None,
+        environment="test",
+        admission_backend="shared-redis-lease",
+        admission_backend_identity="redis://other-admission.internal:6379/0",
+        admission_lane_incident_budget=10,
+        admission_lane_background_budget=10,
+        admission_queue_depth_max=100,
+        admission_latency_threshold_ms=250.0,
+        admission_error_rate_threshold=0.01,
+        admission_failure_reserve_fraction=0.2,
+    )
+    third = _controller_for(other_identity_settings)
+    assert third is not first
+
+    reset_admission_controller_cache()
+    fourth = _controller_for(settings)
+    assert fourth is not first
 
 
 # ---------------------------------------------------------------------------

@@ -148,3 +148,26 @@ production:
     qdrant:
       topology: ""
       nodes: 0
+
+  # Shared read-admission evidence (issue #350, AC-SCALE-1..5). Same
+  # empty/zero-default, required-when-enabled shape as `evidence:` above —
+  # see helm/omniscience/templates/_admission_guards.tpl and
+  # docs/runbooks/read-admission.md. backendIdentity is a human-approved
+  # concrete backend descriptor (e.g. a Redis connection identity) — never
+  # a literal credential.
+  #
+  # Gated on its OWN `enabled` flag, deliberately independent of
+  # `production.enabled` — the production-HA profile (issue #350 slice
+  # "production-HA", already merged) must keep rendering/qualifying
+  # without ever having to supply admission evidence; shared admission is
+  # an additive, separately-activated posture on top of it.
+  admission:
+    enabled: false
+    backend: ""
+    backendIdentity: ""
+    laneIncidentBudget: 0
+    laneBackgroundBudget: 0
+    queueDepthMax: 0
+    latencyThresholdMs: 0
+    errorRateThreshold: 0
+    failureReserveFraction: 0
