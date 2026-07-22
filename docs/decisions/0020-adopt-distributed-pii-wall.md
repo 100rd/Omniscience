@@ -1,6 +1,6 @@
 # ADR-0020: Adopt the distributed PII Wall at the Omniscience propagation boundary
 
-- **Status:** Accepted
+Status: accepted
 - **Date:** 2026-07-21
 - **Deciders:** platform owner and Omniscience owner
 - **Governing decision:** `genai-enablement` ADR-0018
