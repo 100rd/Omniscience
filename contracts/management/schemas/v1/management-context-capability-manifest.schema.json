@@ -1,0 +1,56 @@
+{
+  "$id": "https://omniscience.dev/management/v1/schemas/management-context-capability-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_major",
+    "schema_revisions",
+    "producer_manifest_digest",
+    "supported_field_classes",
+    "supported_domains",
+    "produced_at"
+  ],
+  "properties": {
+    "contract_major": {"type": "integer"},
+    "schema_revisions": {"type": "object"},
+    "producer_manifest_digest": {"type": "string", "minLength": 1},
+    "supported_field_classes": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "citations",
+          "provenance",
+          "freshness",
+          "coverage",
+          "conflicts",
+          "projection_health",
+          "knowledge_quality",
+          "synthesis"
+        ]
+      }
+    },
+    "supported_domains": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "enum": [
+          "reliability",
+          "cost_and_value",
+          "ai_and_agent_effectiveness",
+          "security",
+          "privacy",
+          "continuous_compliance",
+          "supply_chain_integrity",
+          "delivery_effectiveness",
+          "knowledge_quality",
+          "capacity_performance_sustainability",
+          "toil",
+          "product_outcomes"
+        ]
+      }
+    },
+    "produced_at": {"type": "string", "minLength": 1}
+  }
+}

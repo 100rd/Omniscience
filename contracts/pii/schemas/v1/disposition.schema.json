@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "disposition.schema.json",
+  "title": "PIILifecycleDisposition",
+  "description": "SPEC-PII-POLICY REQ-PII-POL-7 closed per-store/per-projection lifecycle states. These remain distinct; aggregation cannot turn partial coverage into 'deleted' or 'clean'.",
+  "type": "string",
+  "enum": [
+    "complete",
+    "pending",
+    "excluded",
+    "immutable_retention",
+    "backup_pending",
+    "failed",
+    "unavailable"
+  ]
+}

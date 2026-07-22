@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "compatibility-pin.schema.json",
+  "title": "PolicyCompatibilityPin",
+  "description": "SPEC-PII-POLICY REQ-PII-POL-8 producer/consumer severable schema-major compatibility window carried inside a PIIPolicyBundle.",
+  "type": "object",
+  "required": ["schema_major", "min_supported_major", "max_supported_major"],
+  "additionalProperties": true,
+  "properties": {
+    "schema_major": { "type": "integer" },
+    "min_supported_major": { "type": "integer" },
+    "max_supported_major": { "type": "integer" }
+  }
+}

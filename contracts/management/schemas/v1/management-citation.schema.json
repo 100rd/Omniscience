@@ -1,0 +1,38 @@
+{
+  "$id": "https://omniscience.dev/management/v1/schemas/management-citation.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "citation_id",
+    "source_ref",
+    "uri",
+    "snapshot_digest",
+    "observed_at",
+    "retrieval_strategy",
+    "field_class",
+    "evidence_fitness"
+  ],
+  "properties": {
+    "citation_id": {"type": "string", "minLength": 1},
+    "source_ref": {"type": "string", "minLength": 1},
+    "uri": {"type": "string", "minLength": 1},
+    "snapshot_digest": {"type": "string", "minLength": 1},
+    "observed_at": {"type": "string", "minLength": 1},
+    "retrieval_strategy": {"type": "string", "minLength": 1},
+    "field_class": {
+      "type": "string",
+      "enum": [
+        "citations",
+        "provenance",
+        "freshness",
+        "coverage",
+        "conflicts",
+        "projection_health",
+        "knowledge_quality",
+        "synthesis"
+      ]
+    },
+    "evidence_fitness": {"type": "string", "enum": ["known", "partial", "unknown", "severed"]}
+  }
+}

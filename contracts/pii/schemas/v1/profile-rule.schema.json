@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "profile-rule.schema.json",
+  "title": "PIIWallProfileRule",
+  "description": "SPEC-PII-POLICY REQ-PII-POL-3 per-profile admission rule embedded in a PIIPolicyBundle's 'profiles' map.",
+  "type": "object",
+  "required": ["admits_data_classes", "requires_transform", "requires_permit"],
+  "additionalProperties": true,
+  "properties": {
+    "admits_data_classes": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "data-class.schema.json" }
+    },
+    "requires_transform": {
+      "type": "array",
+      "items": { "$ref": "transform-state.schema.json" }
+    },
+    "requires_permit": { "type": "boolean" }
+  }
+}

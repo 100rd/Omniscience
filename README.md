@@ -1,5 +1,9 @@
 # Omniscience
 
+For synchronized-platform work, start at [`PLATFORM.md`](PLATFORM.md). It links the canonical
+cross-repository ADR/SPEC plan and then routes agents back to this repository's authoritative capability
+and task contracts.
+
 **A self-hosted Living Semantic Core for platform & SRE teams.** Omniscience turns fragmented operational data — cloud infrastructure, IaC code, Kubernetes runtime, CI/CD, alerts, incident chat, docs — into a single **causal + temporal + semantic graph**, exposed through an **MCP-first API** to any MCP-compatible AI client (Claude Code, Cursor, Gemini, custom agents, or AI pipelines).
 
 Retrieval-only by design: Omniscience returns **linked evidence with citations and confidence** — graph entities, related artifacts, and source chunks — and the calling LLM synthesizes the answer. No embedded LLM, no opinionated chat, no vendor lock-in. (Write actions against infrastructure are an explicit non-goal of this product; see Action Mode in [docs/vision.md](docs/vision.md#4-product-modes).)

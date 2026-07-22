@@ -10,6 +10,7 @@ governingAdrs: [genai-enablement/ADR-0017, Omniscience/ADR-0019]
 capabilitySpecs: [SPEC-MCP, SPEC-KP, SPEC-EV]
 sddMode: full
 repo: 100rd/Omniscience
+evidenceDestination: component-execution-index://docs/specs/execution-index.json#gh-issue-350-consumer-severance
 scope:
   include:
     - scripts/check_consumer_severance.py

@@ -1,0 +1,28 @@
+{
+  "boundPackage": "task-sp-61-pii-wall-pw0",
+  "boundGoverningAdrs": ["genai-enablement/ADR-0018", "Omniscience/ADR-0020"],
+  "groundTruth": {
+    "workPackage": "SP-60",
+    "contract": "SPEC-PII-POLICY",
+    "manifestPath": "../genai-enablement/contracts/pii/manifest/pii-contract-manifest.v1.json",
+    "algorithm": "sha256-of-sorted-path-digest-pairs-v1",
+    "canonicalDigest": "sha256:fa312387e5fa4b3980b085e20033fc8d947474c62c15dd9e3836372dea01f038",
+    "schemaMajor": 1,
+    "entryCount": 34
+  },
+  "vendoredEntries": [
+    { "path": "schemas/v1/compatibility-pin.schema.json", "sha256": "c8336bb7316c229a717cda49038c782e50b45e04fbd0c19cc06137b4d47359c6" },
+    { "path": "schemas/v1/data-class.schema.json", "sha256": "19eb0a02cc94cebf1ba61f9f456d217983bf847740216628c6caa67b6d70c886" },
+    { "path": "schemas/v1/data-envelope.schema.json", "sha256": "4aeaf4ef829bbfd4e85cef8d2bf5b81ca9424d02e89370135b43e67f5d647700" },
+    { "path": "schemas/v1/deletion-receipt.schema.json", "sha256": "a75591521b96561c3030486dffae947b3bb726fac1143365d3b95a6d8b3343ac" },
+    { "path": "schemas/v1/disposition.schema.json", "sha256": "6612e35656fc8eb5d9a8584c55d8eedbf20afee3d718edd02dd0a6238bbb2996" },
+    { "path": "schemas/v1/integrity.schema.json", "sha256": "b1a592e2b3a59e24b50193b50624c3d516e67ae0d3e35ecfc2b8faf1afc69896" },
+    { "path": "schemas/v1/pii-policy-bundle.schema.json", "sha256": "02038e6b41c9ac7de07c95bf15b679782f5b760534790d9b604d67edc5d037ec" },
+    { "path": "schemas/v1/privacy-coverage-envelope.schema.json", "sha256": "ace53bc02b12a6b530550d3fc218f61f3957d359795c052a7ef902e46dc7ce9b" },
+    { "path": "schemas/v1/profile-rule.schema.json", "sha256": "58f745e0826da6a8755c573443ee9dcc109d51ebb4b1ee8f914f1e8dd0701463" },
+    { "path": "schemas/v1/profile.schema.json", "sha256": "ce34ceeeb4da8f7df56c72edb6974f52905eb36cae154d06ac7c385bfd3d0e73" },
+    { "path": "schemas/v1/sanitization-receipt.schema.json", "sha256": "90c2908cdffc45c1cb2e19eb836a49934da97ae9bfdf12351ef92e6fb06d98fe" },
+    { "path": "schemas/v1/transform-state.schema.json", "sha256": "eaaeed3b2b17aa63b3eb8e46aaad0bc242ee3433b4de01f11d46a4640ca09031" }
+  ],
+  "note": "Every path above is byte-identical to its same-named entry in the ground-truth SP-60 manifest (see groundTruth.manifestPath). This is a partial vendored subset -- only the schemas the PW0 gate consumes (no PIIPermit / boundary-decision-receipt / compatibility-matrix, since PW0 never issues a permit). tests/test_pii_contracts_pin.py recomputes every digest here against the live vendored file and fails RED on drift."
+}

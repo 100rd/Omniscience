@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "transform-state.schema.json",
+  "title": "PIITransformState",
+  "description": "ADR-0018 D2 closed transformation-state taxonomy.",
+  "type": "string",
+  "enum": ["raw", "redacted", "pseudonymized", "aggregated"]
+}

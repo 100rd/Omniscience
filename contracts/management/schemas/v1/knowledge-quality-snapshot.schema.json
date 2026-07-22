@@ -1,0 +1,61 @@
+{
+  "$id": "https://omniscience.dev/management/v1/schemas/knowledge-quality-snapshot.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "snapshot_id",
+    "workspace_id",
+    "management_domain",
+    "provenance_status",
+    "freshness_status",
+    "conformance_status",
+    "coverage_status",
+    "conflict_status",
+    "projection_status",
+    "evaluated_at",
+    "detail",
+    "integrity"
+  ],
+  "properties": {
+    "snapshot_id": {"type": "string", "minLength": 1},
+    "workspace_id": {"type": "string", "minLength": 1},
+    "management_domain": {
+      "type": "string",
+      "enum": [
+        "reliability",
+        "cost_and_value",
+        "ai_and_agent_effectiveness",
+        "security",
+        "privacy",
+        "continuous_compliance",
+        "supply_chain_integrity",
+        "delivery_effectiveness",
+        "knowledge_quality",
+        "capacity_performance_sustainability",
+        "toil",
+        "product_outcomes"
+      ]
+    },
+    "provenance_status": {"type": "string", "enum": ["complete", "partial", "unknown", "severed"]},
+    "freshness_status": {"type": "string", "enum": ["fresh", "stale", "unknown", "degraded"]},
+    "conformance_status": {
+      "type": "string",
+      "enum": ["conformant", "nonconformant", "partial", "unknown"]
+    },
+    "coverage_status": {"type": "string", "enum": ["complete", "partial", "unknown", "severed"]},
+    "conflict_status": {"type": "string", "enum": ["none", "detected", "unresolved", "unknown"]},
+    "projection_status": {"type": "string", "enum": ["converged", "degraded", "unknown", "severed"]},
+    "evaluated_at": {"type": "string", "minLength": 1},
+    "detail": {"type": "object"},
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "digest"],
+      "properties": {
+        "algorithm": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

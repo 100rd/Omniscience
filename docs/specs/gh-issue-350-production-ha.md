@@ -10,6 +10,7 @@ governingAdrs: [genai-enablement/ADR-0017, Omniscience/ADR-0019]
 capabilitySpecs: [SPEC-OPS, SPEC-SOT]
 sddMode: full
 repo: 100rd/Omniscience
+evidenceDestination: component-execution-index://docs/specs/execution-index.json#gh-issue-350-production-ha
 scope:
   include:
     - helm/omniscience/**

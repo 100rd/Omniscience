@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "privacy-coverage-envelope.schema.json",
+  "title": "PrivacyCoverageEnvelope",
+  "description": "SPEC-PII-POLICY interface list / ADR-0018 D10. Owner-produced coverage projection consumed read-only by Platform Portal's Privacy Center. Never carries raw PII; portal never re-derives an authoritative result from it.",
+  "type": "object",
+  "required": [
+    "component_id",
+    "tenant_id",
+    "policy_revision",
+    "profile",
+    "boundary_set",
+    "covered_stores",
+    "uncovered_or_unknown",
+    "observed_at",
+    "freshness_deadline",
+    "source_health",
+    "integrity"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "component_id": { "type": "string", "minLength": 1 },
+    "tenant_id": { "type": "string", "minLength": 1 },
+    "workspace_id": { "type": "string", "minLength": 1 },
+    "policy_revision": { "type": "string", "minLength": 1 },
+    "profile": { "$ref": "profile.schema.json" },
+    "boundary_set": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "covered_stores": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "uncovered_or_unknown": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "observed_at": { "type": "string", "minLength": 1 },
+    "freshness_deadline": { "type": "string", "minLength": 1 },
+    "source_health": { "type": "string", "enum": ["healthy", "degraded", "unavailable"] },
+    "integrity": { "$ref": "integrity.schema.json" }
+  }
+}

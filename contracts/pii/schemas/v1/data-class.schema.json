@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "data-class.schema.json",
+  "title": "PIIDataClass",
+  "description": "ADR-0018 D2 closed operational taxonomy for data class. Free-form labels never grant admission; unmapped/conflicting/unsupported classification maps to 'unknown' at the producer, not here.",
+  "type": "string",
+  "enum": [
+    "public",
+    "internal_non_personal",
+    "personal",
+    "sensitive_personal",
+    "prohibited",
+    "unknown"
+  ]
+}
