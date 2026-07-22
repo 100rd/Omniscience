@@ -13,6 +13,7 @@ capabilitySpecs:
   - SPEC-ACL
 sddMode: full
 repo: 100rd/Omniscience
+evidenceDestination: component-execution-index://docs/specs/execution-index.json#gh-issue-355
 scope:
   include:
     - apps/server/src/omniscience_server/rest/sources.py

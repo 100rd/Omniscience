@@ -10,6 +10,7 @@ governingAdrs: [genai-enablement/ADR-0017, Omniscience/ADR-0019]
 capabilitySpecs: [SPEC-MCP, SPEC-EV, SPEC-OPS]
 sddMode: full
 repo: 100rd/Omniscience
+evidenceDestination: component-execution-index://docs/specs/execution-index.json#gh-issue-350-read-scaling-priority
 scope:
   include:
     - apps/server/src/omniscience_server/rest/rate_limit.py

@@ -2,7 +2,7 @@
 
 **Current release:** `v0.5.0`
 **Current engineering slice:** MCP contract `1.0.0`
-**Portfolio status:** `issue-350-ready-queue`
+**Portfolio status:** `issue-350-implemented-unverified`
 
 This roadmap is the compact component view. Mutable issue scheduling lives in
 [GitHub milestones](https://github.com/100rd/Omniscience/milestones); cross-repository status,
@@ -14,15 +14,16 @@ Capability/task contracts and execution evidence remain canonical in this reposi
 
 | Slice | State | Exit boundary |
 |---|---|---|
-| mcp-v1 | `ready/in-progress` | Stable manifest/schemas, 15-tool registry, `contract_info`, freshness/fallback metadata, exact token profile, consumer pin and severance evidence |
-| production-ha | `ready/queued` | Fail-closed HA profile plus redundant application, PostgreSQL, JetStream, and projection-topology qualification |
-| backup-restore | `ready/queued` | PostgreSQL PITR safety harness and a measured isolated restore/convergence drill |
-| read-scaling-priority | `ready/queued` | Shared admission, horizontal-read qualification, overload tests, and bounded SRE priority lane |
-| consumer-severance | `ready/queued` | Producer fixtures, pinned Omnius/SRE receipts, and a safe live direct-source fallback drill |
+| mcp-v1 | `implemented/unverified` | Repo-local v1 contract merged; exact consumer pin, live canary/severance drill and human verification remain |
+| production-ha | `implemented/unverified` | Portable fail-closed profile merged; live failure-domain/SLO evidence and topology entitlements remain |
+| backup-restore | `implemented/unverified` | Safety/qualification harness merged; approved isolated destructive restore and measured RPO/RTO remain |
+| read-scaling-priority | `implemented/unverified` | Admission/controller/qualification logic merged; shared backend, dispatch wiring and multi-replica proof remain |
+| consumer-severance | `implemented/unverified` | Producer fixtures/verifier merged; immutable Omnius/SRE receipts and live fallback drill remain |
 
-The queue is dependency ordered: `mcp-v1` precedes `consumer-severance` and `production-ha`;
-`production-ha` precedes `backup-restore` and `read-scaling-priority`. Ready HA/DR/scaling specs
-authorize repository-local implementation and disposable qualification, not production mutation.
+The task contracts remain dependency ordered and immutable `ready`: `mcp-v1` precedes
+`consumer-severance` and `production-ha`; `production-ha` precedes `backup-restore` and
+`read-scaling-priority`. Their adjacent execution records are `implemented`, not `verified`.
+HA/DR/scaling readiness and merged portable code still do not authorize production mutation.
 
 ## Backlog governance
 
@@ -30,16 +31,18 @@ authorize repository-local implementation and disposable qualification, not prod
   the epic open with only PM task [#242](https://github.com/100rd/Omniscience/issues/242) remaining.
 - [#244](https://github.com/100rd/Omniscience/issues/244): remains `pre-plan` pending a separate
   competing-hypothesis discovery.
-- [#350](https://github.com/100rd/Omniscience/issues/350): parent for the five bounded task SPECs above.
+- [#350](https://github.com/100rd/Omniscience/issues/350): parent for the five bounded task SPECs above;
+  all five have merged implementation evidence and outstanding decision returns in
+  [`docs/specs/execution-index.json`](specs/execution-index.json).
 - [#355](https://github.com/100rd/Omniscience/issues/355): implementation is terminally evidenced in
   [`docs/specs/execution-index.json`](specs/execution-index.json); the ready task SPEC is immutable.
 
 ## Release and contract policy
 
 - Product release `v0.5.0` is the current immutable release evidence.
-- MCP v0 remains the implemented public surface until the ready `1.0.0` task is materialized and
-  verified. After that cutover, v1 supersedes v0; compatible additions follow semver and breaking wire
-  changes require a new major contract.
+- MCP v1 is the implemented stable public repository contract and v0 is historical/superseded.
+  Consumer activation still requires exact pins, a live canary/severance drill and human verification;
+  compatible additions follow semver and breaking wire changes require a new major contract.
 - MCP v1 contract conformance must compare runtime, manifest, schemas, SDK dependency/lock, docs, SPEC
   indexes, roadmap, execution evidence, and `.mcp` catalogs through one offline drift checker.
 - MCP v1 requires a fail-closed portable canary verifier for an exact materialized bundle and canonical
