@@ -20,6 +20,7 @@ capabilitySpecs:
   - SPEC-OPS
 sddMode: full
 repo: 100rd/Omniscience
+evidenceDestination: component-execution-index://docs/specs/execution-index.json#gh-issue-350-mcp-v1
 scope:
   include:
     - apps/server/src/omniscience_server/mcp/**

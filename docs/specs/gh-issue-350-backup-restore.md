@@ -10,6 +10,7 @@ governingAdrs: [genai-enablement/ADR-0017, Omniscience/ADR-0018, Omniscience/ADR
 capabilitySpecs: [SPEC-SOT, SPEC-OPS]
 sddMode: full
 repo: 100rd/Omniscience
+evidenceDestination: component-execution-index://docs/specs/execution-index.json#gh-issue-350-backup-restore
 scope:
   include:
     - scripts/qualify_backup_restore.py
