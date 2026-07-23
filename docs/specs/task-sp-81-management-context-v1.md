@@ -1,7 +1,7 @@
 ---
 id: task-sp-81-management-context-v1
 title: Implement management context and knowledge-quality producer v1
-status: implemented
+status: ready
 readiness:
   approvedBy: "@100rd"
   approvedAt: 2026-07-21

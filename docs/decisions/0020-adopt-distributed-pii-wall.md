@@ -1,6 +1,6 @@
 # ADR-0020: Adopt the distributed PII Wall at the Omniscience propagation boundary
 
-- **Status:** Accepted
+Status: accepted
 - **Date:** 2026-07-21
 - **Deciders:** platform owner and Omniscience owner
 - **Governing decision:** `genai-enablement` ADR-0018
@@ -33,4 +33,3 @@ compliance, mint a platform-wide permit, or make Platform Portal an enforcement 
 This decision authorizes `SPEC-PII` contract, fixture, validator and fail-closed repository work. It does
 not activate a profile, process live personal data, provision a quarantine backend or key, call a live
 provider, delete durable data, deploy, or claim privacy coverage.
-

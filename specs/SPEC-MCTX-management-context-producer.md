@@ -1,6 +1,7 @@
 # SPEC-MCTX: Management context and knowledge-quality producer
 
 Status: ready · Depends on: SPEC-ACL, SPEC-EV, SPEC-KP, SPEC-MCP, SPEC-OPS · signal-only: SPEC-PII
+Readiness: human-approved by @100rd on 2026-07-22 under accepted ADR-0019
 
 ## Governing ADRs
 
@@ -77,13 +78,22 @@ ManagementContextCapabilityManifest
 ## Verification
 
 - **P-MCTX-1 scope:** cross-tenant/workspace/purpose/field widening is denied before retrieval.
-- **P-MCTX-2 citations:** every fact has a valid citation and missing citations become coverage gaps.
-- **P-MCTX-3 no-authority:** forbidden management verdict/action fields fail static and schema checks.
+- **P-MCTX-2 envelope:** missing source revisions, time bounds, coverage, citations, PII receipt or
+  integrity makes the complete bundle unavailable rather than partially favorable.
+- **P-MCTX-3 citations:** every fact has a valid citation and missing citations become coverage gaps;
+  synthesis cannot introduce an uncited fact.
 - **P-MCTX-4 quality axes:** missing/conflicting evidence cannot collapse to a favorable scalar.
-- **P-MCTX-5 PII/content:** seeded PII, credentials and active content never reach bundle or logs.
-- **P-MCTX-6 skew/severance:** version mismatch, token revocation and producer/source loss select exact
-  fallback-required states without false freshness.
-- **P-MCTX-7 replay:** deterministic envelope/citation/quality outputs reproduce from pinned fixtures.
+- **P-MCTX-5 no-authority:** forbidden management verdict, incident, action, approval and effect fields
+  fail static and schema checks.
+- **P-MCTX-6 PII/content:** seeded PII, credentials and active content never reach bundle or logs.
+- **P-MCTX-7 version pin:** unknown contract major, schema or producer-manifest skew selects the typed
+  fallback-required path without best-effort parsing.
+- **P-MCTX-8 severance:** token revocation and producer/source loss select distinct unavailable states;
+  expired cached context is never represented as current.
+- **P-MCTX-9 closed access:** arbitrary graph/vector queries, foreign workspaces and unsupported query
+  profiles are denied and audited without protected-value echo.
+- **P-MCTX-10 replay:** deterministic envelope, citation and quality outputs reproduce from pinned
+  content-addressed fixtures while optional synthesis is excluded from the comparison.
 
 ## Open questions / deferred
 
@@ -91,4 +101,3 @@ ManagementContextCapabilityManifest
 - [must-resolve-before-live] First released consumer revision and live severance receipt.
 - [defer] Optional model-generated narrative after separate provider/PII admission; deterministic fields
   remain complete without it.
-

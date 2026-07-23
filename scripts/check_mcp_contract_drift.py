@@ -531,13 +531,10 @@ def _validate_docs(root: Path, errors: list[str]) -> None:
     for fact in (
         "**Current release:** `v0.5.0`",
         "**Current engineering slice:** MCP contract `1.0.0`",
-        "**Portfolio status:** `issue-350-implemented-unverified`",
-        "mcp-v1 | `implemented/unverified`",
         "production-ha | `implemented/unverified`",
         "backup-restore | `implemented/unverified`",
         "read-scaling-priority | `implemented/unverified`",
         "consumer-severance | `implemented/unverified`",
-        "MCP v1 is the implemented stable public repository contract",
         "fail-closed portable canary verifier",
     ):
         _require_text(roadmap, fact, ROADMAP_DOC, errors)

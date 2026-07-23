@@ -1,7 +1,7 @@
 ---
 id: task-sp-61-pii-wall-pw0
 title: Implement the fail-closed PW0 knowledge propagation boundary
-status: implemented
+status: ready
 readiness:
   approvedBy: "@100rd"
   approvedAt: 2026-07-21

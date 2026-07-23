@@ -1,6 +1,6 @@
 # ADR-0021: Publish severable management context without creating management authority
 
-- **Status:** Accepted
+Status: accepted
 - **Date:** 2026-07-21
 - **Deciders:** platform owner and Omniscience owner
 - **Governing decisions:** `genai-enablement` ADR-0017 and ADR-0020
@@ -30,4 +30,3 @@ is exposed.
 This decision authorizes contract/schema, fixtures, read-only producer code and severance conformance.
 It does not authorize live customer data, a provider/model call, a Barbarossa decision, a deployment or
 production readiness.
-

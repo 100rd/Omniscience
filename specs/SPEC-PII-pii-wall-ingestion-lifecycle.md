@@ -1,6 +1,7 @@
 # SPEC-PII: PII Wall — ingestion, knowledge stores, and lifecycle
 
 Status: ready · Depends on: SPEC-ACL, SPEC-SOT, SPEC-EV, SPEC-OPS · signal-only: SPEC-KP, SPEC-MCP
+Readiness: human-approved by @100rd on 2026-07-22 under accepted ADR-0019
 
 ## Governing ADRs
 
@@ -104,23 +105,26 @@ consume only released safe projections and coverage metadata.
 
 ## Verification
 
-- **P-PII-1 pre-propagation:** seed each class and prove disallowed bytes never reach raw documents,
-  chunks, embedding requests, Postgres, Neo4j, Qdrant, cache, outbox, archive, or logs.
-- **P-PII-2 fail-closed matrix:** missing/expired/skewed policy, detector exception, forged workspace,
-  unknown class, permit expiry, field/sink/provider widening, and quarantine outage all reject before
-  ordinary ingestion.
-- **P-PII-3 transformation:** structured and free-text fixtures produce expected field manifests and
-  receipts; partial parsing never claims sanitized.
-- **P-PII-4 pseudonym isolation:** equal inputs in two tenants/purposes do not produce a joinable global
-  identity, and no reveal surface is reachable.
-- **P-PII-5 retrieval:** PW0/PW1/PW2 consumers receive only their admitted fields; MCP/search/export
-  cannot rehydrate or bypass purpose.
-- **P-PII-6 lifecycle:** delete one seeded subject/workspace across every store, restore an older backup,
+- **P-PII-1 scope policy:** forged workspace, caller-supplied scope, missing mapping and invalid policy
+  signature all reject before content decode and emit only a scoped failure receipt.
+- **P-PII-2 pre-propagation:** seed each class and prove disallowed bytes never reach raw documents,
+  chunks, embedding requests, Postgres, Neo4j, Qdrant, cache, outbox, archive, backup seed or logs.
+- **P-PII-3 PW0 default:** personal, sensitive, prohibited and unknown fixtures cannot enter normal
+  stores; unavailable quarantine causes body-free rejection.
+- **P-PII-4 transformation:** structured and free-text fixtures produce deterministic field manifests
+  and non-identifying receipts; partial parsing never claims sanitized.
+- **P-PII-5 pseudonym isolation:** equal inputs in two tenants or purposes do not produce a joinable
+  global identity, and no reveal surface is reachable.
+- **P-PII-6 PW2 permit:** permit expiry and field, sink, provider, purpose or time widening reject before
+  the selected sink without an administrator or model override.
+- **P-PII-7 lineage:** every admitted derivative retains the required envelope, class, transformation,
+  policy, source, purpose and retention metadata; incapable adapters receive no PW1/PW2 data.
+- **P-PII-8 retrieval:** PW0/PW1/PW2 consumers receive only their admitted fields; MCP, search, export,
+  synthesis and provider egress cannot rehydrate or bypass purpose.
+- **P-PII-9 lifecycle:** delete one seeded subject/workspace across every store, restore an older backup,
   reapply deletion, and prove the receipt remains partial until all declared coverage closes.
-- **P-PII-7 telemetry:** scan response/log/trace/metric/evidence/UI corpora for every seeded raw value and
-  reversible token; results are zero.
-- **P-PII-8 severance:** policy or evidence-plane loss blocks new propagation while already sanitized,
-  permitted reads follow explicit freshness/expiry rules.
+- **P-PII-10 telemetry:** scan response, log, trace, metric, receipt, evidence and UI corpora for every
+  seeded raw value and reversible fingerprint; results are zero and unsafe diagnostics are dropped.
 
 ## Invariants honored
 
