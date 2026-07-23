@@ -59,9 +59,7 @@ def test_independent_conformance_runner_replays_full_seeded_corpus() -> None:
     """Replays every seeded attack citation together (not just one at a time) and
     independently rescans the resulting bundle -- the same scanner the producer uses
     internally, invoked here as an external runner over the whole corpus."""
-    result = _produce(
-        StaticEvidenceSource(citations=(SAFE_CITATION, *SEEDED_MALICIOUS_CITATIONS))
-    )
+    result = _produce(StaticEvidenceSource(citations=(SAFE_CITATION, *SEEDED_MALICIOUS_CITATIONS)))
 
     assert result.is_success
     surviving_ids = {citation.citation_id for citation in result.bundle.citations}

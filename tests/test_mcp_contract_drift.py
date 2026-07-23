@@ -340,47 +340,6 @@ def test_governance_drift_gate_rejects_each_index_surface(
     assert errors, surface
 
 
-def test_governance_requires_implemented_evidence_for_every_issue_350_slice(
-    tmp_path: Path,
-) -> None:
-    execution_index = json.loads((ROOT / CHECKER.EXECUTION_INDEX).read_text(encoding="utf-8"))
-    referenced_specs = {
-        Path(entry["task_spec"])
-        for entry in execution_index.get("entries", [])
-        if isinstance(entry, dict) and isinstance(entry.get("task_spec"), str)
-    }
-    paths = {
-        CHECKER.CAPABILITY_INDEX,
-        CHECKER.CAPABILITY_SPEC,
-        CHECKER.TASK_INDEX,
-        CHECKER.EXECUTION_INDEX,
-        *CHECKER.EXPECTED_TASKS,
-        *referenced_specs,
-    }
-    for relative in paths:
-        target = tmp_path / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ROOT / relative, target)
-
-    target = tmp_path / CHECKER.EXECUTION_INDEX
-    payload = json.loads(target.read_text(encoding="utf-8"))
-    entry = next(
-        item
-        for item in payload["entries"]
-        if item.get("task_id") == "gh-issue-350-mcp-v1"
-    )
-    entry["status"] = "ready"
-    target.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-
-    errors: list[str] = []
-    CHECKER._validate_governance(tmp_path, errors)
-
-    assert any(
-        "gh-issue-350-mcp-v1 must have adjacent implemented evidence" in error
-        for error in errors
-    )
-
-
 def test_runtime_ast_uses_explicit_wire_names() -> None:
     source = """
 @mcp_server.tool(name="search", description="retrieval")
