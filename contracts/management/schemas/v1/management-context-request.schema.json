@@ -1,0 +1,68 @@
+{
+  "$id": "https://omniscience.dev/management/v1/schemas/management-context-request.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "request_id",
+    "tenant_id",
+    "workspace_id",
+    "subject_ref",
+    "management_domain",
+    "purpose",
+    "requested_field_classes",
+    "evidence_cut",
+    "max_age_seconds",
+    "contract_major",
+    "schema_revision",
+    "caller_identity",
+    "correlation_id"
+  ],
+  "properties": {
+    "request_id": {"type": "string", "minLength": 1},
+    "tenant_id": {"type": "string", "minLength": 1},
+    "workspace_id": {"type": "string", "minLength": 1},
+    "subject_ref": {"type": "string", "minLength": 1},
+    "management_domain": {
+      "type": "string",
+      "enum": [
+        "reliability",
+        "cost_and_value",
+        "ai_and_agent_effectiveness",
+        "security",
+        "privacy",
+        "continuous_compliance",
+        "supply_chain_integrity",
+        "delivery_effectiveness",
+        "knowledge_quality",
+        "capacity_performance_sustainability",
+        "toil",
+        "product_outcomes"
+      ]
+    },
+    "purpose": {"type": "string", "minLength": 1},
+    "requested_field_classes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "enum": [
+          "citations",
+          "provenance",
+          "freshness",
+          "coverage",
+          "conflicts",
+          "projection_health",
+          "knowledge_quality",
+          "synthesis"
+        ]
+      }
+    },
+    "evidence_cut": {"type": "string", "minLength": 1},
+    "max_age_seconds": {"type": "integer"},
+    "contract_major": {"type": "integer"},
+    "schema_revision": {"type": "string", "minLength": 1},
+    "caller_identity": {"type": "string", "minLength": 1},
+    "correlation_id": {"type": "string", "minLength": 1}
+  }
+}

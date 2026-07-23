@@ -1,0 +1,81 @@
+{
+  "$id": "https://omniscience.dev/management/v1/schemas/management-context-bundle.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "bundle_id",
+    "request_digest",
+    "producer_revision",
+    "source_revisions",
+    "produced_at",
+    "observed_at",
+    "freshness_deadline",
+    "source_health",
+    "citations",
+    "conflict_set",
+    "projection_state",
+    "coverage_gaps",
+    "pii_receipt",
+    "quality",
+    "synthesis",
+    "integrity"
+  ],
+  "properties": {
+    "bundle_id": {"type": "string", "minLength": 1},
+    "request_digest": {"type": "string", "minLength": 1},
+    "producer_revision": {"type": "string", "minLength": 1},
+    "source_revisions": {"type": "object"},
+    "produced_at": {"type": "string", "minLength": 1},
+    "observed_at": {"type": "string", "minLength": 1},
+    "freshness_deadline": {"type": "string", "minLength": 1},
+    "source_health": {"type": "string", "enum": ["healthy", "degraded", "unknown", "severed"]},
+    "citations": {"type": "array", "items": {"$ref": "management-citation.schema.json"}},
+    "conflict_set": {"type": "array", "items": {"type": "string"}},
+    "projection_state": {"type": "string", "enum": ["converged", "degraded", "unknown", "severed"]},
+    "coverage_gaps": {"type": "array", "items": {"type": "string"}},
+    "pii_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["admitted_count", "dropped_count", "policy_revision", "produced_at", "integrity"],
+      "properties": {
+        "admitted_count": {"type": "integer"},
+        "dropped_count": {"type": "integer"},
+        "policy_revision": {"type": "string", "minLength": 1},
+        "produced_at": {"type": "string", "minLength": 1},
+        "integrity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "digest"],
+          "properties": {
+            "algorithm": {"type": "string", "minLength": 1},
+            "digest": {"type": "string", "minLength": 1}
+          }
+        }
+      }
+    },
+    "quality": {"$ref": "knowledge-quality-snapshot.schema.json"},
+    "synthesis": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "text", "cites"],
+        "properties": {
+          "type": {"const": "synthesis"},
+          "text": {"type": "string", "minLength": 1},
+          "cites": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "digest"],
+      "properties": {
+        "algorithm": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pii-policy-bundle.schema.json",
+  "title": "PIIPolicyBundle",
+  "description": "SPEC-PII-POLICY REQ-PII-POL-1. One immutable revision binding taxonomy, PW0/PW1/PW2 profile rules, detector manifests, transformations, purposes, source/sink classes, field rules, retention, permit constraints, compatibility, issue/expiry times, signer and integrity. additionalProperties is true: unknown fields may widen protection but a conformant consumer must not let an unknown field relax a known rule (enforced by the semantic validator, not this schema).",
+  "type": "object",
+  "required": [
+    "bundle_id",
+    "policy_revision",
+    "taxonomy_version",
+    "profiles",
+    "detector_manifests",
+    "transformations",
+    "purposes",
+    "source_classes",
+    "sink_classes",
+    "field_rules",
+    "retention_rules",
+    "permit_constraints",
+    "compatibility",
+    "issued_at",
+    "expires_at",
+    "signer",
+    "integrity"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "bundle_id": { "type": "string", "minLength": 1 },
+    "policy_revision": { "type": "string", "minLength": 1, "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "taxonomy_version": { "type": "string", "minLength": 1 },
+    "profiles": {
+      "type": "object",
+      "required": ["PW0", "PW1", "PW2"],
+      "additionalProperties": true,
+      "properties": {
+        "PW0": { "$ref": "profile-rule.schema.json" },
+        "PW1": { "$ref": "profile-rule.schema.json" },
+        "PW2": { "$ref": "profile-rule.schema.json" }
+      }
+    },
+    "detector_manifests": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["detector_id", "revision"],
+        "additionalProperties": true,
+        "properties": {
+          "detector_id": { "type": "string", "minLength": 1 },
+          "revision": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "transformations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "transform-state.schema.json" }
+    },
+    "purposes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["purpose_id"],
+        "additionalProperties": true,
+        "properties": { "purpose_id": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "source_classes": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "sink_classes": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "field_rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["field", "min_data_class"],
+        "additionalProperties": true,
+        "properties": {
+          "field": { "type": "string", "minLength": 1 },
+          "min_data_class": { "$ref": "data-class.schema.json" }
+        }
+      }
+    },
+    "retention_rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["store_class", "max_retention_days"],
+        "additionalProperties": true,
+        "properties": {
+          "store_class": { "type": "string", "minLength": 1 },
+          "max_retention_days": { "type": "integer" }
+        }
+      }
+    },
+    "permit_constraints": {
+      "type": "object",
+      "required": ["max_lifetime_seconds"],
+      "additionalProperties": true,
+      "properties": { "max_lifetime_seconds": { "type": "integer" } }
+    },
+    "compatibility": { "$ref": "compatibility-pin.schema.json" },
+    "issued_at": { "type": "string", "minLength": 1, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "expires_at": { "type": "string", "minLength": 1, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" },
+    "signer": {
+      "type": "object",
+      "required": ["key_id", "algorithm"],
+      "additionalProperties": true,
+      "properties": {
+        "key_id": { "type": "string", "minLength": 1 },
+        "algorithm": { "type": "string", "minLength": 1 }
+      }
+    },
+    "integrity": { "$ref": "integrity.schema.json" }
+  }
+}

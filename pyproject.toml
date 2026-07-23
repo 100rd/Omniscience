@@ -72,6 +72,14 @@ dev = [
 [tool.ruff]
 target-version = "py312"
 line-length = 99
+# Vendored, byte-identical, digest-pinned dependency-free JSON-schema validators
+# (SP-60 PII policy / SP-81 management-context). Their sha256 is pinned in
+# contracts/*/pin.json and re-verified by the contract tests, so ruff must not
+# reformat or line-wrap them.
+extend-exclude = [
+    "contracts/pii/validator/schema_check.py",
+    "contracts/management/validator/schema_check.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "N", "UP", "B", "A", "S", "T20", "SIM", "TCH", "RUF"]

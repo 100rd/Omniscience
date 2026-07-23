@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "sanitization-receipt.schema.json",
+  "title": "SanitizationReceipt",
+  "description": "SPEC-PII-POLICY REQ-PII-POL-6. Non-identifying, content-addressed, scope/revision/time/coverage bound. Must never contain a raw value, reversible token, stable cross-purpose fingerprint, prompt excerpt, or provider payload; that leak scan is a semantic-validator concern (see scan_receipt_for_raw_leakage), because a structural schema cannot prove the *absence* of an unnamed field.",
+  "type": "object",
+  "required": [
+    "receipt_id",
+    "input_digest",
+    "policy_revision",
+    "profile",
+    "detector_revisions",
+    "transformations",
+    "disposition",
+    "coverage",
+    "produced_at",
+    "producer",
+    "integrity"
+  ],
+  "additionalProperties": true,
+  "properties": {
+    "receipt_id": { "type": "string", "minLength": 1 },
+    "input_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "output_digest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "policy_revision": { "type": "string", "minLength": 1 },
+    "profile": { "$ref": "profile.schema.json" },
+    "detector_revisions": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+    "transformations": { "type": "array", "minItems": 1, "items": { "$ref": "transform-state.schema.json" } },
+    "disposition": { "$ref": "disposition.schema.json" },
+    "coverage": { "type": "string", "minLength": 1 },
+    "produced_at": { "type": "string", "minLength": 1 },
+    "producer": { "type": "string", "minLength": 1 },
+    "integrity": { "$ref": "integrity.schema.json" }
+  }
+}

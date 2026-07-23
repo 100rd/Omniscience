@@ -665,6 +665,11 @@ def _validate_governance(root: Path, errors: list[str]) -> None:
         "aws-config-phase1.md | `historical-implemented`",
         "discovery-sync-worker.md | `historical-implemented`",
         "gh-issue-355 | `implemented`",
+        "gh-issue-350-mcp-v1 | `implemented`, not verified",
+        "gh-issue-350-consumer-severance | `implemented`, not verified",
+        "gh-issue-350-production-ha | `implemented`, not verified",
+        "gh-issue-350-backup-restore | `implemented`, not verified",
+        "gh-issue-350-read-scaling-priority | `implemented`, not verified",
         "execution-index.json",
     ):
         _require_text(task_index, fact, TASK_INDEX, errors)
@@ -686,6 +691,21 @@ def _validate_governance(root: Path, errors: list[str]) -> None:
     duplicates = sorted({task_id for task_id in task_ids if task_ids.count(task_id) > 1})
     if duplicates:
         errors.append(f"{EXECUTION_INDEX}: duplicate task_id values: {', '.join(duplicates)}")
+
+    execution_statuses = {
+        entry.get("task_id"): entry.get("status")
+        for entry in entries
+        if isinstance(entry, dict)
+        and isinstance(entry.get("task_id"), str)
+        and isinstance(entry.get("status"), str)
+    }
+    for expected_id, _contract_status in EXPECTED_TASKS.values():
+        observed = execution_statuses.get(expected_id)
+        if observed != "implemented":
+            errors.append(
+                f"{EXECUTION_INDEX}: {expected_id} must have adjacent implemented "
+                f"evidence, found {observed!r}"
+            )
 
 
 def _validate_catalogs(root: Path, errors: list[str]) -> None:

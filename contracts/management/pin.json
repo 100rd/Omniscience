@@ -1,0 +1,14 @@
+{
+  "boundPackage": "task-sp-81-management-context-v1",
+  "governingAdrs": ["genai-enablement/ADR-0017", "genai-enablement/ADR-0020", "Omniscience/ADR-0021"],
+  "schemaMajor": 1,
+  "note": "Unlike contracts/pii, these schemas have no external cross-repo ground truth to bind to: ADR-0021 assigns Omniscience ownership of the ManagementContextBundle/KnowledgeQualitySnapshot shape itself. pin.json still recomputes and freezes each schema's own digest so tests/test_management_contracts_pin.py fails RED on undetected drift.",
+  "ownedEntries": [
+    { "path": "schemas/v1/fallback-result.schema.json", "sha256": "5e7389ef1f19daaab08c1eb3051b0165af87334a18d74dd207f9e5ee6acc7d86" },
+    { "path": "schemas/v1/knowledge-quality-snapshot.schema.json", "sha256": "5cec3fd14ef20342d64aa41541fa80dc106ac990a4396b2ba61a350e8bf296af" },
+    { "path": "schemas/v1/management-citation.schema.json", "sha256": "0352bce749267d743b29000749881ab808d1a26a256c25368da8575edba27bae" },
+    { "path": "schemas/v1/management-context-bundle.schema.json", "sha256": "02fda103082f479ce3601935e2aa4bd945668e1f93648dc6dfc8f0f04b9b8871" },
+    { "path": "schemas/v1/management-context-capability-manifest.schema.json", "sha256": "d8e35906c969d12a74073d35632788ae6d9713d0ee49fa5b97dc606056e2bbff" },
+    { "path": "schemas/v1/management-context-request.schema.json", "sha256": "151d4c2f0c9dd69e48266288a90672865f44d3cae46a9287cda6e61f1aa27320" }
+  ]
+}

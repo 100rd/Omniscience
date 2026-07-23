@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "integrity.schema.json",
+  "title": "ContentIntegrity",
+  "description": "Content-addressed integrity marker attached to every bundle, envelope, permit, and receipt. 'digest' is a hex sha256 of the canonical instance payload excluding this field itself; it is never a raw value.",
+  "type": "object",
+  "required": ["algorithm", "digest"],
+  "additionalProperties": true,
+  "properties": {
+    "algorithm": { "const": "sha256" },
+    "digest": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+  }
+}

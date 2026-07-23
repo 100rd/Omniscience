@@ -1,0 +1,25 @@
+{
+  "$id": "https://omniscience.dev/management/v1/schemas/fallback-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fallback_required", "reason", "detail"],
+  "properties": {
+    "fallback_required": {"const": true},
+    "reason": {
+      "type": "string",
+      "enum": [
+        "contract_major_mismatch",
+        "schema_digest_mismatch",
+        "producer_manifest_mismatch",
+        "producer_unavailable",
+        "source_severed",
+        "evidence_stale",
+        "token_revoked",
+        "authority_field_detected",
+        "bundle_schema_invalid"
+      ]
+    },
+    "detail": {"type": "array", "items": {"type": "string"}}
+  }
+}
