@@ -39,6 +39,7 @@ accepted genai-enablement ADR
 | `SP-12` consumer severance | `gh-issue-350-consumer-severance` | producer fixtures/verifier merged; Omnius/SRE receipts and live drill remain external |
 | `SP-61` knowledge-plane PII boundary | `SPEC-PII` + `task-sp-61-pii-wall-pw0` | ready for fail-closed non-live development; no profile or data path is active |
 | `SP-81` management-context producer | `SPEC-MCTX` + `task-sp-81-management-context-v1` | ready for bounded non-live producer development; no consumer/live authority |
+| `SP-86` management-readonly release | `SPEC-MCP`, `SPEC-PII`, `SPEC-MCTX` + `task-sp-86-management-readonly-release` | ready to publish one language-neutral immutable release candidate; independent of concurrent Barbarossa SP-90, while SP-87/SP-88 consumer receipts and activation remain external |
 | issue-350 HA | `gh-issue-350-production-ha` | portable profile merged; live fault-domain proof and stateful topology entitlements remain unverified |
 | issue-350 recovery | `gh-issue-350-backup-restore` | safety harness merged; every destructive drill still needs separate exact human approval |
 | issue-350 scaling | `gh-issue-350-read-scaling-priority` | controller/qualification logic merged; shared-backend selection, dispatch wiring and multi-replica proof remain |
@@ -57,6 +58,21 @@ park safely.
 
 Portfolio state and accepted cross-repository decisions cannot promote an Omniscience task to
 `implemented` or `verified`; only component-owned execution evidence can do that.
+
+## Initial runtime profile
+
+Accepted local ADR-0022 adopts `management-readonly-v1`. Omniscience publishes read-only evidence,
+management context, knowledge-quality and non-identifying PW0 projections to exact Barbarossa and
+Platform Portal consumers. Omnius remains part of the target architecture but is not deployed, not a
+consumer gate, and not represented by a live mock in this profile.
+
+The profile does not make Omniscience authoritative for Reliability. Barbarossa retains direct-source
+operation and typed severance; Portal releases owner panels independently and displays Omnius as
+`not_deployed`.
+
+Central ADR-0022 selects Go for the Barbarossa production runtime. That decision does not change the
+Omniscience implementation or producer schema: SP-86 publishes language-neutral contracts and may run
+in parallel with SP-90. SP-87 is responsible for binding both immutable receipts.
 
 ## PII Wall boundary
 
