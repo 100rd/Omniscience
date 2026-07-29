@@ -40,6 +40,7 @@ accepted genai-enablement ADR
 | `SP-61` knowledge-plane PII boundary | `SPEC-PII` + `task-sp-61-pii-wall-pw0` | ready for fail-closed non-live development; no profile or data path is active |
 | `SP-81` management-context producer | `SPEC-MCTX` + `task-sp-81-management-context-v1` | ready for bounded non-live producer development; no consumer/live authority |
 | `SP-86` management-readonly release | `SPEC-MCP`, `SPEC-PII`, `SPEC-MCTX` + `task-sp-86-management-readonly-release` | ready to publish one language-neutral immutable release candidate; independent of concurrent Barbarossa SP-90, while SP-87/SP-88 consumer receipts and activation remain external |
+| `SP-95` local owner runtime | complete selected capability closure + `task-sp-95-management-readonly-local-runtime` | ready after exact SP-86 to publish a namespaced image/source Compose fragment and `OmniscienceLocalRuntimeReceipt`; local functional smoke only |
 | issue-350 HA | `gh-issue-350-production-ha` | portable profile merged; live fault-domain proof and stateful topology entitlements remain unverified |
 | issue-350 recovery | `gh-issue-350-backup-restore` | safety harness merged; every destructive drill still needs separate exact human approval |
 | issue-350 scaling | `gh-issue-350-read-scaling-priority` | controller/qualification logic merged; shared-backend selection, dispatch wiring and multi-replica proof remain |
@@ -73,6 +74,18 @@ operation and typed severance; Portal releases owner panels independently and di
 Central ADR-0022 selects Go for the Barbarossa production runtime. That decision does not change the
 Omniscience implementation or producer schema: SP-86 publishes language-neutral contracts and may run
 in parallel with SP-90. SP-87 is responsible for binding both immutable receipts.
+
+## Local launch profile
+
+Accepted local ADR-0023 adopts `management-readonly-local-v1` as a disposable realization of the same
+runtime membership. SP-95 packages the exact SP-86 release as independently runnable, owner-prefixed
+API/admin/PostgreSQL/NATS/Neo4j/Qdrant Compose fragments with local embeddings, dependency-aware
+readiness and no provider call. `genai-enablement` may include those fragments in SP-98 but cannot copy
+Omniscience migrations, policy or health semantics.
+
+The fragment publishes only a read network to exact consumers; its stores and broker remain private.
+Normal stop/restart preserves named volumes, selected-owner mocks and Omnius are absent, and every
+receipt declares `development-single-host`, `ha_qualified=false` and `activation_authority=none`.
 
 ## PII Wall boundary
 

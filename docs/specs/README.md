@@ -51,8 +51,9 @@ or reinterpret readiness as production/cloud/destructive authority.
 | [task-sp-61-pii-wall-pw0](task-sp-61-pii-wall-pw0.md) | `ready` | fail-closed repository-local PW0 propagation boundary and fixtures |
 | [task-sp-81-management-context-v1](task-sp-81-management-context-v1.md) | `ready` | cited management context and knowledge-quality producer v1 |
 | [task-sp-86-management-readonly-release](task-sp-86-management-readonly-release.md) | `ready` | immutable language-neutral MCP/context/PW0 runtime release and selected-consumer severance qualification; independent of Barbarossa SP-90 |
+| [task-sp-95-management-readonly-local-runtime](task-sp-95-management-readonly-local-runtime.md) | `ready` | independently runnable namespaced Omniscience local fragment, real read contract, dependency-aware health, PW0/provider severance and local receipt |
 
-All three tasks are human-ready for their exact repository-local scopes. SP-86 may run concurrently
+All four tasks are human-ready for their exact repository-local scopes. SP-86 may run concurrently
 with Barbarossa SP-90 and produce a release candidate plus disposable qualification evidence, but none authorizes a production policy/profile, live
 personal data, credential, provider, deployment activation or external effect.
 
