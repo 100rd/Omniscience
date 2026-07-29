@@ -30,6 +30,7 @@ Statuses: `Proposed`, `Accepted`, `Implemented`, `Superseded`, `Deprecated`.
 | [ADR-0020](0020-adopt-distributed-pii-wall.md) | Adopt the distributed PII Wall at every knowledge propagation boundary | Accepted |
 | [ADR-0021](0021-management-context-producer.md) | Publish severable management context without management authority | Accepted |
 | [ADR-0022](0022-management-readonly-runtime-release.md) | Adopt the language-neutral Management Read-Only runtime release boundary, independent of Barbarossa SP-90 | Accepted |
+| [ADR-0023](0023-management-readonly-local-runtime.md) | Publish a namespaced, owner-contained local Management Read-Only runtime fragment | Accepted |
 
 `ADR-0018` was originally committed with the duplicate id `ADR-0015`. The rename is a
 registry repair, not a change to its accepted decision.
