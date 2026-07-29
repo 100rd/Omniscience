@@ -3,7 +3,7 @@
 Status: accepted
 - **Date:** 2026-07-29
 - **Deciders:** platform owner and Omniscience owner
-- **Governing decisions:** `genai-enablement` ADR-0018, ADR-0021, ADR-0022, ADR-0024
+- **Governing decisions:** `genai-enablement` ADR-0018, ADR-0021, ADR-0022, ADR-0024 <!-- stale-arch-allow: external ADR namespace -->
 - **Related local decisions:** ADR-0020, ADR-0021 and ADR-0022
 
 ## Context
