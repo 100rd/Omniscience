@@ -1,0 +1,46 @@
+{
+  "auth_token_profile": "omniscience-mcp-read-v1",
+  "chart_digest": "sha256:bc08302738c4a4e92b04afe156d4f70a1ffc6b5b042c9811e4ede2abf61b09da",
+  "configuration_digest": "sha256:167aa12051487be743250dd64aa1a2b77d4fa6a399d94acbe097da5934a6dae4",
+  "dependency_profile": {
+    "omnius_status": "not_deployed",
+    "sp10_mcp_digest": "sha256:c6807de9428f3c523cb319456f988563f50e37a799830a6816196588b005622e",
+    "sp60_policy_digest": "sha256:fa312387e5fa4b3980b085e20033fc8d947474c62c15dd9e3836372dea01f038",
+    "sp61_pw0_ref": "contracts/pii/pin.json",
+    "sp81_manifest_digest": "sha256:6d2235e211d86a04bd530ff806e6b56721fdbd3f15146f1e1b4df8b8f94258e7"
+  },
+  "evidence_refs": [
+    "tests/release/management_readonly/",
+    "tests/test_management_readonly_release_lock.py",
+    "contracts/releases/management-readonly-v1/evidence/"
+  ],
+  "git_commit": "c733a0d445c090187461814263be7a07d20b7af3",
+  "git_worktree_scope_clean": false,
+  "image_digest": "sha256:307129fba5129f91a210b590f6de7deef01aae699492a1d55c271ae42c5fed02",
+  "language_neutral_consumer_kit_digest": "sha256:f590e5132b4cda993e3afe341f022802e29b0ad9a5896927679cbf096b69563c",
+  "management_context_manifest_digest": "sha256:6d2235e211d86a04bd530ff806e6b56721fdbd3f15146f1e1b4df8b8f94258e7",
+  "mcp_manifest_digest": "sha256:c6807de9428f3c523cb319456f988563f50e37a799830a6816196588b005622e",
+  "pending": {
+    "image_registry_digest": "ci-artifact://synchronized-platform/task-sp-86-management-readonly-release/ (pending real docker build + push; see release README 'External / pending gates')"
+  },
+  "pii_policy_digest": "sha256:fa312387e5fa4b3980b085e20033fc8d947474c62c15dd9e3836372dea01f038",
+  "pii_policy_revision": "1.0.0",
+  "profile_id": "management-readonly-v1",
+  "profile_revision": "1.0.0",
+  "pw0_receipt_refs": [
+    "tests/release/management_readonly/test_pw0_seeded_leak.py",
+    "tests/test_pii_wall_fail_closed.py"
+  ],
+  "readiness_contract": {
+    "health_path": "/health",
+    "metrics_path": "/metrics",
+    "ready_path": "/ready"
+  },
+  "reasons": [
+    "scoped_worktree_dirty"
+  ],
+  "rollback_release_digest": "none:first-candidate",
+  "schema_set_digest": "sha256:2173859cf6066f2eae585d548399f12eeb69e962272debadbd9b89cda411ad9a",
+  "severance_fixture_digest": "sha256:65b00de153aa3c2fad4226a085a4de287b032dc13fead7486e71006e47770f54",
+  "status": "RED"
+}
