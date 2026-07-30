@@ -64,9 +64,7 @@ async def mint_read_token() -> tuple[str, str]:
     return plaintext, str(workspace_id)
 
 
-def _rpc(
-    payload: dict, *, sid: str | None, token: str | None
-) -> tuple[str | None, dict | None]:
+def _rpc(payload: dict, *, sid: str | None, token: str | None) -> tuple[str | None, dict | None]:
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json, text/event-stream",
