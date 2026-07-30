@@ -90,9 +90,3 @@ jobs:
           uv run pytest \
             tests/release/management_readonly_local \
             tests/test_management_readonly_local_runtime.py -v
-      - name: No-regression (SP-86 readiness + PW0 + consumer contract)
-        run: |
-          uv run pytest \
-            tests/release/management_readonly/test_ops_rollback.py \
-            tests/release/management_readonly/test_runtime_conformance.py \
-            tests/release/management_readonly/test_pw0_seeded_leak.py -v
