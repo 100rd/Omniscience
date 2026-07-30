@@ -33,6 +33,17 @@ COPY apps/     apps/
 # Re-sync to install workspace packages now that source is available.
 RUN uv sync --frozen --no-dev
 
+# task-sp-95-management-readonly-local-runtime (ADR-0023 OML-4): the local
+# owner fragment runs embeddings in-process from a pinned local model and makes
+# no provider/model API call. That path needs the optional `local` extra
+# (sentence-transformers + torch CPU). It is OFF by default so the base image
+# (Ollama/provider modes) stays lean; the management-readonly-local source
+# override builds with `--build-arg INSTALL_LOCAL_EMBEDDINGS=true`.
+ARG INSTALL_LOCAL_EMBEDDINGS=false
+RUN if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then \
+        uv sync --frozen --no-dev --extra local; \
+    fi
+
 
 # ── Runtime stage ─────────────────────────────────────────────────────────────
 # Minimal image: no build tools, runs as a non-root user.
@@ -53,9 +64,43 @@ COPY --from=builder /app/.venv    /app/.venv
 COPY --from=builder /app/apps     /app/apps
 COPY --from=builder /app/packages /app/packages
 
+# task-sp-86-management-readonly-release: contracts/ is copied read-only into
+# the runtime image (not the builder stage -- it carries no Python package to
+# install) so /ready (apps/server/.../routes/health.py) can check the
+# release's own MCP/management-context/PW0 contract closure without a
+# network call. This is data, not a package: no `uv sync` step touches it.
+COPY contracts/ /app/contracts/
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+# task-sp-95-management-readonly-local-runtime (ADR-0023): identify this image
+# as the Omniscience owner artifact for the management-readonly-local profile.
+# The one-shot `omniscience-migrate` service reuses this exact image and only
+# overrides the command to run `alembic -c /app/packages/core/alembic.ini
+# upgrade head` (the alembic entrypoint is installed on PATH in the venv);
+# nothing about the runtime layout below changes between the api and migrate
+# services, so both share one build.
+LABEL org.opencontainers.image.title="omniscience" \
+      org.opencontainers.image.description="Omniscience owner service for management-readonly-local-v1" \
+      io.omniscience.profile="management-readonly-local-v1"
+
+# task-sp-95-management-readonly-local-runtime (ADR-0023 OML-4): when the image
+# is built with local embeddings, pre-bake the pinned model into the image so
+# the running container needs NO network for embedding -- the fragment then
+# runs with HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE and any accidental egress fails
+# loudly rather than silently reaching a model host. The cache is owned by the
+# non-root runtime user. This step is a no-op for the default (provider) image.
+ARG INSTALL_LOCAL_EMBEDDINGS=false
+ENV HF_HOME=/app/.cache/huggingface \
+    SENTENCE_TRANSFORMERS_HOME=/app/.cache/huggingface \
+    LOCAL_EMBEDDING_MODEL=all-MiniLM-L6-v2
+RUN if [ "$INSTALL_LOCAL_EMBEDDINGS" = "true" ]; then \
+        mkdir -p /app/.cache/huggingface && \
+        python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')" && \
+        chown -R omniscience:omniscience /app/.cache; \
+    fi
 
 USER omniscience
 

@@ -1,0 +1,288 @@
+# ===========================================================================
+# Omniscience owner fragment — management-readonly-local-v1  (task-sp-95)
+# ---------------------------------------------------------------------------
+# ADR-0023 / genai-enablement management-readonly-local-v1 profile.
+#
+# This is the IMAGE-mode base: it consumes the exact SP-86 Omniscience owner
+# image by OCI digest. Owner image references are supplied via
+# OMNISCIENCE_*_IMAGE and MUST be pinned by @sha256 digest — mutable tags and
+# `latest` are rejected. Until SP-86 publishes a real registry digest (its
+# release lock records only `pending.image_registry_digest`), image mode is not
+# runnable and the unset sentinel below (an all-zero digest) fails to pull
+# loudly rather than silently substituting a mutable tag.
+#
+# To RUN the fragment on a laptop today, layer the source override:
+#
+#     docker compose \
+#       -f deploy/compose/management-readonly-local/compose.yaml \
+#       -f deploy/compose/management-readonly-local/compose.source.yaml \
+#       --env-file deploy/compose/management-readonly-local/env.example \
+#       up -d
+#
+# Every service/network/volume key is `omniscience-*` (OML-1/OML-2). Only the
+# admin UI is host-published, on a configurable loopback port. No store or
+# broker is host-published. Both owner networks are `internal` so no container
+# can reach an external model/provider at runtime (OML-4 / PW0).
+# ===========================================================================
+
+name: omniscience-local
+
+services:
+  # -------------------------------------------------------------------------
+  # omniscience-api — the read-only Management Read-Only surface. Joins the
+  # owner-read network (approved consumers, e.g. the SP-98 Portal backend) and
+  # the Omniscience-private network (its own stores). Readiness (/ready) covers
+  # the full selected dependency + migration + PW0/contract closure (AC-SP95-2).
+  # -------------------------------------------------------------------------
+  omniscience-api:
+    image: ${OMNISCIENCE_API_IMAGE:-omniscience-server@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    networks:
+      omniscience-readnet:
+        # The admin UI's nginx proxies to `app:8000`; expose that alias so the
+        # owner-prefixed service name does not require editing the admin image.
+        aliases: [app]
+      omniscience-private: {}
+    environment:
+      DATABASE_URL: postgresql+asyncpg://omniscience:${OMNISCIENCE_POSTGRES_PASSWORD:-omniscience_local}@omniscience-postgres:5432/omniscience
+      NATS_URL: nats://omniscience-nats:4222
+      STORAGE_GRAPH_BACKEND: neo4j
+      STORAGE_VECTOR_BACKEND: qdrant
+      NEO4J_URI: bolt://omniscience-neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: ${OMNISCIENCE_NEO4J_PASSWORD:-neo4j_local_dev}
+      NEO4J_DATABASE: neo4j
+      QDRANT_HOST: omniscience-qdrant
+      QDRANT_GRPC_PORT: "6334"
+      QDRANT_HTTP_PORT: "6333"
+      QDRANT_API_KEY: ${OMNISCIENCE_QDRANT_API_KEY:-qdrant_local_dev}
+      QDRANT_PREFER_GRPC: "true"
+      # Local, in-process embeddings from a pinned model baked into the image.
+      # Offline flags guarantee no model/provider network call at runtime (OML-4).
+      EMBEDDING_PROVIDER: local
+      LOCAL_MODEL_NAME: ${OMNISCIENCE_LOCAL_MODEL:-all-MiniLM-L6-v2}
+      LOCAL_MODEL_DEVICE: cpu
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      # ADR-0023: discovery/reconcile/scheduler/retention workers are not part
+      # of the selected local closure.
+      DISCOVERY_ENABLED: "false"
+      RECONCILE_ENABLED: "false"
+      SCHEDULER_ENABLED: "false"
+      RETENTION_ENABLED: "false"
+      ENVIRONMENT: development
+      APP_VERSION: ${OMNISCIENCE_APP_VERSION:-0.2.0}
+      LOG_LEVEL: ${OMNISCIENCE_LOG_LEVEL:-info}
+      # No telemetry egress in the local closure.
+      OTLP_ENDPOINT: ""
+    depends_on:
+      omniscience-migrate:
+        condition: service_completed_successfully
+      omniscience-postgres:
+        condition: service_healthy
+      omniscience-nats:
+        condition: service_healthy
+      omniscience-neo4j:
+        condition: service_healthy
+      omniscience-qdrant:
+        condition: service_healthy
+    healthcheck:
+      # Gate on /ready (full dependency+migration+policy closure), not /health,
+      # so consumers only see the API "healthy" once it is actually ready.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2560m
+
+  # -------------------------------------------------------------------------
+  # omniscience-migrate — one-shot schema migration (Alembic). Runs to
+  # completion before the API starts; a completed one-shot is NOT a healthy
+  # runtime owner. Reuses the exact API image; only the command differs.
+  # -------------------------------------------------------------------------
+  omniscience-migrate:
+    image: ${OMNISCIENCE_API_IMAGE:-omniscience-server@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    networks:
+      omniscience-private: {}
+    working_dir: /app/packages/core
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+asyncpg://omniscience:${OMNISCIENCE_POSTGRES_PASSWORD:-omniscience_local}@omniscience-postgres:5432/omniscience
+    depends_on:
+      omniscience-postgres:
+        condition: service_healthy
+    restart: "no"
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 768m
+
+  # -------------------------------------------------------------------------
+  # omniscience-admin — the only host-published surface, on a loopback port.
+  # SPA served by nginx; proxies read traffic to the API (`app:8000` alias).
+  # -------------------------------------------------------------------------
+  omniscience-admin:
+    image: ${OMNISCIENCE_ADMIN_IMAGE:-omniscience-admin@sha256:0000000000000000000000000000000000000000000000000000000000000000}
+    networks:
+      omniscience-readnet: {}
+    ports:
+      - "127.0.0.1:${OMNISCIENCE_ADMIN_PORT:-3001}:80"
+    depends_on:
+      omniscience-api:
+        condition: service_healthy
+    healthcheck:
+      # Probe 127.0.0.1 explicitly: nginx listens IPv4-only and busybox wget
+      # resolves `localhost` to ::1 first, which would false-fail the probe.
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:80/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  # -------------------------------------------------------------------------
+  # Omniscience-private stores/broker. None is host-published. Pinned by
+  # immutable @sha256 digest (multi-arch manifest list; resolves on amd64 and
+  # arm64). Digests captured on 2026-07-30; refresh via `docker buildx imagetools
+  # inspect <ref>` when the upstream tag is re-pointed.
+  # -------------------------------------------------------------------------
+  omniscience-postgres:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    networks:
+      omniscience-private: {}
+    environment:
+      POSTGRES_DB: omniscience
+      POSTGRES_USER: omniscience
+      POSTGRES_PASSWORD: ${OMNISCIENCE_POSTGRES_PASSWORD:-omniscience_local}
+    volumes:
+      - omniscience-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U omniscience -d omniscience"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512m
+
+  omniscience-nats:
+    image: nats:2.10-alpine@sha256:b83efabe3e7def1e0a4a31ec6e078999bb17c80363f881df35edc70fcb6bb927
+    command: ["--jetstream", "--store_dir", "/data", "--http_port", "8222"]
+    networks:
+      omniscience-private: {}
+    volumes:
+      - omniscience-natsdata:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
+
+  omniscience-neo4j:
+    image: neo4j:5.19-community@sha256:e5a03c2b120da495ac6d3198849818d54e6dec6209c79b975b5b5a235b2b86e4
+    networks:
+      omniscience-private: {}
+    environment:
+      NEO4J_AUTH: neo4j/${OMNISCIENCE_NEO4J_PASSWORD:-neo4j_local_dev}
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 512m
+      NEO4J_server_memory_pagecache_size: 256m
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - omniscience-neo4jdata:/data
+      - omniscience-neo4jlogs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:7474 > /dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1024m
+
+  omniscience-qdrant:
+    image: qdrant/qdrant:v1.17.1@sha256:94728574965d17c6485dd361aa3c0818b325b9016dac5ea6afec7b4b2700865f
+    networks:
+      omniscience-private: {}
+    environment:
+      QDRANT__SERVICE__API_KEY: ${OMNISCIENCE_QDRANT_API_KEY:-qdrant_local_dev}
+      QDRANT__SERVICE__GRPC_PORT: "6334"
+      QDRANT__SERVICE__HTTP_PORT: "6333"
+      QDRANT__LOG_LEVEL: ${OMNISCIENCE_QDRANT_LOG_LEVEL:-INFO}
+    volumes:
+      - omniscience-qdrantdata:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/localhost/6333' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024m
+
+# ---------------------------------------------------------------------------
+# Owner-prefixed networks (OML-2: never joined by a sibling owner).
+#   omniscience-private  — `internal: true`. API <-> its own stores/broker.
+#                          No container on this network can reach any external
+#                          host; the stores are fully egress-isolated.
+#   omniscience-readnet  — API <-> approved read consumers + admin UI. NOT
+#                          internal, because the admin UI's loopback host port
+#                          (the profile's only published surface) requires an
+#                          egress-capable bridge to accept host ingress. The
+#                          API makes no provider/model call regardless: local
+#                          embeddings run offline (HF_HUB_OFFLINE), workers are
+#                          off, and OTLP egress is empty (OML-4, proven at
+#                          runtime by the no-egress smoke, not merely asserted).
+# ---------------------------------------------------------------------------
+networks:
+  omniscience-readnet:
+    name: omniscience-readnet
+  omniscience-private:
+    name: omniscience-private
+    internal: true
+
+# ---------------------------------------------------------------------------
+# Owner-prefixed named volumes. Normal `down` preserves these; a reset is a
+# separate, explicit `down -v` (OML-8 / AC-SP95-5).
+# ---------------------------------------------------------------------------
+volumes:
+  omniscience-pgdata:
+    name: omniscience-pgdata
+  omniscience-natsdata:
+    name: omniscience-natsdata
+  omniscience-neo4jdata:
+    name: omniscience-neo4jdata
+  omniscience-neo4jlogs:
+    name: omniscience-neo4jlogs
+  omniscience-qdrantdata:
+    name: omniscience-qdrantdata
