@@ -1,0 +1,44 @@
+# ===========================================================================
+# Omniscience owner fragment — SOURCE-build override  (task-sp-95, ADR-0023)
+# ---------------------------------------------------------------------------
+# Layer on top of compose.yaml to build the owner images from this repository
+# instead of pulling a pinned OCI digest:
+#
+#     docker compose \
+#       -f deploy/compose/management-readonly-local/compose.yaml \
+#       -f deploy/compose/management-readonly-local/compose.source.yaml \
+#       --env-file deploy/compose/management-readonly-local/env.example \
+#       up -d --build
+#
+# Source mode records the Git commit + dirty flag in the receipt and can never
+# claim reproducibility when dirty (the qualification harness enforces this).
+# The API and migrate services share ONE built image (built once, reused).
+# INSTALL_LOCAL_EMBEDDINGS=true bakes the pinned local model into the image so
+# the runtime needs no network (OML-4).
+# ===========================================================================
+
+services:
+  omniscience-api:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_EMBEDDINGS: "true"
+    image: omniscience-local/omniscience-server:source
+    pull_policy: never
+
+  omniscience-migrate:
+    build:
+      context: ../../..
+      dockerfile: Dockerfile
+      args:
+        INSTALL_LOCAL_EMBEDDINGS: "true"
+    image: omniscience-local/omniscience-server:source
+    pull_policy: never
+
+  omniscience-admin:
+    build:
+      context: ../../../apps/admin
+      dockerfile: Dockerfile
+    image: omniscience-local/omniscience-admin:source
+    pull_policy: never

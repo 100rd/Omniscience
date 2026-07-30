@@ -1,0 +1,47 @@
+{
+  "activation_authority": "none",
+  "availability_class": "development-single-host",
+  "base_profile_id": "management-readonly-v1",
+  "base_profile_revision": "1.0.0",
+  "configuration_digest": "sha256:540853578ba48328c3368d9ef669645b450012d9da1620f3a161d473d2973ea8",
+  "dependency_closure_digest": "sha256:9f24f9403d5a1dd4612ae79f982e14e22bd1a321c06bd5826578dca8204164ac",
+  "evidence_refs": [
+    "tests/release/management_readonly_local/",
+    "tests/release/management_readonly_local/live_mcp.py",
+    "tests/release/management_readonly_local/test_live_mcp_capture.py",
+    "tests/test_management_readonly_local_runtime.py",
+    "docs/runbooks/management-readonly-local.md",
+    "contracts/releases/management-readonly-local-v1/service-contract.json"
+  ],
+  "fragment_digest": "sha256:e2cc42e9bf5047127d309efa4352529f6ff0934eec3186b03479dec9726d9d81",
+  "git_commit": "a7caefd08d0f5d59198e7c49cb8fd8df5623e391",
+  "git_worktree_scope_clean": false,
+  "ha_qualified": false,
+  "host_binding_inventory_digest": "sha256:0ba78c0074791de23800c162feca7a2e693c4c72f7205c3976b350165ab0d40f",
+  "image_content_digest": "sha256:39d231f91f7a40fd05dccf2c9520180569d104e4f702a0cf05fe372b5f7aa58f",
+  "local_model_digest": "sha256:3d3b863a5f5f449d519a45b53097c2000041799595fb65380340023fb1df1f3e",
+  "mode": "source",
+  "network_inventory_digest": "sha256:afb66dece3dbbfaf0159887143b0860db2972a3ac98602d406940f94d5b6232c",
+  "pending": {
+    "amd64_resource_measurement": "this qualification host is arm64; amd64 measurements are pending a second-arch run (cannot run both arches on one host)",
+    "image_mode_reproducible": "requires a published SP-86 OCI digest (OMNISCIENCE_API_IMAGE=...@sha256:...)",
+    "sp86_image_registry_digest": "unpublished; SP-86 release lock records only pending.image_registry_digest (no live OCI digest yet)"
+  },
+  "profile_id": "management-readonly-local-v1",
+  "profile_revision": "1.0.0",
+  "qualification_status": "development-only",
+  "readiness_digest": "sha256:86682a90d1e6ffd410afbc1238902c8bfc00f732eee79a2355b2e33676be2a3c",
+  "reasons": [
+    "scoped_worktree_dirty",
+    "sp86_image_registry_digest_pending"
+  ],
+  "rendered_fragment_digest": "sha256:42df0fb6a245f4f5cda9da801b5cc52aae71b0fb20a89a9be5f7360e4112aa50",
+  "reproducible": false,
+  "service_contract_digest": "sha256:f5807a51020e2d5ed4e442ebb9c9c72afb01887ea1c9c139e08764efcd423f6a",
+  "service_inventory_digest": "sha256:83ebd0ff64cc6a8bc3035393ba4ced80c71c802add8271f493f1589cd1ef6f23",
+  "sp86_release_digest": "sha256:bdd2368427f7f4f7ccdcc8a1302cb3dcedd06a474f6281f393706030423bc7ee",
+  "sp86_release_git_commit": "c733a0d445c090187461814263be7a07d20b7af3",
+  "sp86_release_status": "RED",
+  "status": "RED",
+  "volume_inventory_digest": "sha256:19f9be561d9ceade0efad74397c36d92e577c712c8f94fbd962e64995d21d5bd"
+}

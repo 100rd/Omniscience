@@ -1,0 +1,112 @@
+{
+  "schema": "management-readonly-local-v1-service-contract-v1",
+  "profile_id": "management-readonly-local-v1",
+  "profile_revision": "1.0.0",
+  "note": "Language-neutral local service contract for the Omniscience owner fragment of the management-readonly-local-v1 synchronized-platform profile (task-sp-95, ADR-0023). It declares ONLY the exact read-only Management Read-Only surfaces, the tenant/workspace/purpose binding, and the closed fail-closed matrix. It is owner-local development evidence -- not Portal evidence, platform qualification, production activation, or an authority to write, act, or deploy.",
+  "base_release": {
+    "profile_id": "management-readonly-v1",
+    "profile_revision": "1.0.0",
+    "auth_token_profile": "omniscience-mcp-read-v1",
+    "release_lock_ref": "contracts/releases/management-readonly-v1/evidence/release-lock.c733a0d445c090187461814263be7a07d20b7af3.json",
+    "sp61_pw0_ref": "contracts/pii/pin.json"
+  },
+  "readiness_contract": {
+    "health_path": "/health",
+    "ready_path": "/ready",
+    "metrics_path": "/metrics",
+    "dependency_closure": ["postgres", "nats", "neo4j", "qdrant"],
+    "policy_init_closure": ["migration", "mcp_contract", "management_context_contract", "pw0_privacy_contract"],
+    "typed_unready_reasons": [
+      "postgres_unavailable",
+      "nats_unavailable",
+      "neo4j_unavailable",
+      "qdrant_unavailable",
+      "migration_incomplete",
+      "mcp_contract_unavailable",
+      "management_context_contract_unavailable",
+      "pw0_privacy_contract_unavailable"
+    ],
+    "unready_must_not_report": ["healthy", "cached_current"]
+  },
+  "consumer_binding": {
+    "read_only": true,
+    "tenant_workspace_purpose_bound": true,
+    "required_fields": [
+      "tenant_id",
+      "workspace_id",
+      "management_domain",
+      "purpose",
+      "requested_field_classes",
+      "evidence_cut",
+      "max_age_seconds",
+      "contract_major",
+      "schema_revision"
+    ],
+    "reference_authorized_consumer": {
+      "tenant_id": "dev-fixture-tenant-a",
+      "workspace_id": "dev-fixture-workspace-a",
+      "management_domain": "reliability",
+      "purpose": "dev-fixture-purpose-support",
+      "authorized_field_classes": ["citations", "provenance", "freshness", "knowledge_quality"],
+      "max_allowed_age_seconds": 7200,
+      "contract_major": 1,
+      "schema_revision": "dev-fixture-schema-rev-1",
+      "producer_manifest_digest_pin": "dev-fixture-producer-manifest-digest-v1"
+    },
+    "note": "The reference consumer is a disposable dev-fixture identity, not a production tenant. Tenant/workspace/purpose are server-enforced and never trusted from a payload alone."
+  },
+  "exposed_read_surfaces": [
+    {
+      "id": "management-context-read",
+      "kind": "read",
+      "field_classes": ["citations", "provenance", "freshness", "coverage", "knowledge_quality"],
+      "description": "SP-81 read-only management-context bundle for the bound tenant/workspace/purpose. Every fact is citation-joined and PW0-cleared; a denial or fallback never carries a populated bundle."
+    },
+    {
+      "id": "knowledge-quality-read",
+      "kind": "read",
+      "axes": ["provenance", "freshness", "conformance", "coverage", "conflict"],
+      "description": "KnowledgeQualitySnapshot axes only. No global score, no verdict, no recommendation. projection_status is 'unknown' on incomplete evidence, never a favorable default."
+    },
+    {
+      "id": "privacy-pw0-read",
+      "kind": "read",
+      "description": "Non-identifying PW0 receipt reads (digests, counts, reason codes). Never exposes raw content, envelope_id, or source_ref."
+    },
+    {
+      "id": "readiness-read",
+      "kind": "read",
+      "paths": ["/health", "/ready", "/metrics"],
+      "description": "Dependency-health / readiness reads only. Carries the profile revision; never a management verdict, recommendation, authorization, or privacy verdict."
+    }
+  ],
+  "fail_closed_matrix": [
+    { "case": "foreign_workspace", "reason": "workspace_missing_or_foreign", "outcome": "denied_without_retrieval" },
+    { "case": "unauthorized_purpose", "reason": "purpose_unknown_or_unauthorized", "outcome": "denied_without_retrieval" },
+    { "case": "generic_or_widened_query", "reason": "field_class_widened", "outcome": "denied_without_retrieval" },
+    { "case": "future_evidence_cut", "reason": "evidence_cut_in_future", "outcome": "denied_without_retrieval" },
+    { "case": "stale_evidence", "reason": "evidence_stale", "outcome": "fallback_required" },
+    { "case": "severed_dependency", "reason": "source_severed", "outcome": "fallback_required" },
+    { "case": "source_loss_on_exception", "reason": "producer_unavailable", "outcome": "fallback_required" },
+    { "case": "contract_major_skew", "reason": "contract_major_mismatch", "outcome": "fallback_required" },
+    { "case": "contract_schema_skew", "reason": "schema_digest_mismatch", "outcome": "fallback_required" },
+    { "case": "contract_manifest_skew", "reason": "producer_manifest_mismatch", "outcome": "fallback_required" }
+  ],
+  "fail_closed_invariant": {
+    "must_not_validate_as": ["healthy", "empty", "cached_current"],
+    "denial_or_fallback_never_carries_bundle": true
+  },
+  "negative_space": [
+    "owner_write_route",
+    "action_or_control_or_effect_route",
+    "generic_unbound_query",
+    "omnius_runtime_or_mock",
+    "selected_owner_mock",
+    "external_model_or_provider_call",
+    "public_store_or_broker_or_api_binding",
+    "management_verdict_or_recommendation_or_authorization"
+  ],
+  "availability_class": "development-single-host",
+  "ha_qualified": false,
+  "activation_authority": "none"
+}

@@ -11,3 +11,24 @@ tests/
 .env
 *.md
 !README.md
+
+# task-sp-95-management-readonly-local-runtime: keep the build context small and
+# deterministic. None of the paths below are COPYed by the runtime image, and
+# graphify-out/ alone is hundreds of generated index files that would otherwise
+# be shipped into the build daemon on every `docker compose build`.
+graphify-out/
+helm/
+deploy/
+infra/
+monitoring/
+bench/
+benchmarks/
+operator/
+sdks/
+examples/
+.hypothesis/
+.coverage
+*.log
+*.db
+test_out.txt
+debug_fixture.py
