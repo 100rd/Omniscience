@@ -40,7 +40,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 from omniscience_core.db.models import Chunk, Document
-from omniscience_core.storage.graph import GraphStore
+from omniscience_core.storage.graph import GraphStore, GraphWriteResult
 from omniscience_core.storage.vector import ChunkPayload, VectorStore
 from sqlalchemy import delete, insert, select
 from sqlalchemy.engine import CursorResult
@@ -270,12 +270,17 @@ class IndexWriter:
         version: int | None = None,
         epoch: int | None = None,
         forced_replay: bool = False,
-    ) -> None:
+    ) -> GraphWriteResult:
         """Persist symbol graph into Neo4j (orchestrated).
 
         **Always outside the Postgres transaction.**  A failure here
         produces ``neo4j_orphan`` drift.  The ``ReconcileWorker``
         records the metric; cleanup is deferred to the retention worker.
+
+        Returns the store's :class:`GraphWriteResult` so callers can tell a
+        persisted write from one the store rejected as stale.  ``version`` is
+        the document's own ``doc_version``; the store gates on it per
+        *document*, never per source.
         """
         if self._graph_store and workspace_id:
             # Tag entities with workspace_id for Neo4j ACL
@@ -285,7 +290,7 @@ class IndexWriter:
                 elif isinstance(ent, dict):
                     ent.setdefault("metadata", {})["workspace_id"] = str(workspace_id)
 
-            await self._graph_store.upsert_graph(
+            return await self._graph_store.upsert_graph(
                 source_id=source_id,
                 document_id=document_id,
                 entities=entities,
@@ -296,6 +301,7 @@ class IndexWriter:
                 epoch=epoch,
                 forced_replay=forced_replay,
             )
+        return GraphWriteResult(applied=False, skip_reason="no_graph_store")
 
     # ------------------------------------------------------------------
     # Private helpers — each kept < 30 lines

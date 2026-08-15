@@ -124,6 +124,54 @@ class EntityUpsert:
     bypass_source_checkpoint: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class GraphWriteResult:
+    """Outcome of a single ``GraphStore.upsert_graph`` call.
+
+    Reports what was **persisted**, never what was passed in.  The previous
+    ``-> None`` signature made a dropped write indistinguishable from an
+    applied one at the call site, which is how a 100% drop rate survived a
+    full ingestion run (the log printed ``len(entities)`` — the input list —
+    regardless of whether the transaction wrote anything).
+
+    ``applied is False`` always carries a machine-readable ``skip_reason``:
+
+    * ``stale_document_version`` — this document's ``doc_version`` is at or
+      below the version already applied for that same document (redelivery or
+      out-of-order delivery).
+    * ``no_graph_store`` — the writer has no graph backend configured.
+
+    Written versus submitted
+    ------------------------
+
+    ``entities_written`` / ``edges_written`` count the writes that **changed
+    the database**.  The Neo4j adapter derives them from the driver's own
+    statement counters, so the default bitemporal write path — which is inert
+    when an entity's state fingerprint is unchanged (see
+    ``_UPSERT_ENTITY_BITEMPORAL_CYPHER``) — reports 0, not ``len(entities)``.
+    That distinction is the point of this type: incrementing a counter once
+    per loop iteration reproduces ``len(entities)`` exactly and cannot fail,
+    which is how a 100% drop rate survived a full ingestion run.
+
+    ``entities_submitted`` / ``edges_submitted`` carry the caller's intent so
+    the two can be compared in a log line or a dashboard.  ``nodes_created``,
+    ``relationships_created`` and ``properties_set`` are the raw driver
+    counters summed across the batch's statements.
+    """
+
+    applied: bool
+    entities_written: int = 0
+    edges_written: int = 0
+    entities_end_dated: int = 0
+    edges_end_dated: int = 0
+    skip_reason: str | None = None
+    entities_submitted: int = 0
+    edges_submitted: int = 0
+    nodes_created: int = 0
+    relationships_created: int = 0
+    properties_set: int = 0
+
+
 @dataclass(slots=True)
 class EdgeUpsert:
     """Input payload for ``GraphStore.upsert_edge``."""
@@ -164,7 +212,7 @@ class GraphStore(Protocol):
         version: int | None = None,
         epoch: int | None = None,
         forced_replay: bool = False,
-    ) -> None: ...
+    ) -> GraphWriteResult: ...
 
     async def upsert_entity(
         self,
@@ -410,4 +458,5 @@ __all__ = [
     "GraphEdgeView",
     "GraphResultView",
     "GraphStore",
+    "GraphWriteResult",
 ]

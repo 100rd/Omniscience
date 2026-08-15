@@ -47,6 +47,7 @@ pytest.importorskip("testcontainers.qdrant")
 pytest.importorskip("testcontainers.neo4j")
 
 
+from omniscience_core.storage.graph import GraphWriteResult  # noqa: E402  -- gated import
 from omniscience_index.stores.neo4j_store import (  # noqa: E402  -- gated import
     Neo4jGraphStore,
     Neo4jStoreConfig,
@@ -200,15 +201,18 @@ class _InMemoryIndexWriter:
         version: int | None = None,
         epoch: int | None = None,
         forced_replay: bool = False,
-    ) -> None:
-        # Neo4j fan-out — mirrors IndexWriter.upsert_graph signature.
+    ) -> GraphWriteResult:
+        # Neo4j fan-out — mirrors IndexWriter.upsert_graph, including its
+        # return type.  Handing back ``None`` here made this double the only
+        # thing in the suite exercising ``getattr(result, "applied", True)``,
+        # so that optimistic default was never observed to be wrong.
         if self._graph_store is not None and workspace_id is not None:
             for ent in entities:
                 if hasattr(ent, "metadata"):
                     ent.metadata["workspace_id"] = str(workspace_id)
                 elif isinstance(ent, dict):
                     ent.setdefault("metadata", {})["workspace_id"] = str(workspace_id)
-            await self._graph_store.upsert_graph(
+            return await self._graph_store.upsert_graph(
                 source_id=source_id,
                 document_id=document_id,
                 entities=entities,
@@ -219,6 +223,7 @@ class _InMemoryIndexWriter:
                 epoch=epoch,
                 forced_replay=forced_replay,
             )
+        return GraphWriteResult(applied=False, skip_reason="no_graph_store")
 
     async def tombstone(
         self,

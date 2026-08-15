@@ -108,19 +108,43 @@ def _make_entity(
     )
 
 
+def _iterable_result(*records: object) -> MagicMock:
+    """An ``AsyncResult`` stand-in that yields ``records`` and supports ``single()``.
+
+    The store folds the checkpoint over EVERY returned row instead of calling
+    ``single()``, so that a database still holding duplicate
+    ``:StoreCheckpoint`` nodes yields the highest version deterministically
+    rather than an arbitrary one.  The mock therefore has to be async-iterable.
+    """
+    result = MagicMock()
+    result.single = AsyncMock(return_value=records[0] if records else None)
+
+    def _aiter() -> object:
+        items = iter(records)
+
+        class _Iter:
+            async def __anext__(self) -> object:
+                try:
+                    return next(items)
+                except StopIteration:
+                    raise StopAsyncIteration from None
+
+        return _Iter()
+
+    result.__aiter__ = MagicMock(side_effect=_aiter)
+    return result
+
+
 def _set_checkpoint_result(tx_mock: MagicMock, existing_version: int | None) -> None:
     """Configure tx.run to return the given source checkpoint version on the first call."""
-    checkpoint_result = MagicMock()
     if existing_version is None:
-        checkpoint_result.single = AsyncMock(return_value=None)
+        checkpoint_result = _iterable_result()
     else:
-        record = {"version": existing_version, "epoch": None}
-        checkpoint_result.single = AsyncMock(return_value=record)
+        checkpoint_result = _iterable_result({"version": existing_version, "epoch": None})
 
     # The pattern: first tx.run call (checkpoint read), subsequent calls
     # (checkpoint write + CAS cypher) return minimal results.
-    cas_result = MagicMock()
-    cas_result.single = AsyncMock(return_value={"id": "x", "applied": True})
+    cas_result = _iterable_result({"id": "x", "applied": True})
     tx_mock.run = AsyncMock(side_effect=[checkpoint_result, MagicMock(), cas_result])
 
 
@@ -272,9 +296,9 @@ async def test_stale_source_checkpoint_skips_cas_cypher() -> None:
     # Source checkpoint is at v5 already
     _set_checkpoint_result(tx_mock, existing_version=5)
     # Reset side_effect so that if the store does read the checkpoint it gets v5
-    checkpoint_result = MagicMock()
-    checkpoint_result.single = AsyncMock(return_value={"version": 5, "epoch": None})
-    tx_mock.run = AsyncMock(return_value=checkpoint_result)
+    tx_mock.run = AsyncMock(
+        side_effect=lambda *_a, **_k: _iterable_result({"version": 5, "epoch": None})
+    )
 
     entity = _make_entity(version=3)  # stale
     ws_id = uuid.uuid4()

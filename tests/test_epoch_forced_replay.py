@@ -1,4 +1,5 @@
 import uuid
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -6,6 +7,27 @@ from omniscience_core.storage.graph import EntityUpsert
 from omniscience_index.stores.neo4j.store import Neo4jGraphStore
 
 pytestmark = pytest.mark.asyncio
+
+
+def _iterable_result(*records: Any) -> AsyncMock:
+    """An ``AsyncResult`` stand-in that yields ``records`` and supports ``single()``."""
+    res_mock = AsyncMock()
+    res_mock.single.return_value = records[0] if records else None
+
+    def _aiter() -> Any:
+        items = iter(records)
+
+        class _Iter:
+            async def __anext__(self) -> Any:
+                try:
+                    return next(items)
+                except StopIteration:
+                    raise StopAsyncIteration from None
+
+        return _Iter()
+
+    res_mock.__aiter__ = MagicMock(side_effect=_aiter)
+    return res_mock
 
 
 def _make_store_with_mock_driver() -> tuple[Neo4jGraphStore, MagicMock]:
@@ -61,13 +83,14 @@ async def test_neo4j_epoch_forced_replay():
         epoch=1,
     )
 
-    # Mocking single() return from the version check
+    # Mocking the checkpoint-read result.  The store consumes every row of the
+    # result (duplicate-tolerant fold) rather than calling ``single()``, so the
+    # mock must be async-iterable.
     record_mock = MagicMock()
     record_mock.__getitem__.side_effect = lambda key: (
         5 if key == "version" else 0
     )  # existing version 5, epoch 0
-    res_mock = AsyncMock()
-    res_mock.single.return_value = record_mock
+    res_mock = _iterable_result(record_mock)
     tx_mock.run.return_value = res_mock
 
     await store.upsert_entity(entity=ent, workspace_id=workspace_id)

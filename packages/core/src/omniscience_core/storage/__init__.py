@@ -29,6 +29,7 @@ from omniscience_core.storage.graph import (
     GraphEdgeView,
     GraphResultView,
     GraphStore,
+    GraphWriteResult,
 )
 from omniscience_core.storage.vector import (
     ChunkPayload,
@@ -45,6 +46,7 @@ __all__ = [
     "GraphEdgeView",
     "GraphResultView",
     "GraphStore",
+    "GraphWriteResult",
     "UpsertOutcome",
     "VectorSearchResult",
     "VectorStore",

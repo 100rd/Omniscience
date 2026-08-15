@@ -62,11 +62,15 @@ from uuid import UUID
 
 import structlog
 from omniscience_connectors.base import Connector, DocumentRef, FetchedDocument
+from omniscience_core.storage.graph import GraphWriteResult
 from omniscience_embeddings.base import EmbeddingProvider
+from omniscience_parsers.graph_dispatch import GraphRoute, route_document
+from omniscience_parsers.infra.aws_live import InfraDocument, extract_aws_live_graph
 
 from omniscience_server.ingestion.events import DocumentChangeEvent, ProcessResult
 from omniscience_server.ingestion.metrics import (
     INGESTION_ERRORS_TOTAL,
+    INGESTION_GRAPH_WRITES_SKIPPED_TOTAL,
     INGESTION_STAGE_DURATION_SECONDS,
 )
 
@@ -150,6 +154,10 @@ class IndexWriterProtocol(Protocol):
         ingestion_run_id: UUID | None = None,
     ) -> Any: ...
 
+    # Returns ``GraphWriteResult``, not ``Any``.  The wide annotation is what
+    # made ``getattr(result, "applied", True)`` look defensible at the call
+    # site — and that default reads "no answer means it worked", the exact
+    # assumption the per-document checkpoint fix exists to remove.
     async def upsert_graph(
         self,
         source_id: UUID,
@@ -159,7 +167,7 @@ class IndexWriterProtocol(Protocol):
         workspace_id: UUID | None = None,
         snapshot_at: Any | None = None,
         version: int | None = None,
-    ) -> None: ...
+    ) -> GraphWriteResult: ...
 
     async def tombstone(
         self,
@@ -604,7 +612,12 @@ class IngestionPipeline:
 
             # Orchestrated write: index_writer handles the workspace-tagging
             # and Neo4j call.
-            await self._index_writer.upsert_graph(
+            #
+            # ``doc_version`` is this document's own row version.  The store
+            # gates staleness per DOCUMENT, so passing it here is meaningful;
+            # it used to be compared against a per-source scalar, which
+            # silently dropped every document of a source after the first.
+            result = await self._index_writer.upsert_graph(
                 source_id=event.source_id,
                 document_id=document_id,
                 entities=entities,
@@ -612,7 +625,36 @@ class IngestionPipeline:
                 workspace_id=workspace_id,
                 version=doc_version,
             )
-            bound.debug("stage_graph_ok", entities=len(entities), edges=len(edges))
+            # Report persistence, not intent.  A store-side rejection is a
+            # first-class outcome and is logged at info so it is visible under
+            # the deployed LOG_LEVEL=info profile.
+            #
+            # Read the result's attributes directly.  ``getattr(result,
+            # "applied", True)`` used to stand here, and its default said "an
+            # object that cannot answer counts as a successful write" — the
+            # same optimism that let a 100% drop rate log as success.  The
+            # protocol now returns ``GraphWriteResult``, so there is nothing
+            # left to default for.
+            if result.applied:
+                bound.debug(
+                    "stage_graph_ok",
+                    entities_written=result.entities_written,
+                    edges_written=result.edges_written,
+                    entities_extracted=len(entities),
+                    edges_extracted=len(edges),
+                )
+            else:
+                INGESTION_GRAPH_WRITES_SKIPPED_TOTAL.labels(
+                    source_type=event.source_type,
+                    reason=str(result.skip_reason or "unknown"),
+                ).inc()
+                bound.info(
+                    "stage_graph_skipped",
+                    skip_reason=result.skip_reason,
+                    entities_extracted=len(entities),
+                    edges_extracted=len(edges),
+                    doc_version=doc_version,
+                )
         except Exception as exc:
             INGESTION_ERRORS_TOTAL.labels(source_type=event.source_type, stage="graph").inc()
             bound.error("stage_graph_adapter_error", error=str(exc))
@@ -627,7 +669,13 @@ class IngestionPipeline:
         content_bytes: bytes,
         bound: Any,
     ) -> tuple[list[Any], list[Any]] | None:
-        """Run the parser + extractor.  Best-effort: returns ``None`` on miss.
+        """Route to the owning extractor.  Best-effort: returns ``None`` on miss.
+
+        The route is decided by
+        :func:`~omniscience_parsers.graph_dispatch.route_document` from the
+        source type and the fetched ``ref.metadata`` — not by an inline
+        source-type ladder — so adding a document family means adding a
+        route, not editing this method.
 
         The document identity comes from ``ref.external_id`` — NOT
         ``event.external_id``.  In the discovery fan-out path the ``event`` is a
@@ -636,25 +684,65 @@ class IngestionPipeline:
         file.  ``ref`` carries the real per-document path (matching
         ``_stage_index``).
         """
+        route = route_document(source_type=event.source_type, metadata=ref.metadata)
         try:
-            from omniscience_parsers import TreeSitterParser
-
-            parser = TreeSitterParser()
-            external_id = ref.external_id
-            ext = "." + external_id.rsplit(".", 1)[-1] if "." in external_id else ""
-            if not parser.can_handle("", ext):
+            if route is GraphRoute.AWS_LIVE:
+                extracted = self._extract_infra_graph(event, ref, content_bytes)
+            else:
+                extracted = self._extract_code_graph(ref, content_bytes)
+            if extracted is None:
                 return None
-
-            parsed = parser.parse(content_bytes, file_path=external_id)
-            entities, edges = self._graph_extractor(parsed, content_bytes)  # type: ignore[misc]
+            entities, edges = extracted
             if not entities and not edges:
+                bound.debug("stage_graph_extract_empty", route=route.value)
                 return None
         except Exception as exc:
             INGESTION_ERRORS_TOTAL.labels(
                 source_type=event.source_type, stage="graph_extract"
             ).inc()
-            bound.warning("stage_graph_extract_error", error=str(exc))
+            bound.warning("stage_graph_extract_error", route=route.value, error=str(exc))
             return None
+        return list(entities), list(edges)
+
+    def _extract_code_graph(
+        self,
+        ref: DocumentRef,
+        content_bytes: bytes,
+    ) -> tuple[list[Any], list[Any]] | None:
+        """Tree-sitter symbol-graph route — behaviour preserved verbatim."""
+        from omniscience_parsers import TreeSitterParser
+
+        parser = TreeSitterParser()
+        external_id = ref.external_id
+        ext = "." + external_id.rsplit(".", 1)[-1] if "." in external_id else ""
+        if not parser.can_handle("", ext):
+            return None
+
+        parsed = parser.parse(content_bytes, file_path=external_id)
+        entities, edges = self._graph_extractor(parsed, content_bytes)  # type: ignore[misc]
+        return list(entities), list(edges)
+
+    def _extract_infra_graph(
+        self,
+        event: DocumentChangeEvent,
+        ref: DocumentRef,
+        content_bytes: bytes,
+    ) -> tuple[list[Any], list[Any]] | None:
+        """Live-infrastructure route (AWS inventory documents).
+
+        Unlike the code route this never parses the body as source text: the
+        entity's identity comes from the connector's own ``ref.metadata``
+        (ARN, account, region, resource type, tags) and the describe body is
+        supplementary detail.
+        """
+        doc = InfraDocument(
+            source_id=event.source_id,
+            external_id=ref.external_id,
+            uri=ref.uri,
+            metadata=dict(ref.metadata),
+            content_bytes=content_bytes,
+        )
+        entities, edges = extract_aws_live_graph(doc)
         return list(entities), list(edges)
 
     async def _stage_link(

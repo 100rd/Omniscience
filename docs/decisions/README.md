@@ -31,6 +31,7 @@ Statuses: `Proposed`, `Accepted`, `Implemented`, `Superseded`, `Deprecated`.
 | [ADR-0021](0021-management-context-producer.md) | Publish severable management context without management authority | Accepted |
 | [ADR-0022](0022-management-readonly-runtime-release.md) | Adopt the language-neutral Management Read-Only runtime release boundary, independent of Barbarossa SP-90 | Accepted |
 | [ADR-0023](0023-management-readonly-local-runtime.md) | Publish a namespaced, owner-contained local Management Read-Only runtime fragment | Accepted |
+| [ADR-0024](0024-graph-write-idempotency-model.md) | Graph-write idempotency: document/source checkpoint split, deterministic stub identity, edge-type safety, persisted-not-submitted counts | Accepted |
 
 `ADR-0018` was originally committed with the duplicate id `ADR-0015`. The rename is a
 registry repair, not a change to its accepted decision.

@@ -37,7 +37,11 @@ from dr_verify import (
     check_rto,
     verify_projections,
 )
-from rebuild_all_projections import _chunk_projection, _reset_qdrant_collections
+from rebuild_all_projections import (
+    _chunk_projection,
+    _GraphRebuildTally,
+    _reset_qdrant_collections,
+)
 from seed_dr_drill import _chunk_row
 
 # ---------------------------------------------------------------------------
@@ -171,6 +175,74 @@ def test_dr_rebuild_advances_graph_checkpoint_for_empty_projection() -> None:
     assert call is not None
     assert "workspace_id=workspace_id" in call.group("args")
     assert "if wrapped_entities" not in rebuild_source
+
+
+def test_dr_rebuild_consumes_the_graph_write_result() -> None:
+    """Discarding the return is how a rebuild that wrote nothing exited 0.
+
+    ``upsert_graph`` guards every write on ``:DocumentCheckpoint`` and can
+    answer ``applied=False``.  The rebuild must read that answer, report it,
+    and fail — a DR rebuild that silently restored nothing is the worst
+    outcome this script has.
+    """
+    rebuild_source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "rebuild_all_projections.py"
+    ).read_text(encoding="utf-8")
+
+    call = re.search(
+        r"(?P<assigned>\w+)\s*=\s*await graph_store\.upsert_graph\(",
+        rebuild_source,
+    )
+    assert call is not None, "the upsert_graph return value is still discarded"
+    assert f"{call.group('assigned')}_tally.record" in rebuild_source or (
+        "graph_tally.record(" in rebuild_source
+    ), "the result is assigned but never folded into a tally"
+
+    # The failure must be loud AND fatal, not a line of output above "complete".
+    assert "graph_tally.skipped" in rebuild_source
+    tally_exit = rebuild_source.index("the graph rebuild was incomplete")
+    complete = rebuild_source.index('print("Rebuild complete.')
+    assert complete < tally_exit, "the skip check must be able to fail the run"
+
+
+def test_graph_rebuild_tally_counts_applied_and_skipped_writes() -> None:
+    """The tally distinguishes persistence from submission, per write."""
+    tally = _GraphRebuildTally()
+
+    tally.record(
+        SimpleNamespace(applied=True, entities_written=3, edges_written=2, skip_reason=None)
+    )
+    tally.record(
+        SimpleNamespace(
+            applied=False,
+            entities_written=0,
+            edges_written=0,
+            skip_reason="stale_document_version",
+        )
+    )
+    tally.record(
+        SimpleNamespace(applied=False, entities_written=0, edges_written=0, skip_reason=None)
+    )
+
+    assert tally.submitted == 3
+    assert tally.applied == 1
+    assert tally.skipped == 2
+    assert tally.entities_written == 3
+    assert tally.edges_written == 2
+    assert tally.skip_reasons == {"stale_document_version": 1, "unknown": 1}
+
+
+def test_graph_rebuild_tally_is_clean_when_every_write_lands() -> None:
+    """A healthy rebuild must not trip the failure path."""
+    tally = _GraphRebuildTally()
+    for _ in range(4):
+        tally.record(
+            SimpleNamespace(applied=True, entities_written=1, edges_written=0, skip_reason=None)
+        )
+
+    assert tally.skipped == 0
+    assert tally.skip_reasons == {}
+    assert tally.applied == tally.submitted == 4
 
 
 def test_rebuild_pre_wipe_safety_guard_runs_before_wipe() -> None:

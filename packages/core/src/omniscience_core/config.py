@@ -271,6 +271,26 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- Duplicate-stub heal (edge-duplication repair) ---
+    graph_stub_heal: Literal["enabled", "disabled"] = Field(
+        default="disabled",
+        description=(
+            "One-shot repair for graphs forked by the pre-fix by-name edge "
+            "writer, which MERGEd placeholder ('stub') entities on the "
+            "unconstrained `name` property. Concurrent ingest forked one stub "
+            "per writer, and every later write then fanned each edge out "
+            "across all of them. Set 'enabled' to make the next "
+            "`Neo4jGraphStore.connect()` relocate those relationships onto a "
+            "single surviving stub and delete the redundant nodes. THIS "
+            "MUTATES DURABLE GRAPH DATA (relationship rewrite + node DETACH "
+            "DELETE) and is not reconstructible from Postgres, so it defaults "
+            "to 'disabled' and an operator must opt in for the one startup "
+            "that performs the repair. The heal is idempotent; return the "
+            "flag to 'disabled' afterwards. Fixing the writer alone stops new "
+            "forks but cannot collapse the ones already persisted."
+        ),
+    )
+
     # --- Retention worker (ADR-0009 §3 / §10, issue #135) ---
     #
     # Tier boundaries are global-only in v1 per ADR-0009 §10.  Per-tenant

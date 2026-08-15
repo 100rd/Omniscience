@@ -69,6 +69,7 @@ import os
 import sys
 import time
 import uuid
+from dataclasses import dataclass, field
 from typing import Any
 
 from dr_verify import (
@@ -92,6 +93,39 @@ from sqlalchemy import func, select, text
 
 #: AP5 flag: exported so tests can assert the flag exists and is parseable.
 RECOMPUTE_EMBEDDINGS_FLAG: str = "--recompute-embeddings"
+
+
+@dataclass(slots=True)
+class _GraphRebuildTally:
+    """What the graph half of the rebuild actually persisted.
+
+    ``upsert_graph`` returns a ``GraphWriteResult`` whose ``applied`` flag can
+    be False — the store guards every write on ``:DocumentCheckpoint``.  The
+    rebuild used to discard that return entirely, so a run in which every
+    document was rejected as stale still printed "Rebuild complete." and then
+    exited 0.  A DR rebuild that silently restored nothing is the worst
+    possible failure mode for this script, so the totals are collected and a
+    non-zero ``skipped`` fails the run.
+    """
+
+    submitted: int = 0
+    applied: int = 0
+    skipped: int = 0
+    entities_written: int = 0
+    edges_written: int = 0
+    skip_reasons: dict[str, int] = field(default_factory=dict)
+
+    def record(self, result: Any) -> None:
+        """Fold one ``GraphWriteResult`` into the totals."""
+        self.submitted += 1
+        if getattr(result, "applied", False):
+            self.applied += 1
+            self.entities_written += int(getattr(result, "entities_written", 0) or 0)
+            self.edges_written += int(getattr(result, "edges_written", 0) or 0)
+            return
+        self.skipped += 1
+        reason = str(getattr(result, "skip_reason", None) or "unknown")
+        self.skip_reasons[reason] = self.skip_reasons.get(reason, 0) + 1
 
 
 def _chunk_projection(*, include_embedding: bool) -> list[Any]:
@@ -490,6 +524,8 @@ async def main() -> None:
 
     print("Rebuilding projections from Postgres...")
 
+    graph_tally = _GraphRebuildTally()
+
     # 3. Fetch data and rebuild
     async with session_factory() as db_session:
         # Fetch active sources
@@ -603,7 +639,7 @@ async def main() -> None:
 
                 # An empty graph projection is still a successfully processed
                 # document version and must advance the Neo4j checkpoint.
-                await graph_store.upsert_graph(
+                graph_result = await graph_store.upsert_graph(
                     source_id=source.id,
                     document_id=doc.id,
                     entities=wrapped_entities,
@@ -611,6 +647,24 @@ async def main() -> None:
                     workspace_id=workspace_id,
                     version=doc.doc_version,
                 )
+                # Discarding this return is how a rebuild that wrote NOTHING
+                # still printed "Rebuild complete."  The store guards on
+                # ``:DocumentCheckpoint``, so a stale-version rejection is a
+                # real outcome the rebuild must surface rather than swallow.
+                graph_tally.record(graph_result)
+
+    print(
+        f"Graph rebuild: {graph_tally.applied} applied, {graph_tally.skipped} skipped, "
+        f"{graph_tally.entities_written} entities and {graph_tally.edges_written} edges "
+        f"persisted."
+    )
+    if graph_tally.skipped:
+        print(
+            f"ERROR: {graph_tally.skipped} of {graph_tally.submitted} document graph "
+            f"writes were REJECTED by the store — the rebuild is INCOMPLETE."
+        )
+        for reason, count in sorted(graph_tally.skip_reasons.items()):
+            print(f"  {count} x {reason}")
 
     print("Rebuild complete.  Running post-rebuild verification...")
 
@@ -634,6 +688,13 @@ async def main() -> None:
 
     if not all_passed:
         print("ERROR: Post-rebuild verification FAILED — see mismatches above.")
+        sys.exit(3)
+
+    # A rejected graph write is a failed rebuild even when the verification
+    # totals happen to line up: the projection was not reconstructed from the
+    # SoT, it was left at whatever the store already held.
+    if graph_tally.skipped:
+        print("ERROR: the graph rebuild was incomplete — see the rejected writes above.")
         sys.exit(3)
 
     print("All checks passed.")

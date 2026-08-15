@@ -68,6 +68,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
+from omniscience_core.storage.graph import GraphWriteResult
 from omniscience_server.ingestion.events import DocumentChangeEvent
 from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
 from omniscience_server.ingestion.worker import IngestionWorker
@@ -134,7 +135,19 @@ def _make_index_writer(action: str = "created") -> MagicMock:
     result.document_id = uuid.uuid4()
     writer = MagicMock(spec=IndexWriterProtocol)
     writer.upsert_document = AsyncMock(return_value=result)
-    writer.upsert_graph = AsyncMock(return_value=None)
+    # A real writer answers with a GraphWriteResult.  Returning ``None`` here
+    # is what made the pipeline's ``getattr(result, "applied", True)`` look
+    # harmless: the only things exercising that default were doubles that
+    # never answered at all.
+    writer.upsert_graph = AsyncMock(
+        return_value=GraphWriteResult(
+            applied=True,
+            entities_written=1,
+            edges_written=0,
+            entities_submitted=1,
+            edges_submitted=0,
+        )
+    )
     writer.tombstone = AsyncMock(return_value=True)
     return writer
 
@@ -354,8 +367,9 @@ class TestPipelineThreeStoreFanOut:
             r.chunks_written = 1
             return r
 
-        async def _neo4j_call(**kwargs: Any) -> None:
+        async def _neo4j_call(**kwargs: Any) -> GraphWriteResult:
             order.append("upsert_graph")
+            return GraphWriteResult(applied=True, entities_written=1, entities_submitted=1)
 
         index_writer.upsert_document = AsyncMock(side_effect=_pg_qdrant_call)
         index_writer.upsert_graph = AsyncMock(side_effect=_neo4j_call)

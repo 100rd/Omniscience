@@ -36,6 +36,7 @@ import os
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -55,6 +56,23 @@ from omniscience_index.stores.neo4j_store import (
 
 _WORKSPACE_A = uuid.UUID("aaaaaaaa-0000-0000-0000-0000000000a1")
 _WORKSPACE_B = uuid.UUID("bbbbbbbb-0000-0000-0000-0000000000b2")
+
+
+def _fake_summary() -> Any:
+    """A stand-in ``ResultSummary`` carrying zeroed statement counters.
+
+    ``_run_upsert_graph`` consumes every result it issues so it can report what
+    the transaction actually changed.  These tests assert on the Cypher that
+    was issued, not on persistence, so zeros are the honest answer here.
+    """
+    return SimpleNamespace(
+        counters=SimpleNamespace(nodes_created=0, relationships_created=0, properties_set=0)
+    )
+
+
+async def _fake_summary_coroutine() -> Any:
+    """``await result.consume()`` for a result double built from a namespace."""
+    return _fake_summary()
 
 
 def _strip_cypher_comments(cypher: str) -> str:
@@ -255,6 +273,11 @@ async def test_enabled_flag_upsert_graph_with_snapshot_at_runs_end_dating() -> N
         async def single(self) -> dict[str, int]:
             return {"entities_end_dated": 0, "edges_end_dated": 0}
 
+        async def consume(self) -> Any:
+            # ``_run_upsert_graph`` reads the driver's own statement counters
+            # to report what was persisted, so a double must answer for them.
+            return _fake_summary()
+
     async def _capture(cypher: str, params: dict[str, Any]) -> _FakeResult:
         seen_cypher.append(cypher)
         return _FakeResult()
@@ -294,7 +317,9 @@ async def test_enabled_flag_upsert_graph_without_snapshot_at_skips_replace() -> 
 
     async def _capture(cypher: str, params: dict[str, Any]) -> Any:
         seen_cypher.append(cypher)
-        return None
+        # A real ``tx.run`` returns an AsyncResult; the writer consumes it for
+        # the statement counters that back ``entities_written``.
+        return SimpleNamespace(consume=_fake_summary_coroutine)
 
     tx_mock = MagicMock()
     tx_mock.run = AsyncMock(side_effect=_capture)
