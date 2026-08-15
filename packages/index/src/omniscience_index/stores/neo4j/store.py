@@ -22,12 +22,18 @@ from omniscience_core.storage.graph import (
     EntityNodeView,
     EntityUpsert,
     GraphResultView,
+    GraphWriteResult,
 )
 from omniscience_core.telemetry.metrics import GRAPH_END_DATED_TOTAL
 
 from omniscience_index.stores.neo4j._cypher import (
+    _ADVANCE_DOCUMENT_CHECKPOINT_CYPHER,
+    _ADVANCE_SOURCE_CHECKPOINT_CYPHER,
     _BITEMPORAL_BACKFILL_STATEMENTS,
     _BOOTSTRAP_STATEMENTS,
+    _CHECKPOINT_CONSTRAINT_STATEMENTS,
+    _CHECKPOINT_HEAL_STATEMENTS,
+    _COUNT_DUPLICATE_STUBS_CYPHER,
     _COUNT_EDGES_BY_TYPE_CYPHER,
     _COUNT_ENTITIES_BY_KIND_CYPHER,
     _COUNT_ENTITIES_BY_SOURCE_CYPHER,
@@ -41,8 +47,9 @@ from omniscience_index.stores.neo4j._cypher import (
     _DELETE_TOMBSTONED_CYPHER,
     _DELETE_WARM_ENTITY_SNAPSHOT,
     _DELETE_WARM_RELATIONSHIP_SNAPSHOT,
+    _DUPLICATE_STUB_DELETE_CYPHER,
+    _DUPLICATE_STUB_RELOCATION_TEMPLATES,
     _EDGE_INDEX_TEMPLATES,
-    _EDGE_TYPE_REGEX,
     _END_DATE_BY_SOURCE_CYPHER,
     _END_DATE_TOMBSTONED_CYPHER,
     _ENTITY_LABEL,
@@ -51,6 +58,7 @@ from omniscience_index.stores.neo4j._cypher import (
     _GET_ENTITY_BY_NAME_AS_OF_CYPHER,
     _GET_ENTITY_BY_NAME_CYPHER,
     _LIST_RELATIONSHIP_TYPES_CYPHER,
+    _LIST_STUB_RELATIONSHIP_TYPES_CYPHER,
     _LIST_WARM_TO_ARCHIVE_DATES,
     _MARK_HOT_TO_WARM_EDGE,
     _MARK_HOT_TO_WARM_ENTITY_STATE,
@@ -58,7 +66,10 @@ from omniscience_index.stores.neo4j._cypher import (
     _MOVE_HOT_TO_WARM_EDGE,
     _MOVE_HOT_TO_WARM_ENTITY_STATE,
     _OLDEST_ELIGIBLE_HOT_RECORDED_AT,
-    _RESOLVE_STUBS_CYPHER,
+    _READ_DOCUMENT_CHECKPOINT_CYPHER,
+    _READ_SOURCE_CHECKPOINT_CYPHER,
+    _RESOLVE_STUB_RELOCATION_TEMPLATES,
+    _RESOLVE_STUBS_DELETE_CYPHER,
     _SAMPLE_HOT_TO_WARM_ENTITY_STATE,
     _UPSERT_EDGE_BITEMPORAL_CYPHER_TEMPLATE,
     _UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE,
@@ -70,6 +81,7 @@ from omniscience_index.stores.neo4j._cypher import (
     _WORKSPACE_PARAM,
     _WRITE_WORKSPACE_PARAM,
     BACKFILL_DEFAULT_BATCH_SIZE,
+    _is_valid_edge_type,
 )
 from omniscience_index.stores.neo4j._tx import (
     _run_read_stmt,
@@ -93,10 +105,59 @@ from omniscience_index.stores.neo4j.mappers import (
     _entity_to_params,
     _rows_to_graph_result,
     _serialise_metadata_param,
+    _stub_entity_id,
     _validate_edge_types,
 )
 
 log = structlog.get_logger(__name__)
+
+#: Duplicate ``:StoreCheckpoint`` groups collapsed per heal transaction, and
+#: the ceiling on how many such transactions one startup will run.  The
+#: product bounds the repair; anything beyond it is reported and left for the
+#: next startup rather than held open in a transaction that may not commit.
+_CHECKPOINT_HEAL_BATCH_SIZE: int = 500
+_CHECKPOINT_HEAL_MAX_BATCHES: int = 200
+
+#: Stubs resolved per ``resolve_pending_stubs`` batch.
+_RESOLVE_STUBS_BATCH_SIZE: int = 100
+
+#: The bitemporal state relationship (ADR-0008 §2).  Never relocated during
+#: stub resolution: a stub carries no ``:EntityState``, and moving one onto a
+#: real entity would give it two open states.
+_STATE_RELATIONSHIP_TYPE: str = "HAD_STATE"
+
+
+def _as_count(value: Any) -> int:
+    """Read one driver counter defensively.
+
+    A test double that hands back a stand-in object instead of a real
+    ``SummaryCounters`` must degrade to "nothing was persisted", never to a
+    crash and never to a fabricated count.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return int(value)
+
+
+@dataclass(slots=True)
+class _WriteCounters:
+    """Running total of what the transaction's statements actually changed."""
+
+    nodes_created: int = 0
+    relationships_created: int = 0
+    properties_set: int = 0
+
+    async def absorb(self, result: Any) -> bool:
+        """Consume ``result`` and fold its counters in; True iff it changed data."""
+        summary = await result.consume()
+        counters = getattr(summary, "counters", None)
+        nodes = _as_count(getattr(counters, "nodes_created", 0))
+        relationships = _as_count(getattr(counters, "relationships_created", 0))
+        properties = _as_count(getattr(counters, "properties_set", 0))
+        self.nodes_created += nodes
+        self.relationships_created += relationships
+        self.properties_set += properties
+        return bool(nodes or relationships or properties)
 
 
 # ---------------------------------------------------------------------------
@@ -130,6 +191,12 @@ class Neo4jStoreConfig:
     # direct construction (low-level adapter unit tests) keeps PR #104's
     # legacy writer unless a caller explicitly opts in.
     bitemporal_enabled: bool = False
+    # Opt-in duplicate-stub heal (see ``_DUPLICATE_STUB_RELOCATION_TEMPLATES``).
+    # ***DURABLE-DATA MUTATION***: relocates relationships and DETACH DELETEs
+    # redundant `:Entity {is_stub: true}` nodes at bootstrap.  Defaults to
+    # False so an ordinary restart never rewrites graph data; an operator
+    # enables it deliberately for the one startup that repairs a forked graph.
+    stub_heal_enabled: bool = False
 
     @classmethod
     def from_settings(cls, settings: Any) -> Neo4jStoreConfig:
@@ -150,6 +217,8 @@ class Neo4jStoreConfig:
             max_transaction_retry_time_seconds=float(settings.neo4j_max_retry_time_seconds),
             default_max_depth=int(settings.neo4j_default_max_depth),
             bitemporal_enabled=(str(settings.graph_bitemporal) == "enabled"),
+            # Absent from Settings on older deployments -> stays disabled.
+            stub_heal_enabled=(str(getattr(settings, "graph_stub_heal", "")) == "enabled"),
         )
 
 
@@ -180,6 +249,7 @@ class Neo4jGraphStore:
         )
         self._bootstrapped: bool = False
         self._bitemporal_enabled: bool = config.bitemporal_enabled
+        self._stub_heal_enabled: bool = config.stub_heal_enabled
 
     async def connect(self) -> None:
         """Verify connectivity and run the idempotent schema bootstrap."""
@@ -197,25 +267,155 @@ class Neo4jGraphStore:
     # ------------------------------------------------------------------
 
     async def _bootstrap_schema(self) -> None:
-        """Run constraint + index DDL idempotently (ADR-0005 §Schema)."""
+        """Run constraint + index DDL idempotently (ADR-0005 §Schema).
+
+        The checkpoint heal runs FIRST: creating the checkpoint uniqueness
+        constraint against a database that still holds duplicates fails.
+        Neither the heal nor those two constraints may abort ``connect()`` —
+        see :meth:`_heal_checkpoints` and ``_CHECKPOINT_CONSTRAINT_STATEMENTS``.
+        """
         async with self._driver.session(database=self._config.database) as session:
+            await self._heal_checkpoints(session)
             for stmt in _BOOTSTRAP_STATEMENTS:
+                if stmt in _CHECKPOINT_CONSTRAINT_STATEMENTS:
+                    try:
+                        await session.execute_write(_run_write_stmt, stmt, {})
+                    except Exception as exc:  # startup must survive the DDL
+                        # The heal could not clear every duplicate.  Running
+                        # without the constraint is degraded, not broken:
+                        # ``_read_checkpoint`` folds the maximum over duplicate
+                        # rows.  Boot-looping the server would be worse.
+                        log.warning(
+                            "neo4j_checkpoint_constraint_not_installed",
+                            error=str(exc),
+                            detail=(
+                                "duplicate checkpoint nodes remain; the store "
+                                "tolerates them but concurrent writers can fork "
+                                "new ones until this is repaired"
+                            ),
+                        )
+                    continue
                 await session.execute_write(_run_write_stmt, stmt, {})
             rel_type_rows = await session.execute_read(
                 _run_read_stmt, _LIST_RELATIONSHIP_TYPES_CYPHER, {}
             )
+            safe_rel_types: list[str] = []
+            skipped_rel_types: list[str] = []
             for row in rel_type_rows:
                 rel_type = str(row["relationshipType"])
-                if not _EDGE_TYPE_REGEX.match(rel_type):
+                if not _is_valid_edge_type(rel_type):
                     log.warning(
                         "neo4j_skipping_index_for_invalid_rel_type",
                         rel_type=rel_type,
                     )
+                    skipped_rel_types.append(rel_type)
                     continue
+                safe_rel_types.append(rel_type)
                 for index_prefix, template in _EDGE_INDEX_TEMPLATES:
                     index_name = _edge_index_name(index_prefix, rel_type)
                     stmt = template.format(name=index_name, rel_type=rel_type)
                     await session.execute_write(_run_write_stmt, stmt, {})
+
+            if self._stub_heal_enabled:
+                await self._heal_duplicate_stubs(session, safe_rel_types, skipped_rel_types)
+
+    async def _heal_checkpoints(self, session: Any) -> None:
+        """Collapse duplicate ``:StoreCheckpoint`` nodes in bounded batches.
+
+        Two properties this replaces a single unbounded statement with:
+
+        * **Bounded.**  Each transaction collapses at most
+          ``_CHECKPOINT_HEAL_BATCH_SIZE`` groups; the loop repeats until a
+          batch reports zero.  The previous form scanned the whole
+          ``:StoreCheckpoint`` label across every tenant in one transaction on
+          every startup — on the database it exists to repair, that is where
+          the heap or the transaction timeout gives out.
+        * **Non-fatal.**  A failure is logged and startup continues.  This ran
+          before the DDL with nothing catching it, so the one database that
+          needs the repair was also the one that could not boot, with no flag
+          to skip it.  The consequences of skipping are bounded and already
+          handled: ``_read_checkpoint`` tolerates duplicates by folding the
+          maximum, and the constraint DDL downstream degrades the same way.
+        """
+        params = {"batch_size": _CHECKPOINT_HEAL_BATCH_SIZE}
+        try:
+            for heal_stmt in _CHECKPOINT_HEAL_STATEMENTS:
+                collapsed_total = 0
+                converged = False
+                for _ in range(_CHECKPOINT_HEAL_MAX_BATCHES):
+                    rows = await session.execute_write(_run_write_returning, heal_stmt, params)
+                    collapsed = int(rows[0].get("collapsed", 0) or 0) if rows else 0
+                    if collapsed == 0:
+                        converged = True
+                        break
+                    collapsed_total += collapsed
+                if collapsed_total:
+                    log.warning(
+                        "neo4j_checkpoint_heal_collapsed",
+                        groups=collapsed_total,
+                        converged=converged,
+                    )
+                if not converged:
+                    log.warning(
+                        "neo4j_checkpoint_heal_batch_budget_exhausted",
+                        max_batches=_CHECKPOINT_HEAL_MAX_BATCHES,
+                        batch_size=_CHECKPOINT_HEAL_BATCH_SIZE,
+                    )
+        except Exception as exc:  # startup must survive the repair
+            log.warning(
+                "neo4j_checkpoint_heal_failed",
+                error=str(exc),
+                detail="duplicate checkpoints left in place; startup continues",
+            )
+
+    async def _heal_duplicate_stubs(
+        self,
+        session: Any,
+        rel_types: list[str],
+        skipped_rel_types: list[str],
+    ) -> None:
+        """Collapse `:Entity {is_stub: true}` nodes forked on a shared name.
+
+        ***DURABLE-DATA MUTATION.***  Opt-in via ``stub_heal_enabled``; see the
+        commentary on ``_DUPLICATE_STUB_RELOCATION_TEMPLATES``.
+
+        Relationships are relocated onto the surviving stub *before* any node is
+        deleted, so no edge is lost.  ``rel_type`` cannot be a Cypher parameter,
+        so each type is rendered into the statement — only types that already
+        passed ``_EDGE_TYPE_REGEX`` are interpolated.  If any type failed that
+        check the deletion is skipped entirely: deleting a node whose edges
+        could not be relocated would destroy data.
+        """
+        before = await session.execute_read(_run_read_stmt, _COUNT_DUPLICATE_STUBS_CYPHER, {})
+        forked = int(before[0]["forked_names"] or 0) if before else 0
+        if forked == 0:
+            log.info("neo4j_stub_heal_noop")
+            return
+
+        redundant = int(before[0]["redundant_nodes"] or 0) if before else 0
+        log.warning(
+            "neo4j_stub_heal_starting",
+            forked_names=forked,
+            redundant_nodes=redundant,
+            rel_types=len(rel_types),
+        )
+
+        for rel_type in rel_types:
+            for template in _DUPLICATE_STUB_RELOCATION_TEMPLATES:
+                stmt = template.replace("{rel_type}", rel_type)
+                await session.execute_write(_run_write_stmt, stmt, {})
+
+        if skipped_rel_types:
+            log.error(
+                "neo4j_stub_heal_incomplete_invalid_rel_types",
+                skipped=skipped_rel_types,
+                detail="edges of these types could not be relocated; stubs kept",
+            )
+            return
+
+        rows = await session.execute_write(_run_write_returning, _DUPLICATE_STUB_DELETE_CYPHER, {})
+        removed = int(rows[0]["removed"] or 0) if rows else 0
+        log.warning("neo4j_stub_heal_complete", removed_nodes=removed)
 
     # ------------------------------------------------------------------
     # Write API
@@ -233,16 +433,23 @@ class Neo4jGraphStore:
         version: int | None = None,
         epoch: int | None = None,
         forced_replay: bool = False,
-    ) -> None:
-        """Persist a batch of entities+edges for one document (idempotent)."""
+    ) -> GraphWriteResult:
+        """Persist a batch of entities+edges for one document (idempotent).
+
+        The returned :class:`GraphWriteResult` reports what was **persisted**.
+        A write rejected by the per-document staleness guard returns
+        ``applied=False`` with ``skip_reason='stale_document_version'`` and
+        zero written counts — it is never reported as a successful write.
+        """
         if workspace_id is None:
             workspace_id = self._workspace_from_entities(entities)
         snap_iso = snapshot_at.isoformat() if snapshot_at is not None else None
         async with self._driver.session(database=self._config.database) as session:
-            counts = await session.execute_write(
+            outcome = await session.execute_write(
                 self._run_upsert_graph,
                 workspace_id,
                 source_id,
+                document_id,
                 entities,
                 edges,
                 self._bitemporal_enabled,
@@ -251,22 +458,41 @@ class Neo4jGraphStore:
                 epoch,
                 forced_replay,
             )
-        entities_end_dated, edges_end_dated = counts if counts is not None else (0, 0)
-        if entities_end_dated:
-            GRAPH_END_DATED_TOTAL.labels(kind="entity", reason="snapshot").inc(entities_end_dated)
-        if edges_end_dated:
-            GRAPH_END_DATED_TOTAL.labels(kind="edge", reason="snapshot").inc(edges_end_dated)
+        result = outcome if outcome is not None else GraphWriteResult(applied=False)
+        if result.entities_end_dated:
+            GRAPH_END_DATED_TOTAL.labels(kind="entity", reason="snapshot").inc(
+                result.entities_end_dated
+            )
+        if result.edges_end_dated:
+            GRAPH_END_DATED_TOTAL.labels(kind="edge", reason="snapshot").inc(
+                result.edges_end_dated
+            )
+        # One event name, both outcomes, always at info — the profile runs
+        # LOG_LEVEL=info, so a debug-level skip would be invisible.  The
+        # ``*_written`` fields count rows the transaction actually wrote; the
+        # ``*_in_batch`` fields are the caller's intent.  Reporting only the
+        # latter (the previous behaviour) is what hid a 100% drop rate.
         log.info(
-            "neo4j_upsert_graph",
+            "neo4j_upsert_graph" if result.applied else "neo4j_upsert_graph_skipped",
             source_id=str(source_id),
             document_id=str(document_id),
-            entities=len(entities),
-            edges=len(edges),
-            entities_end_dated=entities_end_dated,
-            edges_end_dated=edges_end_dated,
+            applied=result.applied,
+            skip_reason=result.skip_reason,
+            entities_written=result.entities_written,
+            edges_written=result.edges_written,
+            entities_in_batch=len(entities),
+            edges_in_batch=len(edges),
+            nodes_created=result.nodes_created,
+            relationships_created=result.relationships_created,
+            properties_set=result.properties_set,
+            entities_end_dated=result.entities_end_dated,
+            edges_end_dated=result.edges_end_dated,
+            version=version,
+            epoch=epoch,
             bitemporal_enabled=self._bitemporal_enabled,
             snapshot_at=snap_iso,
         )
+        return result
 
     @staticmethod
     def _workspace_from_entities(entities: list[Any]) -> uuid.UUID:
@@ -285,10 +511,74 @@ class Neo4jGraphStore:
         return uuid.UUID(str(ws))
 
     @staticmethod
+    async def _read_checkpoint(
+        tx: Any,
+        cypher: str,
+        params: dict[str, Any],
+    ) -> tuple[int | None, int | None]:
+        """Read a checkpoint as ``(version, epoch)``, tolerating duplicates.
+
+        Databases created before ``store_checkpoint_workspace_source_unique``
+        can hold several ``:StoreCheckpoint`` nodes for one
+        (workspace, source): without a uniqueness constraint, ``MERGE`` takes
+        no cross-transaction lock, so concurrent writers each created their
+        own node.  ``Result.single()`` warns and returns an arbitrary one of
+        them, which makes the guard non-deterministic.
+
+        Folding the maximum over every row is both crash-free and the safe
+        direction: an over-stated watermark rejects a stale write, an
+        under-stated one accepts it.
+        """
+        res = await tx.run(cypher, params)
+        version: int | None = None
+        epoch: int | None = None
+        async for record in res:
+            raw_version = record["version"]
+            if raw_version is not None:
+                candidate = int(raw_version)
+                if version is None or candidate > version:
+                    version = candidate
+            raw_epoch = record["epoch"]
+            if raw_epoch is not None:
+                candidate_epoch = int(raw_epoch)
+                if epoch is None or candidate_epoch > epoch:
+                    epoch = candidate_epoch
+        return version, epoch
+
+    @staticmethod
+    def _is_stale(
+        *,
+        incoming_version: int,
+        incoming_epoch: int | None,
+        applied_version: int | None,
+        applied_epoch: int | None,
+        forced_replay: bool,
+    ) -> bool:
+        """Return True when this write must be rejected as stale.
+
+        Monotonic rule, unchanged in spirit from the original guard: a version
+        at or below the one already applied is a redelivery or an out-of-order
+        delivery and must not overwrite newer state.  A newer epoch (ADR-0017
+        per-source epoch pin / ADR-0018 rebuild) restarts the version sequence
+        and therefore supersedes the comparison, as does an explicit
+        forced replay.
+        """
+        if forced_replay:
+            return False
+        if (
+            incoming_epoch is not None
+            and applied_epoch is not None
+            and incoming_epoch > applied_epoch
+        ):
+            return False
+        return applied_version is not None and applied_version >= incoming_version
+
+    @staticmethod
     async def _run_upsert_graph(
         tx: Any,
         workspace_id: uuid.UUID,
         source_id: uuid.UUID,
+        document_id: uuid.UUID,
         entities: list[Any],
         edges: list[Any],
         bitemporal_enabled: bool,
@@ -296,44 +586,44 @@ class Neo4jGraphStore:
         version: int | None,
         epoch: int | None = None,
         forced_replay: bool = False,
-    ) -> tuple[int, int]:
-        """Transaction body for :meth:`upsert_graph` (idempotent replace)."""
+    ) -> GraphWriteResult:
+        """Transaction body for :meth:`upsert_graph`.
+
+        The staleness guard is keyed on the **document**, because ``version``
+        is ``documents.doc_version`` — a per-row counter.  The per-source
+        ``:StoreCheckpoint`` is advanced afterwards as a pure watermark and
+        never gates the write; gating on it dropped every document of a source
+        after the first, since they all carry ``doc_version == 1``.
+        """
         now = datetime.now(UTC).isoformat()
 
         if version is not None:
-            res = await tx.run(
-                (
-                    "MATCH (c:StoreCheckpoint"
-                    " {workspace_id: $workspace_id, source_id: $source_id})"
-                    " RETURN c.version AS version, c.epoch AS epoch"
-                ),
-                {"workspace_id": str(workspace_id), "source_id": str(source_id)},
+            checkpoint_params = {
+                "workspace_id": str(workspace_id),
+                "source_id": str(source_id),
+                "document_id": str(document_id),
+            }
+            applied_version, applied_epoch = await Neo4jGraphStore._read_checkpoint(
+                tx, _READ_DOCUMENT_CHECKPOINT_CYPHER, checkpoint_params
             )
-            record = await res.single()
-
-            existing_version = record["version"] if record is not None else None
-            existing_epoch = record["epoch"] if record is not None else None
-
-            should_skip = False
-            if existing_version is not None and existing_version >= version:
-                should_skip = True
-
-            if epoch is not None and existing_epoch is not None and epoch > existing_epoch:
-                should_skip = False
-
-            if forced_replay:
-                should_skip = False
-
-            if should_skip:
-                return 0, 0
+            if Neo4jGraphStore._is_stale(
+                incoming_version=version,
+                incoming_epoch=epoch,
+                applied_version=applied_version,
+                applied_epoch=applied_epoch,
+                forced_replay=forced_replay,
+            ):
+                return GraphWriteResult(applied=False, skip_reason="stale_document_version")
 
             await tx.run(
-                (
-                    "MERGE (c:StoreCheckpoint"
-                    " {workspace_id: $workspace_id, source_id: $source_id})"
-                    " SET c.version = $version, c.epoch = $epoch,"
-                    " c.updated_at = datetime($now)"
-                ),
+                _ADVANCE_DOCUMENT_CHECKPOINT_CYPHER,
+                {**checkpoint_params, "version": version, "epoch": epoch, "now": now},
+            )
+            # Source watermark: monotonic, non-gating.  Consumed by
+            # GlobalReconciler and scripts/dr_verify.py, whose invariant is
+            # "Neo4j checkpoint == Postgres max(doc_version) per source".
+            await tx.run(
+                _ADVANCE_SOURCE_CHECKPOINT_CYPHER,
                 {
                     "workspace_id": str(workspace_id),
                     "source_id": str(source_id),
@@ -375,13 +665,21 @@ class Neo4jGraphStore:
             _UPSERT_ENTITY_BITEMPORAL_CYPHER if bitemporal_enabled else _UPSERT_ENTITY_CYPHER
         )
 
+        # ``*_written`` counts statements that CHANGED the database, read back
+        # from the driver's own counters.  Counting loop iterations reproduces
+        # ``len(entities)`` exactly, cannot fail, and is what let a 100% drop
+        # rate survive a full run — see ``GraphWriteResult``.
+        totals = _WriteCounters()
+        entities_written = 0
+        edges_written = 0
         name_to_id: dict[str, uuid.UUID] = {}
         for ext_ent in entities:
             params = _entity_to_params(ext_ent, source_id, workspace_id, now)
             if bitemporal_enabled:
                 params["state_fingerprint"] = _entity_state_fingerprint(params)
             _serialise_metadata_param(params)
-            await tx.run(entity_cypher, params)
+            if await totals.absorb(await tx.run(entity_cypher, params)):
+                entities_written += 1
             name_to_id[str(params["name"])] = uuid.UUID(str(params["id"]))
             display = str(params.get("display_name") or "")
             if display:
@@ -400,11 +698,22 @@ class Neo4jGraphStore:
                 if not target_name:
                     continue
                 edge_type = str(getattr(ext_edge, "edge_type", "calls"))
+                # ``_edge_to_params`` returns None BEFORE it reaches its own
+                # edge-type validation, so this branch is the only guard on the
+                # by-name path — and the type is rendered into the Cypher text
+                # a few lines below.  Without this check an edge_type of
+                # ``x`{workspace_id:$workspace_id}]->(b) WITH a MATCH (z:Entity)
+                # DETACH DELETE z //`` renders an unscoped cross-tenant delete.
+                if not _is_valid_edge_type(edge_type):
+                    raise ValueError(f"invalid_edge_type:{edge_type}")
                 stub_params = {
                     "workspace_id": str(workspace_id),
                     "source_id_ent": str(ext_edge.source_entity_id),  # duck-typed
                     "target_name": str(target_name),
-                    "generated_id": str(uuid.uuid4()),
+                    # Deterministic, not uuid4: the stub MERGEs on
+                    # (workspace_id, id) so the uniqueness constraint can
+                    # serialise concurrent writers.  See ``_stub_entity_id``.
+                    "stub_id": str(_stub_entity_id(workspace_id, str(target_name))),
                     "source_id": str(source_id),
                     "edge_type": edge_type,
                     "metadata": _coerce_metadata(getattr(ext_edge, "metadata", None)),
@@ -412,16 +721,29 @@ class Neo4jGraphStore:
                 }
                 _serialise_metadata_param(stub_params)
                 rendered = _UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE.replace("{edge_type}", edge_type)
-                await tx.run(rendered, stub_params)
+                if await totals.absorb(await tx.run(rendered, stub_params)):
+                    edges_written += 1
                 continue
 
             if bitemporal_enabled:
                 edge_params["state_fingerprint"] = _edge_state_fingerprint(edge_params)
             _serialise_metadata_param(edge_params)
             rendered = edge_template.replace("{edge_type}", str(edge_params["edge_type"]))
-            await tx.run(rendered, edge_params)
+            if await totals.absorb(await tx.run(rendered, edge_params)):
+                edges_written += 1
 
-        return entities_end_dated, edges_end_dated
+        return GraphWriteResult(
+            applied=True,
+            entities_written=entities_written,
+            edges_written=edges_written,
+            entities_end_dated=entities_end_dated,
+            edges_end_dated=edges_end_dated,
+            entities_submitted=len(entities),
+            edges_submitted=len(edges),
+            nodes_created=totals.nodes_created,
+            relationships_created=totals.relationships_created,
+            properties_set=totals.properties_set,
+        )
 
     async def upsert_entity(
         self,
@@ -457,6 +779,22 @@ class Neo4jGraphStore:
             forced_replay = getattr(entity, "forced_replay", False)
             bypass_source_checkpoint = getattr(entity, "bypass_source_checkpoint", False)
             if entity_version is not None:
+                # KNOWN GAP (tracked): this gates a write on the PER-SOURCE
+                # ``:StoreCheckpoint``, which the note above
+                # ``_STORE_CHECKPOINT_LABEL`` in ``_cypher.py`` says MUST NOT
+                # gate a write.  It is the same defect shape ``upsert_graph``
+                # was just repaired for: ``entity.version`` is a per-row
+                # counter compared against a per-source scalar, so entities of
+                # one source that share a version can be dropped after the
+                # first.  It is NOT fixed here because the fix is not a
+                # like-for-like swap — ``upsert_entity`` has no ``document_id``
+                # to key a ``:DocumentCheckpoint`` on, so closing it requires
+                # threading the document identity through the outbox
+                # (``EntityUpsertEvent``) and the AP1/AP3 backfill callers.
+                # The blast radius is bounded meanwhile: the authoritative
+                # guard is the per-entity CAS below, which is keyed on the
+                # entity itself, and ``bypass_source_checkpoint`` already
+                # exists so the AP3 backfill reaches it regardless.
                 # ----------------------------------------------------------------
                 # Source-level checkpoint fast-path (coarse guard).
                 # Skip if the source checkpoint is already at or beyond this version
@@ -467,46 +805,28 @@ class Neo4jGraphStore:
                 # relative to the SoT even when the source checkpoint is current.
                 # Unlike forced_replay, the per-entity CAS monotonic guard is kept.
                 # ----------------------------------------------------------------
-                res = await tx.run(
-                    (
-                        "MATCH (c:StoreCheckpoint"
-                        " {workspace_id: $workspace_id, source_id: $source_id})"
-                        " RETURN c.version AS version, c.epoch AS epoch"
-                    ),
-                    {"workspace_id": str(workspace_id), "source_id": str(entity.source_id)},
+                checkpoint_params = {
+                    "workspace_id": str(workspace_id),
+                    "source_id": str(entity.source_id),
+                }
+                existing_version, existing_epoch = await self._read_checkpoint(
+                    tx, _READ_SOURCE_CHECKPOINT_CYPHER, checkpoint_params
                 )
-                record = await res.single()
-
-                existing_version = record["version"] if record is not None else None
-                existing_epoch = record["epoch"] if record is not None else None
-
-                should_skip = False
-                if existing_version is not None and existing_version >= entity_version:
-                    should_skip = True
 
                 ep = getattr(entity, "epoch", None)
-                if ep is not None and existing_epoch is not None and ep > existing_epoch:
-                    should_skip = False
-
-                if forced_replay or bypass_source_checkpoint:
-                    should_skip = False
+                should_skip = self._is_stale(
+                    incoming_version=entity_version,
+                    incoming_epoch=ep,
+                    applied_version=existing_version,
+                    applied_epoch=existing_epoch,
+                    forced_replay=forced_replay or bypass_source_checkpoint,
+                )
 
                 if should_skip:
                     return
                 await tx.run(
-                    (
-                        "MERGE (c:StoreCheckpoint"
-                        " {workspace_id: $workspace_id, source_id: $source_id})"
-                        " SET c.version = $version, c.epoch = $epoch,"
-                        " c.updated_at = datetime($now)"
-                    ),
-                    {
-                        "workspace_id": str(workspace_id),
-                        "source_id": str(entity.source_id),
-                        "version": entity_version,
-                        "epoch": ep,
-                        "now": now,
-                    },
+                    _ADVANCE_SOURCE_CHECKPOINT_CYPHER,
+                    {**checkpoint_params, "version": entity_version, "epoch": ep, "now": now},
                 )
 
                 # ----------------------------------------------------------------
@@ -543,7 +863,7 @@ class Neo4jGraphStore:
     ) -> None:
         """Upsert a single edge within ``workspace_id`` (idempotent)."""
         edge_type = edge.edge_type
-        if not _EDGE_TYPE_REGEX.match(edge_type):
+        if not _is_valid_edge_type(edge_type):
             raise ValueError(f"invalid_edge_type:{edge_type}")
         now = datetime.now(UTC).isoformat()
         params: dict[str, Any] = {
@@ -558,50 +878,42 @@ class Neo4jGraphStore:
         rendered = self._select_edge_upsert_cypher(params, edge_type)
 
         async def _run(tx: Any) -> None:
-            if getattr(edge, "version", None) is not None and edge.metadata.get("source_id"):
+            edge_version = getattr(edge, "version", None)
+            if edge_version is not None and edge.metadata.get("source_id"):
+                # KNOWN GAP (tracked): as in ``upsert_entity`` above, this gates
+                # a write on the PER-SOURCE ``:StoreCheckpoint`` that
+                # ``_cypher.py`` documents as non-gating.  An edge carries no
+                # ``document_id`` at all — its source is a metadata string —
+                # so there is nothing to key a ``:DocumentCheckpoint`` on until
+                # ``EdgeUpsertEvent`` carries the document identity.  Deferred
+                # with ``upsert_entity``; unlike that path there is no
+                # per-entity CAS behind it, so a same-version redelivery of a
+                # *different* edge of the same source is dropped here.
                 source_id = str(edge.metadata["source_id"])
-                res = await tx.run(
-                    (
-                        "MATCH (c:StoreCheckpoint"
-                        " {workspace_id: $workspace_id, source_id: $source_id})"
-                        " RETURN c.version AS version, c.epoch AS epoch"
-                    ),
-                    {"workspace_id": str(workspace_id), "source_id": source_id},
+                checkpoint_params = {
+                    "workspace_id": str(workspace_id),
+                    "source_id": source_id,
+                }
+                existing_version, existing_epoch = await self._read_checkpoint(
+                    tx, _READ_SOURCE_CHECKPOINT_CYPHER, checkpoint_params
                 )
-                record = await res.single()
-
-                existing_version = record["version"] if record is not None else None
-                existing_epoch = record["epoch"] if record is not None else None
-
-                should_skip = False
-                if existing_version is not None and existing_version >= edge.version:
-                    should_skip = True
 
                 ep = getattr(edge, "epoch", None)
-                if ep is not None and existing_epoch is not None and ep > existing_epoch:
-                    should_skip = False
-
                 fr = getattr(edge, "forced_replay", False)
                 bypass_edge = getattr(edge, "bypass_source_checkpoint", False)
-                if fr or bypass_edge:
-                    should_skip = False
+                should_skip = self._is_stale(
+                    incoming_version=int(edge_version),
+                    incoming_epoch=ep,
+                    applied_version=existing_version,
+                    applied_epoch=existing_epoch,
+                    forced_replay=bool(fr or bypass_edge),
+                )
 
                 if should_skip:
                     return
                 await tx.run(
-                    (
-                        "MERGE (c:StoreCheckpoint"
-                        " {workspace_id: $workspace_id, source_id: $source_id})"
-                        " SET c.version = $version, c.epoch = $epoch,"
-                        " c.updated_at = datetime($now)"
-                    ),
-                    {
-                        "workspace_id": str(workspace_id),
-                        "source_id": source_id,
-                        "version": edge.version,
-                        "epoch": ep,
-                        "now": now,
-                    },
+                    _ADVANCE_SOURCE_CHECKPOINT_CYPHER,
+                    {**checkpoint_params, "version": edge_version, "epoch": ep, "now": now},
                 )
             await tx.run(rendered, params)
 
@@ -617,13 +929,21 @@ class Neo4jGraphStore:
         workspace_id: uuid.UUID,
         metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Create an edge to a target identified by name (creates a stub if missing)."""
+        """Create an edge to a target identified by name (creates a stub if missing).
+
+        ``edge_type`` is rendered into the Cypher text (relationship type cannot
+        be a parameter), so it is validated first — same guard, same error, as
+        :meth:`upsert_edge`.
+        """
+        if not _is_valid_edge_type(edge_type):
+            raise ValueError(f"invalid_edge_type:{edge_type}")
         now = datetime.now(UTC).isoformat()
         params: dict[str, Any] = {
             "workspace_id": str(workspace_id),
             "source_id_ent": str(source_entity_id),
             "target_name": target_name,
-            "generated_id": str(uuid.uuid4()),
+            # Deterministic stub identity — see ``_stub_entity_id``.
+            "stub_id": str(_stub_entity_id(workspace_id, target_name)),
             "source_id": (metadata.get("source_id") if metadata else ""),
             "edge_type": edge_type,
             "metadata": _coerce_metadata(metadata),
@@ -952,16 +1272,56 @@ class Neo4jGraphStore:
         return es_deleted, edge_deleted
 
     async def resolve_pending_stubs(self, *, workspace_id: uuid.UUID) -> int:
-        """Merge stub nodes with real entities in the same workspace."""
+        """Merge stub nodes into the real entity that carries the same name.
+
+        Relationships are relocated **with their own type** before any stub is
+        deleted.  The previous implementation hard-coded ``:calls`` into the
+        relocation, which silently retyped every ``depends_on`` / ``in_vpc`` /
+        ``in_ou`` / ``in_organization`` / ``in_account`` edge the
+        infrastructure extractor produces — see the commentary on
+        ``_RESOLVE_STUB_PAIR_PREFIX``.
+
+        Relationship type cannot be a Cypher parameter, so each type is
+        rendered into the statement.  Only types that pass
+        ``_is_valid_edge_type`` are interpolated, and if *any* incident type
+        fails the check the whole pass returns without deleting anything:
+        deleting a stub whose edges could not be relocated destroys data.
+        This mirrors ``_heal_duplicate_stubs``.
+        """
         params = {
             "workspace_id": str(workspace_id),
-            "batch_size": 100,
+            "batch_size": _RESOLVE_STUBS_BATCH_SIZE,
         }
+        type_params = {"workspace_id": str(workspace_id)}
         total_resolved = 0
         async with self._driver.session(database=self._config.database) as session:
             while True:
+                type_rows = await session.execute_read(
+                    _run_read_stmt, _LIST_STUB_RELATIONSHIP_TYPES_CYPHER, type_params
+                )
+                rel_types = [str(row["rel_type"]) for row in type_rows]
+                unsafe = sorted({t for t in rel_types if not _is_valid_edge_type(t)})
+                if unsafe:
+                    log.error(
+                        "neo4j_stub_resolution_blocked_invalid_rel_type",
+                        workspace_id=str(workspace_id),
+                        skipped=unsafe,
+                        detail=(
+                            "edges of these types cannot be relocated; stubs kept "
+                            "so the edges are not destroyed"
+                        ),
+                    )
+                    return total_resolved
+
+                for rel_type in rel_types:
+                    if rel_type == _STATE_RELATIONSHIP_TYPE:
+                        continue
+                    for template in _RESOLVE_STUB_RELOCATION_TEMPLATES:
+                        stmt = template.replace("{rel_type}", rel_type)
+                        await session.execute_write(_run_write_stmt, stmt, params)
+
                 rows = await session.execute_write(
-                    _run_write_returning, _RESOLVE_STUBS_CYPHER, params
+                    _run_write_returning, _RESOLVE_STUBS_DELETE_CYPHER, params
                 )
                 count = int(rows[0].get("resolved", 0)) if rows else 0
                 if count == 0:

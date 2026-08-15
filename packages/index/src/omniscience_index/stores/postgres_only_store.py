@@ -17,6 +17,7 @@ from omniscience_core.storage.graph import (
     EntityUpsert,
     GraphEdgeView,
     GraphResultView,
+    GraphWriteResult,
 )
 from omniscience_core.storage.vector import (
     ChunkPayload,
@@ -78,10 +79,10 @@ class PostgresOnlyStore:
         entities: list[Any],
         edges: list[Any],
         snapshot_at: datetime | None = None,
-    ) -> None:
+    ) -> GraphWriteResult:
         """Persist a batch of entities and edges for one document/source."""
         if not entities:
-            return
+            return GraphWriteResult(applied=False, skip_reason="empty_batch")
 
         # workspace_id can be extracted from the first entity
         head = entities[0]
@@ -109,6 +110,8 @@ class PostgresOnlyStore:
                 )
                 await session.execute(delete(Entity).where(Entity.id.in_(entity_ids)))
 
+            entities_written = 0
+            edges_written = 0
             name_to_id: dict[str, uuid.UUID] = {}
             # Insert entities
             for ent in entities:
@@ -144,6 +147,7 @@ class PostgresOnlyStore:
                     ),
                 )
                 session.add(db_ent)
+                entities_written += 1
                 name_to_id[name] = ent_id
                 name_to_id[display_name] = ent_id
 
@@ -196,6 +200,13 @@ class PostgresOnlyStore:
                     edge_metadata=metadata,
                 )
                 session.add(db_edge)
+                edges_written += 1
+
+        return GraphWriteResult(
+            applied=True,
+            entities_written=entities_written,
+            edges_written=edges_written,
+        )
 
     async def upsert_entity(self, *, entity: EntityUpsert, workspace_id: uuid.UUID) -> None:
         async with self._session_factory() as session, session.begin():

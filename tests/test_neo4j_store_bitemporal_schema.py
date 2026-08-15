@@ -204,7 +204,7 @@ def test_backfill_statements_kept_separate_from_bootstrap() -> None:
 
 
 def test_bootstrap_count_within_documented_envelope() -> None:
-    """Sanity floor — static bootstrap is 10 statements (5 ADR-0005 + 3 ADR-0008 + 2 #310).
+    """Sanity floor — 12 statements (5 ADR-0005 + 3 ADR-0008 + 2 #310 + 2 checkpoint).
 
     A 1M-node graph hits each `CREATE ... IF NOT EXISTS` once at startup;
     the marginal cost over the pre-existing node-label DDL is the
@@ -223,11 +223,22 @@ def test_bootstrap_count_within_documented_envelope() -> None:
     `:EntityState` mirror — so `list_entities` answers cluster-scoped
     queries with an index seek; the static tuple is back to 10.  Dynamic
     per-type DDL bounds are exercised by the integration test.
+
+    The graph-write checkpoint fix then added two composite uniqueness
+    constraints — `:StoreCheckpoint (workspace_id, source_id)` and
+    `:DocumentCheckpoint (workspace_id, source_id, document_id)` — taking the
+    tuple to 12.  Their absence is what let concurrent `MERGE`s fork the
+    source checkpoint into duplicate nodes (10 observed for a single source
+    in a live database), making the staleness guard read an arbitrary one.
+    The accompanying pre-DDL data heal deliberately lives OUTSIDE this tuple,
+    in `_CHECKPOINT_HEAL_STATEMENTS`, so that this module's
+    `IF NOT EXISTS`-idempotence lint keeps covering pure DDL only.
     """
-    assert len(_BOOTSTRAP_STATEMENTS) == 10, (
+    assert len(_BOOTSTRAP_STATEMENTS) == 12, (
         "Static bootstrap statement count drifted from documented envelope. "
         "ADR-0005 carries 5 node-label statements; ADR-0008 §4 adds 3; "
-        "issue #310 (Gap B) adds 2 cluster indexes. "
+        "issue #310 (Gap B) adds 2 cluster indexes; the graph-write "
+        "checkpoint fix adds 2 checkpoint uniqueness constraints. "
         "Update this test deliberately if the contract changes."
     )
 

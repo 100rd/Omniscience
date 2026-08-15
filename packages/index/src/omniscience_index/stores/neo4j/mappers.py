@@ -17,6 +17,7 @@ import uuid
 from datetime import UTC, date, datetime
 from typing import Any
 
+import structlog
 from omniscience_core.storage.graph import (
     EntityNodeView,
     GraphEdgeView,
@@ -24,7 +25,6 @@ from omniscience_core.storage.graph import (
 )
 
 from omniscience_index.stores.neo4j._cypher import (
-    _EDGE_TYPE_REGEX,
     _LIST_AS_OF_CLUSTER_FILTER,
     _LIST_AS_OF_NAME_FILTER,
     _LIST_CLUSTER_FILTER,
@@ -34,7 +34,10 @@ from omniscience_index.stores.neo4j._cypher import (
     _TRAVERSE_AS_OF_CYPHER_TEMPLATE,
     _TRAVERSE_CYPHER_TEMPLATE,
     _WRITE_WORKSPACE_PARAM,
+    _is_valid_edge_type,
 )
+
+log = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Depth + edge-type validators
@@ -57,7 +60,7 @@ def _validate_edge_types(edge_types: list[str] | None) -> list[str] | None:
     if edge_types is None:
         return None
     for value in edge_types:
-        if not _EDGE_TYPE_REGEX.match(value):
+        if not _is_valid_edge_type(value):
             raise ValueError(f"invalid_edge_type:{value}")
     return edge_types
 
@@ -213,19 +216,36 @@ def _serialise_metadata(value: Any) -> str:
 
 
 def _deserialise_metadata(raw: Any) -> dict[str, Any]:
-    """Decode a JSON string from Neo4j back into a ``dict[str, Any]``."""
+    """Decode a JSON string from Neo4j back into a ``dict[str, Any]``.
+
+    Total by construction.  This runs once per row inside
+    :func:`_entity_record_to_view`, so raising on one malformed value took out
+    ``get_entity``, ``list_entities`` and ``get_all_entities`` for the entire
+    workspace — a single legacy node written before
+    :func:`_serialise_metadata_param` existed (a bare string, a JSON array, a
+    hand-seeded row) blinded every read that touched it, including
+    ``EntityLinker``'s full-workspace scan.  A row whose metadata cannot be
+    decoded degrades to ``{}`` and is logged; the rest of the row is still
+    perfectly usable, and a matcher reading ``{}`` simply finds no match.
+    """
     if raw is None:
         return {}
+    if isinstance(raw, dict):
+        return _coerce_metadata(raw)
     if isinstance(raw, str):
         if not raw:
             return {}
-        decoded = json.loads(raw)
+        try:
+            decoded = json.loads(raw)
+        except ValueError as exc:
+            log.warning("neo4j_metadata_not_json", error=str(exc))
+            return {}
         if not isinstance(decoded, dict):
-            raise TypeError(f"metadata JSON must decode to dict, got {type(decoded).__name__}")
+            log.warning("neo4j_metadata_not_an_object", decoded_type=type(decoded).__name__)
+            return {}
         return {str(k): v for k, v in decoded.items()}
-    if isinstance(raw, dict):
-        return _coerce_metadata(raw)
-    raise TypeError(f"cannot deserialise metadata of type {type(raw).__name__}")
+    log.warning("neo4j_metadata_unexpected_type", raw_type=type(raw).__name__)
+    return {}
 
 
 def _serialise_metadata_param(params: dict[str, Any]) -> None:
@@ -272,6 +292,34 @@ def _entity_state_fingerprint(params: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+#: Fixed namespace for deterministic stub-entity ids.  A *stub* is the
+#: placeholder node the by-name edge writer materialises when an edge names a
+#: target that no document in the batch defines (a cross-source or
+#: not-yet-crawled reference).
+#:
+#: The value is arbitrary but MUST NOT change: it is the stable identity of
+#: every stub written after this fix.
+_STUB_ENTITY_NAMESPACE: uuid.UUID = uuid.UUID("2b0a5e1c-9d34-5f78-b2c6-1e4a7d905f31")
+
+
+def _stub_entity_id(workspace_id: uuid.UUID | str, target_name: str) -> uuid.UUID:
+    """Derive the deterministic id of the stub entity for ``target_name``.
+
+    ``uuid4()`` was used here originally, which left the stub's only stable
+    key its ``name`` — and ``name`` carries no uniqueness constraint, so
+    ``MERGE (b:Entity {workspace_id, name})`` took no cross-transaction lock
+    and every concurrent writer forked its own stub.  Worse, once N stubs
+    shared a name that same MERGE matched N rows, so the relationship MERGE
+    downstream of it ran N times and every later write fanned the edge out
+    N-fold, permanently.
+
+    Deriving the id moves the MERGE onto ``(workspace_id, id)``, which *is*
+    constrained (``entity_workspace_id_unique``): Neo4j serialises concurrent
+    creators on it, and a replay converges on the node it wrote last time.
+    """
+    return uuid.uuid5(_STUB_ENTITY_NAMESPACE, f"{workspace_id}|{target_name}")
+
+
 def _edge_state_fingerprint(params: dict[str, Any]) -> str:
     """Compute the edge-state fingerprint covering ``edge_type``, ``source_id``, ``metadata``."""
     payload = "|".join(
@@ -290,7 +338,19 @@ def _edge_state_fingerprint(params: dict[str, Any]) -> str:
 
 
 def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
-    """Build an :class:`EntityNodeView` from a single-row Cypher result."""
+    """Build an :class:`EntityNodeView` from a single-row Cypher result.
+
+    ``metadata`` is decoded back into a mapping.  The write path stores it
+    as a JSON *string* (:func:`_serialise_metadata_param`), so returning
+    ``record["metadata"]`` verbatim handed callers a ``str`` where
+    :class:`EntityNodeView` declares ``dict[str, Any]`` — and every
+    metadata-reading matcher in :mod:`omniscience_index.matchers`
+    (``arn_match``, ``tags_match``, ``otel_match``) calls ``.get()`` on it.
+    A ``str`` there raises ``AttributeError`` inside
+    ``EntityLinker.link_entities``, which the pipeline's best-effort
+    ``_stage_link`` then swallows: no cross-source edge is ever created and
+    nothing surfaces except a warning.
+    """
     return EntityNodeView(
         id=uuid.UUID(str(record["id"])),
         name=str(record["name"]),
@@ -303,7 +363,7 @@ def _entity_record_to_view(record: dict[str, Any]) -> EntityNodeView:
         valid_to=_optional_datetime(record.get("valid_to")),
         recorded_at=_optional_datetime(record.get("recorded_at")),
         version=record.get("version"),
-        metadata=record.get("metadata") or {},
+        metadata=_deserialise_metadata(record.get("metadata")),
     )
 
 
@@ -431,7 +491,7 @@ def _edge_to_params(
         return None  # skip self-loops (parity with pgvector writer)
 
     edge_type = str(getattr(ext_edge, "edge_type", ""))
-    if not _EDGE_TYPE_REGEX.match(edge_type):
+    if not _is_valid_edge_type(edge_type):
         raise ValueError(f"invalid_edge_type:{edge_type}")
 
     return {

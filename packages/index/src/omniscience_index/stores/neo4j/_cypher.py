@@ -25,6 +25,21 @@ _MAX_DEPTH_CEILING: Final[int] = 6
 
 _EDGE_TYPE_REGEX: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 
+
+def _is_valid_edge_type(value: str) -> bool:
+    """Return True iff ``value`` is safe to render into a Cypher template.
+
+    Relationship type cannot be a Cypher parameter, so every rendered type
+    passes through here first.  ``fullmatch``, never ``match``: Python's ``$``
+    also matches immediately *before* a trailing newline, so
+    ``_EDGE_TYPE_REGEX.match("calls\\n")`` succeeds.  That admitted an edge
+    type carrying a newline, which forks the relationship type in Neo4j
+    (``calls`` and ``calls\\n`` are two distinct types) and breaks the
+    per-type index creation in ``_bootstrap_schema``.
+    """
+    return _EDGE_TYPE_REGEX.fullmatch(value) is not None
+
+
 _ENTITY_LABEL: Final[str] = "Entity"
 _REL_TYPE_KEY: Final[str] = "edge_type"
 
@@ -40,8 +55,42 @@ _ENTITY_STATE_FINGERPRINT_PROP: Final[str] = "state_fingerprint"
 _EDGE_STATE_FINGERPRINT_PROP: Final[str] = "state_fingerprint"
 
 # ---------------------------------------------------------------------------
+# Checkpoint labels — two DISTINCT concepts, deliberately not one scalar
+# ---------------------------------------------------------------------------
+#
+# ``:StoreCheckpoint {workspace_id, source_id}`` is a per-source **watermark**:
+# the highest ``doc_version`` this store has applied for the source.  It is a
+# convergence signal consumed by ``GlobalReconciler._get_neo4j_checkpoints``
+# and ``scripts/dr_verify.py`` (documented invariant: Neo4j checkpoint ==
+# Postgres ``max(doc_version)`` per source).  It MUST NOT gate a write.
+#
+# ``:DocumentCheckpoint {workspace_id, source_id, document_id}`` is the
+# per-document **applied version**: the ``doc_version`` last written for that
+# one document.  This is the stale-write guard.  ``documents.doc_version`` is
+# a per-row counter, so a per-document store is the only place a ``>=``
+# comparison against it is meaningful.
+#
+# Conflating the two is the defect this split repairs: every document of a
+# source arrives with ``doc_version == 1``, so comparing it against a shared
+# per-source scalar dropped every document after the first.
+_STORE_CHECKPOINT_LABEL: Final[str] = "StoreCheckpoint"
+_DOCUMENT_CHECKPOINT_LABEL: Final[str] = "DocumentCheckpoint"
+
+# ---------------------------------------------------------------------------
 # Bootstrap DDL
 # ---------------------------------------------------------------------------
+
+_STORE_CHECKPOINT_CONSTRAINT: Final[str] = (
+    f"CREATE CONSTRAINT store_checkpoint_workspace_source_unique IF NOT EXISTS "
+    f"FOR (c:{_STORE_CHECKPOINT_LABEL}) "
+    f"REQUIRE (c.workspace_id, c.source_id) IS UNIQUE"
+)
+
+_DOCUMENT_CHECKPOINT_CONSTRAINT: Final[str] = (
+    f"CREATE CONSTRAINT document_checkpoint_workspace_source_document_unique "
+    f"IF NOT EXISTS FOR (d:{_DOCUMENT_CHECKPOINT_LABEL}) "
+    f"REQUIRE (d.workspace_id, d.source_id, d.document_id) IS UNIQUE"
+)
 
 _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     f"CREATE CONSTRAINT entity_workspace_id_unique IF NOT EXISTS "
@@ -70,7 +119,175 @@ _BOOTSTRAP_STATEMENTS: Final[tuple[str, ...]] = (
     f"ON (s.workspace_id, s.id, s.valid_from, s.valid_to)",
     f"CREATE INDEX entity_state_workspace_recorded_at IF NOT EXISTS "
     f"FOR (s:{_ENTITY_STATE_LABEL}) ON (s.workspace_id, s.recorded_at)",
+    # Checkpoint uniqueness.  ``_CHECKPOINT_HEAL_STATEMENTS`` MUST have run
+    # first — see the comment on that tuple.
+    _STORE_CHECKPOINT_CONSTRAINT,
+    _DOCUMENT_CHECKPOINT_CONSTRAINT,
 )
+
+#: The two bootstrap statements that can fail against *data* rather than
+#: against a schema conflict: ``CREATE CONSTRAINT ... IF NOT EXISTS`` aborts
+#: outright when the database still holds violating rows.  The heal above
+#: normally removes them, but a heal that could not finish (timeout, heap
+#: pressure on a large database) leaves them in place — and an exception here
+#: propagates out of ``connect()`` and boot-loops the server.
+#:
+#: ``Neo4jGraphStore._bootstrap_schema`` therefore degrades a failure of these
+#: two to a startup WARNING.  Running without the constraint is a *known*
+#: degraded state the read path already tolerates: ``_read_checkpoint`` folds
+#: the maximum over every duplicate row precisely because pre-constraint
+#: databases exist (see its docstring).  Every other bootstrap statement stays
+#: fatal.
+_CHECKPOINT_CONSTRAINT_STATEMENTS: Final[frozenset[str]] = frozenset(
+    {_STORE_CHECKPOINT_CONSTRAINT, _DOCUMENT_CHECKPOINT_CONSTRAINT}
+)
+
+# ---------------------------------------------------------------------------
+# Pre-DDL data heal
+# ---------------------------------------------------------------------------
+#
+# Deliberately NOT part of ``_BOOTSTRAP_STATEMENTS``: that tuple is pure,
+# ``IF NOT EXISTS``-idempotent DDL and is linted as such.  This is a data
+# repair, and it MUST run before the checkpoint constraint is created.
+#
+# ``CREATE CONSTRAINT ... IF NOT EXISTS`` does not tolerate pre-existing
+# violations — it fails outright, which would abort ``connect()`` and take the
+# server down at startup.  Databases written before the constraint existed do
+# contain duplicates: without a uniqueness constraint ``MERGE`` takes no
+# cross-transaction lock, so concurrent writers each created their own node.
+#
+# The heal is idempotent (a second run matches nothing) and strictly
+# convergent: it keeps one node per (workspace_id, source_id) and removes the
+# rest.  The nodes it deletes are derived bookkeeping, not source data: the
+# authoritative version is Postgres ``documents.doc_version``, and
+# ``scripts/rebuild_all_projections.py`` reconstructs checkpoints from it.
+#
+# BOUNDED.  ``$batch_size`` caps how many duplicate groups one transaction
+# collapses.  The previous form was an unbounded ``MATCH (c:StoreCheckpoint)``
+# — a full-label scan across every tenant, in one transaction, on every
+# startup, before the DDL.  On the very database it exists to repair that can
+# exhaust the heap or exceed the transaction timeout, and the failure aborted
+# ``connect()``: the server then boot-looped with no way to skip the repair.
+# ``Neo4jGraphStore._heal_checkpoints`` re-runs this until it reports zero and
+# downgrades any failure to a startup warning.
+#
+# KEEPER SELECTION — the version must belong to the surviving epoch.
+# The previous form reduced ``max(version)`` and ``max(epoch)`` independently,
+# so {epoch: 5, version: 2} and {epoch: 3, version: 99} fabricated a watermark
+# of {epoch: 5, version: 99} that no write had ever produced — and, being a
+# high-water mark, that fabrication rejects every legitimate epoch-5 document
+# below version 99.  Ordering by ``(epoch DESC, version DESC)`` and keeping
+# ``head(nodes)`` makes the survivor a real observed pair.  ``elementId(c)``
+# is the final tie-break so a run interrupted between batches resumes on the
+# same keeper.  ``collect`` preserves the order established by the preceding
+# ``ORDER BY``, so no ``SET`` is needed: the head already carries the right
+# values.
+_CHECKPOINT_HEAL_STATEMENTS: Final[tuple[str, ...]] = (
+    f"MATCH (c:{_STORE_CHECKPOINT_LABEL})\n"
+    f"WITH c ORDER BY c.workspace_id, c.source_id,"
+    f" coalesce(c.epoch, -1) DESC, coalesce(c.version, -1) DESC, elementId(c)\n"
+    f"WITH c.workspace_id AS workspace_id, c.source_id AS source_id,"
+    f" collect(c) AS nodes\n"
+    f"WHERE size(nodes) > 1\n"
+    f"WITH nodes LIMIT $batch_size\n"
+    f"WITH head(nodes) AS keep, tail(nodes) AS duplicates\n"
+    f"FOREACH (d IN duplicates | DETACH DELETE d)\n"
+    f"RETURN count(keep) AS collapsed",
+)
+
+# ---------------------------------------------------------------------------
+# Duplicate-stub heal  ***DURABLE-DATA MUTATION — OPT-IN***
+# ---------------------------------------------------------------------------
+#
+# Repairs a graph already forked by the by-name MERGE described at
+# ``_UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE``.  Fixing the writer stops new
+# duplicates; it cannot collapse the ones a previous build already wrote,
+# because the fan-out is real persisted relationships.
+#
+# Unlike ``_CHECKPOINT_HEAL_STATEMENTS`` this is NOT unconditional.  That heal
+# is mandatory — without it ``CREATE CONSTRAINT`` aborts ``connect()``.  This
+# one has no such forcing function, it deletes `:Entity` nodes and rewrites
+# relationships (graph data, not derived bookkeeping), and nothing here can
+# reconstruct it from Postgres.  So it runs only when the operator sets
+# ``Settings.graph_stub_heal`` / ``OMNISCIENCE_GRAPH_STUB_HEAL=enabled``, and
+# the store logs before and after.
+#
+# Safety properties, in the order the statements must run:
+#
+#   * Convergent and idempotent.  A second run finds no group of size > 1 and
+#     matches nothing.
+#   * Keeper is deterministic: lowest ``(created_at, id)`` within
+#     ``(workspace_id, name)``.  Every statement re-derives it identically, so
+#     a run interrupted between statements resumes on the same keeper.
+#   * Lossless for edges.  Relationships are relocated onto the keeper with
+#     their properties before any node is deleted, and relocation is a MERGE,
+#     so an edge the keeper already holds is not duplicated by the repair.
+#   * Only ``is_stub = true`` nodes are ever deleted.  A real entity is never
+#     a candidate, and a name held by exactly one node is never touched.
+#
+# Relationship type cannot be parameterised in Cypher, so the relocation
+# statements carry a ``{rel_type}`` slot and the store renders them per type
+# from ``db.relationshipTypes()`` — the same pattern already used for
+# ``_EDGE_INDEX_TEMPLATES``.
+_DUPLICATE_STUB_GROUP_PREFIX: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL})
+WHERE coalesce(n.is_stub, false) = true AND n.name IS NOT NULL
+WITH n ORDER BY n.workspace_id, n.name, n.created_at, n.id
+WITH n.workspace_id AS ws, n.name AS nm, collect(n) AS nodes
+WHERE size(nodes) > 1
+WITH head(nodes) AS keep, tail(nodes) AS dups
+"""
+
+_DUPLICATE_STUB_RELOCATION_TEMPLATES: Final[tuple[str, ...]] = (
+    # Incoming edges: (caller)->(dup)  becomes  (caller)->(keep).
+    _DUPLICATE_STUB_GROUP_PREFIX
+    + """
+UNWIND dups AS dup
+MATCH (caller)-[r:`{rel_type}`]->(dup)
+WHERE caller <> keep AND NOT caller IN dups
+MERGE (caller)-[k:`{rel_type}`
+                {workspace_id: coalesce(r.workspace_id, keep.workspace_id)}]->(keep)
+ON CREATE SET k += properties(r)
+DELETE r
+""",
+    # Outgoing edges: (dup)->(other)  becomes  (keep)->(other).
+    _DUPLICATE_STUB_GROUP_PREFIX
+    + """
+UNWIND dups AS dup
+MATCH (dup)-[r:`{rel_type}`]->(other)
+WHERE other <> keep AND NOT other IN dups
+MERGE (keep)-[k:`{rel_type}`
+              {workspace_id: coalesce(r.workspace_id, keep.workspace_id)}]->(other)
+ON CREATE SET k += properties(r)
+DELETE r
+""",
+)
+
+# Runs last, after every relationship type has been relocated.
+#
+# The doomed nodes are collected and counted BEFORE the delete: aggregating
+# over a node in the same clause that removed it can raise "entity has been
+# deleted in this transaction".  ``removed`` is the total across every group,
+# and it is carried past the delete as a plain scalar.
+_DUPLICATE_STUB_DELETE_CYPHER: Final[str] = (
+    _DUPLICATE_STUB_GROUP_PREFIX
+    + """
+UNWIND dups AS dup
+WITH collect(dup) AS to_delete
+WITH to_delete, size(to_delete) AS removed
+UNWIND to_delete AS doomed
+DETACH DELETE doomed
+RETURN removed
+"""
+)
+
+_COUNT_DUPLICATE_STUBS_CYPHER: Final[str] = f"""
+MATCH (n:{_ENTITY_LABEL})
+WHERE coalesce(n.is_stub, false) = true AND n.name IS NOT NULL
+WITH n.workspace_id AS ws, n.name AS nm, count(n) AS copies
+WHERE copies > 1
+RETURN count(*) AS forked_names, sum(copies - 1) AS redundant_nodes
+"""
 
 _EDGE_INDEX_TEMPLATES: Final[tuple[tuple[str, str], ...]] = (
     (
@@ -96,6 +313,80 @@ _EDGE_INDEX_TEMPLATES: Final[tuple[tuple[str, str], ...]] = (
 _LIST_RELATIONSHIP_TYPES_CYPHER: Final[str] = (
     "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"
 )
+
+# ---------------------------------------------------------------------------
+# Checkpoint queries
+# ---------------------------------------------------------------------------
+#
+# The reads return every matching row rather than aggregating, and the caller
+# folds the maximum in Python (``Neo4jGraphStore._read_checkpoint``).  That is
+# deliberate: it survives the duplicate nodes that already exist in databases
+# created before ``store_checkpoint_workspace_source_unique``, without relying
+# on ``Result.single()``, which warns and returns an arbitrary row when the
+# match is not unique.
+
+_READ_SOURCE_CHECKPOINT_CYPHER: Final[str] = f"""
+MATCH (c:{_STORE_CHECKPOINT_LABEL}
+       {{workspace_id: $workspace_id, source_id: $source_id}})
+RETURN c.version AS version, c.epoch AS epoch
+"""
+
+_READ_DOCUMENT_CHECKPOINT_CYPHER: Final[str] = f"""
+MATCH (d:{_DOCUMENT_CHECKPOINT_LABEL}
+       {{workspace_id: $workspace_id, source_id: $source_id,
+         document_id: $document_id}})
+RETURN d.version AS version, d.epoch AS epoch
+"""
+
+# Monotonic advance.  Within one SET clause list Cypher applies assignments in
+# order and later expressions observe earlier ones, so ``version`` is computed
+# FIRST while ``c.epoch`` still holds the previous epoch.
+#
+# A newer epoch (ADR-0017 per-source epoch pin / ADR-0018 rebuild) restarts the
+# version sequence, so it replaces rather than maximises the watermark;
+# otherwise the watermark only ever climbs.
+_ADVANCE_SOURCE_CHECKPOINT_CYPHER: Final[str] = f"""
+MERGE (c:{_STORE_CHECKPOINT_LABEL}
+       {{workspace_id: $workspace_id, source_id: $source_id}})
+ON CREATE SET
+    c.version = $version,
+    c.epoch = $epoch,
+    c.created_at = datetime($now),
+    c.updated_at = datetime($now)
+ON MATCH SET
+    c.version = CASE
+        WHEN $epoch IS NOT NULL AND c.epoch IS NOT NULL AND $epoch > c.epoch
+            THEN $version
+        WHEN c.version IS NULL OR $version > c.version THEN $version
+        ELSE c.version END,
+    c.epoch = CASE
+        WHEN c.epoch IS NULL THEN $epoch
+        WHEN $epoch IS NULL OR $epoch <= c.epoch THEN c.epoch
+        ELSE $epoch END,
+    c.updated_at = datetime($now)
+"""
+
+_ADVANCE_DOCUMENT_CHECKPOINT_CYPHER: Final[str] = f"""
+MERGE (d:{_DOCUMENT_CHECKPOINT_LABEL}
+       {{workspace_id: $workspace_id, source_id: $source_id,
+         document_id: $document_id}})
+ON CREATE SET
+    d.version = $version,
+    d.epoch = $epoch,
+    d.created_at = datetime($now),
+    d.updated_at = datetime($now)
+ON MATCH SET
+    d.version = CASE
+        WHEN $epoch IS NOT NULL AND d.epoch IS NOT NULL AND $epoch > d.epoch
+            THEN $version
+        WHEN d.version IS NULL OR $version > d.version THEN $version
+        ELSE d.version END,
+    d.epoch = CASE
+        WHEN d.epoch IS NULL THEN $epoch
+        WHEN $epoch IS NULL OR $epoch <= d.epoch THEN d.epoch
+        ELSE $epoch END,
+    d.updated_at = datetime($now)
+"""
 
 # ---------------------------------------------------------------------------
 # Write queries
@@ -144,11 +435,67 @@ ON MATCH SET
     r.updated_at = $now
 """
 
+# ---------------------------------------------------------------------------
+# By-name edge upsert — the edge-duplication fix
+# ---------------------------------------------------------------------------
+#
+# WHY THIS IS NO LONGER `MERGE (b:Entity {workspace_id, name})`.
+#
+# The previous form MERGEd the stub on ``name``.  ``name`` has an *index*
+# (``entity_workspace_name``) but no uniqueness *constraint*, and Neo4j only
+# takes a cross-transaction lock for MERGE when the merged key is constrained.
+# Two failures compounded:
+#
+#   1. Fork.  Ten refs ingested concurrently (``_DISCOVERY_CONCURRENCY``) each
+#      found no stub and each created one, so ten `:Entity` nodes ended up
+#      sharing a single name.  This is the identical failure mode the
+#      checkpoint heal above documents, on a different key.
+#   2. Fan-out — the expensive half.  MERGE binds *every* match, so once ten
+#      stubs shared a name the pattern yielded ten rows and the relationship
+#      MERGE below it ran ten times.  From then on **every** write of that edge
+#      produced ten relationships, deterministically, on every replay.  One
+#      inventory crawl produced 8541 `in_account` edges where 938 were due.
+#
+# Edges whose target resolves inside the batch never took this path: they go
+# through `_UPSERT_EDGE_CYPHER_TEMPLATE`, which MATCHes both endpoints on the
+# constrained ``(workspace_id, id)`` key, yields exactly one row and was
+# idempotent all along.  That asymmetry is why `in_organization` / `in_ou`
+# counts were exact while `in_account` / `management_account` were multiplied.
+#
+# The repair, in order:
+#
+#   * Resolve the target by name first, preferring a real (non-stub) entity and
+#     breaking ties on ``id`` so concurrent writers select the *same* node.
+#     `collect(...)[0]` collapses the match to one row, which removes the
+#     fan-out even while duplicate stubs still exist in an un-healed database.
+#   * Only when nothing carries that name, materialise the stub — MERGEd on
+#     ``(workspace_id, id)`` with ``$stub_id`` derived deterministically from
+#     ``(workspace_id, name)`` (``mappers._stub_entity_id``).  That key *is*
+#     covered by ``entity_workspace_id_unique``, so concurrent creators
+#     serialise on it and a replay reuses the node instead of forking one.
+#
+# `ON MATCH SET` converges content — without it a relationship froze at
+# whatever the first write saw — but `updated_at` advances ONLY on a real
+# change.  That asymmetry is deliberate and load-bearing: the bitemporal
+# backfill derives `r.recorded_at = r.updated_at`
+# (`_BACKFILL_EDGE_PROPS_CYPHER`), so touching `updated_at` on a no-op replay
+# would restate "when we recorded this fact" as "when we last looked at it" —
+# the same corruption the note on `_UPSERT_ENTITY_BITEMPORAL_CYPHER` refuses
+# for entities.  The `CASE` is listed FIRST because Cypher applies SET items in
+# order and later expressions observe earlier ones; assigning `r.metadata`
+# before comparing it would make the predicate always false.
 _UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE: Final[str] = f"""
 MATCH (a:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $source_id_ent}})
-MERGE (b:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: $target_name}})
+CALL {{
+    OPTIONAL MATCH (m:{_ENTITY_LABEL}
+                    {{workspace_id: $workspace_id, name: $target_name}})
+    WITH m ORDER BY coalesce(m.is_stub, false), m.id
+    RETURN collect(m.id)[0] AS existing_id
+}}
+WITH a, coalesce(existing_id, $stub_id) AS target_id
+MERGE (b:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: target_id}})
 ON CREATE SET
-    b.id = $generated_id,
+    b.name = $target_name,
     b.is_stub = true,
     b.created_at = $now
 MERGE (a)-[r:`{{edge_type}}` {{workspace_id: $workspace_id}}]->(b)
@@ -158,15 +505,48 @@ ON CREATE SET
     r.edge_type = $edge_type,
     r.created_at = $now,
     r.updated_at = $now
+ON MATCH SET
+    r.updated_at = CASE
+        WHEN coalesce(r.metadata, '') <> $metadata
+          OR coalesce(r.source_id, '') <> $source_id
+        THEN $now ELSE r.updated_at END,
+    r.source_id = $source_id,
+    r.metadata = $metadata
 """
 
 # ---------------------------------------------------------------------------
 # Bitemporal write Cypher (ADR-0008 §2 + §3, issue #131)
 # ---------------------------------------------------------------------------
 
+# NOTE — the deliberate absence of an unconditional `ON MATCH SET`.
+#
+# Unlike `_UPSERT_ENTITY_CYPHER` (legacy) and `_UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER`
+# (per-entity CAS), this template writes nothing when a re-ingested entity's
+# state fingerprint is unchanged — not even `updated_at`.  That asymmetry is
+# intentional and was re-examined alongside the checkpoint fix:
+#
+#   1. `updated_at` is load-bearing on the bitemporal axis.  The backfill
+#      derives `n.recorded_at = n.updated_at` (`_BACKFILL_ENTITY_PROPS_CYPHER`).
+#      Advancing `updated_at` on a no-op re-ingest would restate "when we
+#      recorded this fact" as "when we last looked at it", corrupting exactly
+#      the axis ADR-0008 exists to protect.
+#   2. It would write nothing new.  The fingerprint covers kind, name,
+#      display_name, source_id, chunk_id and metadata (`_entity_state_fingerprint`),
+#      so an unchanged fingerprint means every property in the SET list is
+#      already byte-identical.  On a full re-crawl that is a write per entity
+#      per document for zero observable change.
+#   3. Idempotent re-ingest is a required property, not an accident.  The
+#      snapshot end-dating in `_run_upsert_graph` excludes batch entities for
+#      the same reason; advancing timestamps here would make a replayed
+#      snapshot produce a different graph than the original.
+#
+# "When did we last see this?" is a real operational question, but its answer
+# belongs on the checkpoint nodes — which now carry `updated_at` per document
+# and per source — not on every entity in the graph.
 _UPSERT_ENTITY_BITEMPORAL_CYPHER: Final[str] = f"""
 // ADR-0008 §2 — property-versioned identity-node with [:HAD_STATE] chain.
 // One MERGE transaction; either all sub-writes commit or none do.
+// No unconditional ON MATCH SET by design — see the note above this constant.
 MERGE (n:{_ENTITY_LABEL} {{workspace_id: $workspace_id, id: $id}})
 ON CREATE SET
     n.source_id = $source_id,
@@ -858,23 +1238,113 @@ ORDER BY edge_type
 # Stub-resolution Cypher (keep here with other write queries)
 # ---------------------------------------------------------------------------
 
-_RESOLVE_STUBS_CYPHER: Final[str] = f"""
+# WHY THIS IS NO LONGER ONE STATEMENT THAT CREATES `:calls`.
+#
+# The previous form relocated every relationship incident to a stub as::
+#
+#     CREATE (caller)-[r2:calls {workspace_id: $workspace_id}]->(real)
+#     SET r2 = properties(r), r2.edge_type = 'calls'
+#     DELETE r
+#
+# Relationship *type* cannot be parameterised in Cypher, and when this was
+# written the only by-name edges in the graph were `calls` edges between code
+# symbols, so the type was hard-coded.  The infrastructure extractor emits
+# `depends_on`, `in_vpc`, `in_ou`, `in_organization` and `in_account` edges
+# whose target is defined by a *later* document — exactly the shape that
+# produces a stub.  Ordinary crawl order (instance document, then VPC
+# document) therefore ran those edges through this statement and silently
+# relabelled every one of them `calls`.  `EntityLinker.link_entities` calls
+# `resolve_stubs` unconditionally and the pipeline's `_stage_link` swallows
+# failures, so nothing surfaced.
+#
+# Three defects are repaired, in the order the statements must run:
+#
+#   1. Type preservation.  The relocation is rendered per relationship type —
+#      the same pattern `_DUPLICATE_STUB_RELOCATION_TEMPLATES` and
+#      `_EDGE_INDEX_TEMPLATES` already use — so `type(r)` and `r.edge_type`
+#      both survive.  The store validates every type against
+#      `_EDGE_TYPE_REGEX` first and refuses the whole pass if one fails, so
+#      nothing unvalidated reaches the rendered Cypher.
+#   2. Both directions.  The old subquery matched only `(caller)-[r]->(stub)`,
+#      so a stub's OUTGOING edges were destroyed by the `DETACH DELETE` that
+#      followed.  Incoming and outgoing are relocated separately.
+#   3. One target, not N.  `MATCH (real {name: stub.name})` bound every node
+#      carrying that name — `name` is indexed, not unique — re-creating the
+#      fan-out the by-name edge fix removed.  The target is reduced to a
+#      single node with the same `collect(...)[0]` + explicit-ordering
+#      discipline used by `_UPSERT_EDGE_BY_NAME_CYPHER_TEMPLATE`.
+#
+# The delete refuses to touch a stub that still carries any relationship
+# (`WHERE NOT (stub)--()`): deleting a node whose edges could not be relocated
+# is the data loss this fix exists to prevent, and an un-deleted stub is
+# merely an unresolved reference.  Every statement re-derives the batch with
+# the same `ORDER BY stub.id LIMIT $batch_size`, so relocation and deletion
+# operate on an identical stub set.
+_RESOLVE_STUB_PAIR_PREFIX: Final[str] = f"""
 MATCH (stub:{_ENTITY_LABEL} {{workspace_id: $workspace_id, is_stub: true}})
-MATCH (real:{_ENTITY_LABEL} {{workspace_id: $workspace_id, name: stub.name}})
-WHERE real <> stub AND (real.is_stub IS NULL OR real.is_stub = false)
-WITH stub, real
-LIMIT $batch_size
+WHERE stub.name IS NOT NULL
 CALL {{
-    WITH stub, real
-    MATCH (caller)-[r]->(stub)
-    WHERE r.workspace_id = $workspace_id
-    CREATE (caller)-[r2:calls {{workspace_id: $workspace_id}}]->(real)
-    SET r2 = properties(r), r2.edge_type = 'calls'
-    DELETE r
-    RETURN count(*) AS in_moved
+    WITH stub
+    OPTIONAL MATCH (candidate:{_ENTITY_LABEL}
+                    {{workspace_id: $workspace_id, name: stub.name}})
+    WHERE candidate <> stub AND coalesce(candidate.is_stub, false) = false
+    WITH candidate ORDER BY candidate.id
+    RETURN collect(candidate)[0] AS real
 }}
-DETACH DELETE stub
-RETURN count(DISTINCT stub) AS resolved
+WITH stub, real
+WHERE real IS NOT NULL
+WITH stub, real ORDER BY stub.id
+LIMIT $batch_size
+"""
+
+# `caller <> real` / `other <> real` drop the edge that would become a
+# self-loop on the surviving entity.  `_edge_to_params` already refuses to
+# write a self-loop ("parity with pgvector writer"), so materialising one here
+# would introduce an edge the writer itself would never produce.
+_RESOLVE_STUB_RELOCATION_TEMPLATES: Final[tuple[str, ...]] = (
+    # Incoming: (caller)->(stub)  becomes  (caller)->(real).
+    _RESOLVE_STUB_PAIR_PREFIX
+    + """
+MATCH (caller)-[r:`{rel_type}`]->(stub)
+WHERE r.workspace_id = $workspace_id AND caller <> real
+MERGE (caller)-[k:`{rel_type}` {workspace_id: $workspace_id}]->(real)
+ON CREATE SET k += properties(r)
+DELETE r
+""",
+    # Outgoing: (stub)->(other)  becomes  (real)->(other).
+    _RESOLVE_STUB_PAIR_PREFIX
+    + """
+MATCH (stub)-[r:`{rel_type}`]->(other)
+WHERE r.workspace_id = $workspace_id AND other <> real
+MERGE (real)-[k:`{rel_type}` {workspace_id: $workspace_id}]->(other)
+ON CREATE SET k += properties(r)
+DELETE r
+""",
+)
+
+# Runs last, after every relationship type has been relocated.  The doomed
+# nodes are collected and counted BEFORE the delete: aggregating over a node
+# in the same clause that removed it can raise "entity has been deleted in
+# this transaction" (same reason as `_DUPLICATE_STUB_DELETE_CYPHER`).
+_RESOLVE_STUBS_DELETE_CYPHER: Final[str] = (
+    _RESOLVE_STUB_PAIR_PREFIX
+    + """
+WITH stub
+WHERE NOT (stub)--()
+WITH collect(stub) AS doomed
+WITH doomed, size(doomed) AS resolved
+FOREACH (d IN doomed | DETACH DELETE d)
+RETURN resolved
+"""
+)
+
+# Every relationship type incident to a stub in this workspace.  Deliberately
+# NOT filtered on ``r.workspace_id``: the fail-closed gate in the store must
+# see every type it would have to render, including one it cannot.
+_LIST_STUB_RELATIONSHIP_TYPES_CYPHER: Final[str] = f"""
+MATCH (stub:{_ENTITY_LABEL} {{workspace_id: $workspace_id, is_stub: true}})
+MATCH (stub)-[r]-()
+RETURN DISTINCT type(r) AS rel_type
 """
 
 
@@ -1041,6 +1511,12 @@ _ensure_workspace_predicate(
 )
 _ensure_workspace_predicate(_COUNT_HOT_ENTITY_STATES, "_COUNT_HOT_ENTITY_STATES")
 _ensure_workspace_predicate(_COUNT_WARM_ENTITY_SNAPSHOTS, "_COUNT_WARM_ENTITY_SNAPSHOTS")
+_ensure_workspace_predicate(_RESOLVE_STUBS_DELETE_CYPHER, "_RESOLVE_STUBS_DELETE_CYPHER")
+_ensure_workspace_predicate(
+    _LIST_STUB_RELATIONSHIP_TYPES_CYPHER, "_LIST_STUB_RELATIONSHIP_TYPES_CYPHER"
+)
+for _index, _template in enumerate(_RESOLVE_STUB_RELOCATION_TEMPLATES):
+    _ensure_workspace_predicate(_template, f"_RESOLVE_STUB_RELOCATION_TEMPLATES[{_index}]")
 _ensure_workspace_predicate(_UPSERT_ENTITY_CAS_CYPHER, "_UPSERT_ENTITY_CAS_CYPHER")
 _ensure_workspace_predicate(
     _UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER, "_UPSERT_ENTITY_BITEMPORAL_CAS_CYPHER"

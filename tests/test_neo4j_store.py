@@ -557,10 +557,13 @@ async def test_connect_runs_bootstrap_statements() -> None:
 
     # Connectivity was verified.
     driver_mock.verify_connectivity.assert_awaited_once()
-    # One write per bootstrap statement.
+    # One write per bootstrap statement, plus the pre-DDL checkpoint heal.
+    # The heal is a data repair rather than DDL, so it lives in its own tuple
+    # (`_BOOTSTRAP_STATEMENTS` stays pure `IF NOT EXISTS` DDL), but it must
+    # still run on every connect and before the checkpoint constraint.
     assert driver_mock._session_mock.execute_write.await_count == len(
-        neo4j_store._BOOTSTRAP_STATEMENTS
-    )
+        neo4j_store._CHECKPOINT_HEAL_STATEMENTS
+    ) + len(neo4j_store._BOOTSTRAP_STATEMENTS)
 
 
 @pytest.mark.asyncio

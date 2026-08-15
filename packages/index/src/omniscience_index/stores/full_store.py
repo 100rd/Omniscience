@@ -13,6 +13,7 @@ from omniscience_core.storage.graph import (
     EntityUpsert,
     GraphResultView,
     GraphStore,
+    GraphWriteResult,
 )
 from omniscience_core.storage.vector import (
     ChunkPayload,
@@ -153,7 +154,7 @@ class FullStore(StoreContract):
         version: int | None = None,
         epoch: int | None = None,
         forced_replay: bool = False,
-    ) -> None:
+    ) -> GraphWriteResult:
         return await self._graph.upsert_graph(
             source_id=source_id,
             document_id=document_id,
