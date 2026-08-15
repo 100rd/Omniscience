@@ -630,6 +630,7 @@ class Neo4jGraphStore:
                     "version": version,
                     "epoch": epoch,
                     "now": now,
+                    "forced": forced_replay,
                 },
             )
 
@@ -824,9 +825,19 @@ class Neo4jGraphStore:
 
                 if should_skip:
                     return
+                # forced_replay resets the coarse watermark (may lower it) so a
+                # forced replay to an older version does not strand the fast-path
+                # guard and silently drop later writes before the per-entity CAS
+                # (v11-AP4).  bypass_source_checkpoint keeps the monotonic clamp.
                 await tx.run(
                     _ADVANCE_SOURCE_CHECKPOINT_CYPHER,
-                    {**checkpoint_params, "version": entity_version, "epoch": ep, "now": now},
+                    {
+                        **checkpoint_params,
+                        "version": entity_version,
+                        "epoch": ep,
+                        "now": now,
+                        "forced": forced_replay,
+                    },
                 )
 
                 # ----------------------------------------------------------------
@@ -913,7 +924,13 @@ class Neo4jGraphStore:
                     return
                 await tx.run(
                     _ADVANCE_SOURCE_CHECKPOINT_CYPHER,
-                    {**checkpoint_params, "version": edge_version, "epoch": ep, "now": now},
+                    {
+                        **checkpoint_params,
+                        "version": edge_version,
+                        "epoch": ep,
+                        "now": now,
+                        "forced": bool(fr),
+                    },
                 )
             await tx.run(rendered, params)
 

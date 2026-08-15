@@ -345,6 +345,17 @@ RETURN d.version AS version, d.epoch AS epoch
 # A newer epoch (ADR-0017 per-source epoch pin / ADR-0018 rebuild) restarts the
 # version sequence, so it replaces rather than maximises the watermark;
 # otherwise the watermark only ever climbs.
+#
+# ``$forced`` (admin forced-replay, ADR-0012 §AP1) overrides the monotonic clamp
+# and sets the watermark to ``$version`` unconditionally — including DOWN.  This
+# is the pre-checkpoint-split (ADR-0024) behaviour and it is load-bearing: the
+# per-source ``:StoreCheckpoint`` is a coarse fast-path guard that returns before
+# the authoritative per-entity CAS.  Without the forced reset, a forced replay to
+# a lower version would leave the coarse watermark stranded at the old high mark,
+# so every later non-forced write at or below it is skipped BEFORE reaching the
+# per-entity CAS — silently dropping legitimate writes (v11-AP4 lost-update).
+# ``bypass_source_checkpoint`` is deliberately NOT forced here: it must skip the
+# coarse guard while keeping the watermark monotonic (AP2 no-regress safety).
 _ADVANCE_SOURCE_CHECKPOINT_CYPHER: Final[str] = f"""
 MERGE (c:{_STORE_CHECKPOINT_LABEL}
        {{workspace_id: $workspace_id, source_id: $source_id}})
@@ -355,11 +366,13 @@ ON CREATE SET
     c.updated_at = datetime($now)
 ON MATCH SET
     c.version = CASE
+        WHEN $forced THEN $version
         WHEN $epoch IS NOT NULL AND c.epoch IS NOT NULL AND $epoch > c.epoch
             THEN $version
         WHEN c.version IS NULL OR $version > c.version THEN $version
         ELSE c.version END,
     c.epoch = CASE
+        WHEN $forced THEN $epoch
         WHEN c.epoch IS NULL THEN $epoch
         WHEN $epoch IS NULL OR $epoch <= c.epoch THEN c.epoch
         ELSE $epoch END,
