@@ -33,7 +33,23 @@ EXPECTED_TOOLS = [
 WORKSPACE_ID = uuid.UUID("aaaaaaaa-1111-2222-3333-444400000001")
 FRESH_SOURCE_ID = uuid.UUID("aaaaaaaa-1111-2222-3333-444400000002")
 STALE_SOURCE_ID = uuid.UUID("aaaaaaaa-1111-2222-3333-444400000003")
+#: Frozen instant for the *freshness* assertions.  Every one of those calls
+#: passes ``now=NOW`` explicitly, so a fixed value is exactly what they want.
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
+
+#: Issue time for the MCP read-token fixtures.  These must NOT use ``NOW``.
+#: The token is checked by ``validate_mcp_read_token``, which the tool invokes
+#: without a ``now=`` argument and therefore compares against the real wall
+#: clock.  A token issued at a fixed 2026-07-15 and expiring 30 days later
+#: stops validating on 2026-08-14 and every day after, so the suite turns red
+#: on a calendar boundary rather than on a code change.
+#:
+#: Widening the delta is not an option: ``MCP_READ_MAX_LIFETIME`` caps this
+#: profile at 30 days and the validator rejects anything longer with
+#: ``expiry_exceeds_30_days``.  Issuing relative to the current instant keeps
+#: the fixture inside both bounds indefinitely.
+TOKEN_ISSUED_AT = datetime.now(UTC)
+TOKEN_LIFETIME = timedelta(days=30)
 SOURCE_COMMIT = "a" * 40
 
 
@@ -364,8 +380,8 @@ async def test_registered_contract_info_requires_exact_profile_and_uses_token_wo
         profile_id="omniscience-mcp-read-v1",
         scopes=["search"],
         workspace_id=WORKSPACE_ID,
-        created_at=NOW,
-        expires_at=NOW + timedelta(days=30),
+        created_at=TOKEN_ISSUED_AT,
+        expires_at=TOKEN_ISSUED_AT + TOKEN_LIFETIME,
         is_active=True,
         token_prefix="sk_read_",
     )
@@ -402,8 +418,8 @@ async def test_registered_contract_info_rejects_legacy_and_extra_scope_tokens(
         "profile_id": "omniscience-mcp-read-v1",
         "scopes": ["search"],
         "workspace_id": WORKSPACE_ID,
-        "created_at": NOW,
-        "expires_at": NOW + timedelta(days=30),
+        "created_at": TOKEN_ISSUED_AT,
+        "expires_at": TOKEN_ISSUED_AT + TOKEN_LIFETIME,
         "is_active": True,
         "token_prefix": "sk_read_",
     }
