@@ -27,6 +27,13 @@ Infrastructure graph:
     EdgeData         — directed dependency edge
     extract_infra_graph — extract graph from a parsed infra document
     extract_tfstate_graph — extract graph from a parsed Terraform state document
+    InfraDocument    — fetched infra document (connector metadata + body)
+    extract_aws_live_graph — extract graph from a live AWS inventory document
+    AWS_LIVE_KIND    — entity kind stamped on live AWS entities
+
+Graph-extraction routing:
+    GraphRoute       — which graph extractor owns a document
+    route_document   — pick the route from source type + document metadata
 
 Code symbol graph:
     ExtractedEntity      — node in the code symbol graph
@@ -45,6 +52,12 @@ from omniscience_parsers.chunking import (
 from omniscience_parsers.code.graph import ExtractedEdge, ExtractedEntity, extract_symbol_graph
 from omniscience_parsers.code.treesitter import TreeSitterParser
 from omniscience_parsers.dispatch import ParserDispatch, default_dispatch
+from omniscience_parsers.graph_dispatch import GraphRoute, route_document
+from omniscience_parsers.infra.aws_live import (
+    AWS_LIVE_KIND,
+    InfraDocument,
+    extract_aws_live_graph,
+)
 from omniscience_parsers.infra.graph import (
     EdgeData,
     EntityData,
@@ -58,6 +71,7 @@ from omniscience_parsers.markdown import MarkdownParser
 from omniscience_parsers.plaintext import PlainTextParser
 
 __all__ = [
+    "AWS_LIVE_KIND",
     "ChunkOutput",
     "Chunker",
     "CodeSymbolChunker",
@@ -66,6 +80,8 @@ __all__ = [
     "ExtractedEdge",
     "ExtractedEntity",
     "FixedWindowChunker",
+    "GraphRoute",
+    "InfraDocument",
     "KubernetesParser",
     "MarkdownParser",
     "MarkdownSectionChunker",
@@ -78,7 +94,9 @@ __all__ = [
     "TfStateParser",
     "TreeSitterParser",
     "default_dispatch",
+    "extract_aws_live_graph",
     "extract_infra_graph",
     "extract_symbol_graph",
     "extract_tfstate_graph",
+    "route_document",
 ]

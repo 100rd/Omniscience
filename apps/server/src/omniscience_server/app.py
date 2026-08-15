@@ -35,6 +35,7 @@ from omniscience_core.telemetry import init_telemetry
 from omniscience_embeddings import create_embedding_provider
 from omniscience_embeddings.base import EmbeddingProvider
 from omniscience_index import IndexWriter
+from omniscience_index.linker import EntityLinker
 from omniscience_index.stores import Neo4jGraphStore, Neo4jStoreConfig
 from omniscience_index.stores.qdrant_config import QdrantConfig
 from omniscience_index.stores.qdrant_store import QdrantVectorStore
@@ -297,12 +298,22 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         payload_type=DocumentChangeEvent,
         dlq_subject="ingest.dlq.ingestion",
     )
+    # Cross-source entity linker.  ``app.state.graph_store`` is set by both
+    # storage branches above (Neo4j or the postgres-only store), so this
+    # works for either backend.  ``session_factory`` is passed deliberately:
+    # it routes every edge through the outbox (``edge.upsert``) instead of
+    # writing to Neo4j directly, which is the AP1 single-writer invariant
+    # documented on ``EntityLinker``.  Without a linker the pipeline's
+    # ``_stage_link`` returns immediately and no ``cross_ref`` edge is ever
+    # created — the graph stays a set of disconnected per-source islands.
+    entity_linker = EntityLinker(app.state.graph_store, session_factory=session_factory)
     worker = IngestionWorker(
         queue_consumer=consumer,
         connector_registry=connector_registry,
         embedding_provider=embedding_provider,
         index_writer=index_writer,
         session_factory=session_factory,
+        entity_linker=entity_linker,
     )
     worker_task = asyncio.create_task(worker.start())
     app.state.ingestion_worker = worker

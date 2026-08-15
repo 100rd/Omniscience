@@ -82,7 +82,11 @@ from omniscience_server.ingestion.operator_graph import (
     OperatorEventEdge,
     route_operator_event_to_graph,
 )
-from omniscience_server.ingestion.pipeline import IndexWriterProtocol, IngestionPipeline
+from omniscience_server.ingestion.pipeline import (
+    EntityLinkerProtocol,
+    IndexWriterProtocol,
+    IngestionPipeline,
+)
 from omniscience_server.ingestion.run_tracker import RunTracker
 
 # Environment variables that drive the dedup gate. Read once at worker
@@ -94,6 +98,31 @@ _DEDUP_TTL_HOURS_ENV: str = "OMNISCIENCE_INGEST_DEDUP_TTL_HOURS"
 # dropped at the dedup gate boundary.  Default unset => True in v0.3;
 # v0.4 will ship "false" as the operator-shipped default.
 _AGENTIC_ALLOWED_ENV: str = "OMNISCIENCE_K8S_AGENTIC_ALLOWED"
+
+# Kill switch for the cross-source entity linker.  Linking is enabled
+# whenever an ``entity_linker`` is injected; setting this to a falsey value
+# disables it without redeploying a different wiring.  It exists because
+# ``EntityLinker.link_entities`` reads *every* entity in the workspace on
+# *every* document, so an operator facing a pathological workspace needs a
+# way to shed that load while keeping ingestion running.
+_ENTITY_LINKING_ENABLED_ENV: str = "OMNISCIENCE_ENTITY_LINKING_ENABLED"
+
+# Values that KEEP the linker on.  Everything else turns it off.
+#
+# This is deliberately an allowlist, not the denylist it replaces.  The old
+# form disabled linking only for {"false", "0", "no", "off"} and left it ON for
+# every other value — so ``OMNISCIENCE_ENTITY_LINKING_ENABLED=disabled``,
+# ``=n``, ``=none`` and ``=""`` (the value an unset-but-declared Helm or
+# compose variable produces) all read as "keep linking enabled".  An operator
+# reaching for a load-shedding switch is already in trouble; a switch that
+# silently fails to shed is the failure that matters, so an unrecognised value
+# now sheds.  ``enabled`` leads the set to match the
+# ``OMNISCIENCE_GRAPH_STUB_HEAL`` / ``OMNISCIENCE_GRAPH_BITEMPORAL``
+# convention; the boolean spellings are kept for compatibility.
+#
+# An *unset* variable still means enabled: linking is opt-out, and changing
+# that would silently disable it on every existing deployment.
+_TRUTHY_ENV_VALUES: frozenset[str] = frozenset({"enabled", "true", "1", "yes", "on"})
 
 # Action label emitted when the dedup gate drops an event.  Distinct
 # from the standard pipeline outcomes so dashboards can chart "events
@@ -132,6 +161,17 @@ class IngestionWorker:
             (Gap A bridge).  When ``None`` the operator->graph routing is
             disabled and only the vector pipeline runs — the previous
             behaviour, preserved verbatim for non-operator deployments.
+        entity_linker: Optional cross-source
+            :class:`~omniscience_index.linker.EntityLinker`.  When supplied
+            (and ``OMNISCIENCE_ENTITY_LINKING_ENABLED`` is not disabled) the
+            pipeline's ``_stage_link`` runs after every document and creates
+            ``cross_ref`` edges between entities that different sources
+            describe identically.  Deliberately a separate parameter from
+            ``graph_store``: passing a graph store also switches on the
+            operator->graph bridge, and linking must be enable-able without
+            that side effect.  ``None`` keeps the previous behaviour, in
+            which ``_stage_link`` returned immediately and no cross-source
+            edge was ever produced.
     """
 
     def __init__(
@@ -144,6 +184,7 @@ class IngestionWorker:
         secrets_resolver: SecretsResolver | None = None,
         dedup_gate: DedupGate | None = None,
         graph_store: Any | None = None,
+        entity_linker: EntityLinkerProtocol | None = None,
     ) -> None:
         self._consumer = queue_consumer
         self._connector_registry = connector_registry
@@ -157,6 +198,7 @@ class IngestionWorker:
         # operator-event routing never perturbs the symbol-graph write path
         # the pipeline already drives through ``index_writer.upsert_graph``.
         self._graph_store = graph_store
+        self._entity_linker = _resolve_entity_linker(entity_linker)
         self._run_id: uuid.UUID | None = None
         self._error_count = 0
 
@@ -298,11 +340,17 @@ class IngestionWorker:
 
         secrets = self._secrets_resolver.resolve(source.secrets_ref)
 
+        # ``graph_extractor`` is the *code* extractor; the pipeline routes
+        # infrastructure documents (AWS inventory) to their own extractor via
+        # ``omniscience_parsers.graph_dispatch``.  Passing it here keeps the
+        # graph stage enabled — ``_stage_graph`` short-circuits when it is
+        # ``None`` — without changing Python symbol-graph behaviour.
         pipeline = IngestionPipeline(
             connector=connector,
             embedding_provider=self._embedding_provider,
             index_writer=self._index_writer,
             graph_extractor=extract_symbol_graph,
+            entity_linker=self._entity_linker,
         )
 
         if _is_sync_marker(event):
@@ -607,6 +655,44 @@ class IngestionWorker:
 # ---------------------------------------------------------------------------
 # Module-level helpers (pure / small — keep under 30 lines each)
 # ---------------------------------------------------------------------------
+
+
+def _resolve_entity_linker(
+    entity_linker: EntityLinkerProtocol | None,
+) -> EntityLinkerProtocol | None:
+    """Apply the ``OMNISCIENCE_ENTITY_LINKING_ENABLED`` kill switch.
+
+    Returns the injected linker unless the env flag disables it.  Both
+    outcomes are logged at worker construction so the effective state is
+    visible in the startup log rather than inferred from missing edges —
+    an unwired linker was previously indistinguishable from a linker that
+    found nothing to link.
+
+    Parsing is fail-closed against an *unrecognised* value (see
+    ``_TRUTHY_ENV_VALUES``): the flag exists to shed the full-workspace scan
+    ``EntityLinker.link_entities`` performs on every document, so a value the
+    parser does not understand disables linking rather than quietly keeping it
+    on.  An absent variable still means enabled, which is the pre-existing
+    opt-out default.
+    """
+    if entity_linker is None:
+        log.info("entity_linking_disabled", reason="no_linker_injected")
+        return None
+
+    raw = os.environ.get(_ENTITY_LINKING_ENABLED_ENV)
+    if raw is not None:
+        normalised = raw.strip().lower()
+        if normalised not in _TRUTHY_ENV_VALUES:
+            log.info(
+                "entity_linking_disabled",
+                reason="env_flag",
+                env=_ENTITY_LINKING_ENABLED_ENV,
+                value=normalised,
+            )
+            return None
+
+    log.info("entity_linking_enabled", linker=type(entity_linker).__name__)
+    return entity_linker
 
 
 def _to_operator_event(event: DocumentChangeEvent, workspace_id: uuid.UUID) -> OperatorEvent:

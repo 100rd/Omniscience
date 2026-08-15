@@ -52,6 +52,29 @@ INGESTION_STAGE_DURATION_SECONDS: Histogram = Histogram(
 )
 
 # ---------------------------------------------------------------------------
+# Graph-write outcome counter
+# ---------------------------------------------------------------------------
+
+# A graph write the store declined to persist.  Before this counter existed
+# the only signal was a debug log that printed the size of the *input* batch,
+# so a store-side rejection was indistinguishable from a successful write and
+# a 100% drop rate survived an entire ingestion run unnoticed.
+#
+# ``reason`` mirrors ``GraphWriteResult.skip_reason`` and is a small closed
+# set (``stale_document_version``, ``no_graph_store``, ``empty_batch``).  No
+# workspace_id label, per the module docstring's cardinality posture.
+INGESTION_GRAPH_WRITES_SKIPPED_TOTAL: Counter = Counter(
+    name="omniscience_ingestion_graph_writes_skipped_total",
+    documentation=(
+        "Graph writes rejected by the store rather than persisted, labelled "
+        "by source type and the store's skip reason. A sustained non-zero "
+        "rate on reason='stale_document_version' means documents are being "
+        "dropped by the staleness guard."
+    ),
+    labelnames=["source_type", "reason"],
+)
+
+# ---------------------------------------------------------------------------
 # Dedup counters (issue #164)
 # ---------------------------------------------------------------------------
 
@@ -146,5 +169,6 @@ __all__ = [
     "INGESTION_DEDUP_DROP_TOTAL",
     "INGESTION_DOCUMENTS_PROCESSED_TOTAL",
     "INGESTION_ERRORS_TOTAL",
+    "INGESTION_GRAPH_WRITES_SKIPPED_TOTAL",
     "INGESTION_STAGE_DURATION_SECONDS",
 ]
