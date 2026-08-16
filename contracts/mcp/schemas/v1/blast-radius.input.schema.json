@@ -1,0 +1,1 @@
+{"properties":{"action_type":{"default":"restart","title":"Action Type","type":"string"},"as_of":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"As Of"},"entity_id":{"title":"Entity Id","type":"string"},"max_depth":{"default":3,"title":"Max Depth","type":"integer"}},"required":["entity_id"],"title":"blast_radiusArguments","type":"object"}

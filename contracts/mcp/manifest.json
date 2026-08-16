@@ -1,0 +1,56 @@
+{
+  "capabilities": {
+    "auth": ["workspace-bound", "exact-search-scope", "bounded-expiry", "rotation", "revocation"],
+    "consistency": ["converged", "degraded", "unknown"],
+    "freshness": ["fresh", "stale", "unknown", "degraded"],
+    "severance": ["direct-source-fallback"]
+  },
+  "contract_version": "1.0.0",
+  "schema_set_sha256": "0c4115b27629446907122bfb0fc6b9da377d9a827133e5d54be085f21a8fc6a9",
+  "schemas": [
+    {"path": "schemas/blast-radius.input.schema.json", "sha256": "497821d5844af3fc02d41ae4b33551be12cdf672127226bdec187c0b244920bb"},
+    {"path": "schemas/blast-radius.response.schema.json", "sha256": "2d28f3d59233278c6cc24cbd8b62f652a9a190a5431360f8e581bb20aed6311a"},
+    {"path": "schemas/contract-info.input.schema.json", "sha256": "928afae4dd240649d9b50e7aa097ee833e66529f70279eca2f1adb806cd75b21"},
+    {"path": "schemas/contract-info.response.schema.json", "sha256": "ec531cbd7d86cd33288fa2de95b5a7bb9aa48ea310fe5221aa62376606da8597"},
+    {"path": "schemas/find-similar-incidents.input.schema.json", "sha256": "78a607e8bbc41986cfe1c664fca96bba40a263f1cb593629509c216efaf71e12"},
+    {"path": "schemas/find-similar-incidents.response.schema.json", "sha256": "f3eb1e3f09a598831a2da0dfa174dce8cc02211e2bc46883f795ac233af9322b"},
+    {"path": "schemas/generate-postmortem.input.schema.json", "sha256": "4204f3b229851af1cb70039187b922a4543c95e9dcc7bdf04fb343fb2ba7cda2"},
+    {"path": "schemas/generate-postmortem.response.schema.json", "sha256": "a91f5922e5afde01da64f5293f3e038aefd35764b203bdcaa5af28ddd22a25bb"},
+    {"path": "schemas/get-document.input.schema.json", "sha256": "7398146606c5412b26ed9652e42007c5ab45ed93a0c079da08e0fe590abd0214"},
+    {"path": "schemas/get-document.response.schema.json", "sha256": "10ab771104eb8bd7c5fe4d8b68d4aac27cb7b2d36d1bfc9e9628bd97205ae728"},
+    {"path": "schemas/get-entity.input.schema.json", "sha256": "c0e15e7ca36fbdec4e8c0fb17e47df934b7aa41d3c0e57c04d78ad821e3a2b2d"},
+    {"path": "schemas/get-entity.response.schema.json", "sha256": "8f5296df4aa213b10bb6ad42b4403a6093835da77b7e83b27f2a92aaef271f58"},
+    {"path": "schemas/get-related-entities.input.schema.json", "sha256": "cf0fe91c5397894f497d9e1e8152e5ab6f8c2e9dfc5077cf01e20d587a8aa682"},
+    {"path": "schemas/get-related-entities.response.schema.json", "sha256": "92ce3a380ae5e237ca20598416d315fe1fa2fc2d62784024f18422556d19d162"},
+    {"path": "schemas/incident-timeline.input.schema.json", "sha256": "fd1c29f1d9ccc88eab7980d2cde4360c7a6ea7b8a0d7851fed12bc484736cb4d"},
+    {"path": "schemas/incident-timeline.response.schema.json", "sha256": "cd135535ba32cdd6e8987216913432d279e4d0fe29bdf257b0ffc28c47ffe6ec"},
+    {"path": "schemas/list-entities.input.schema.json", "sha256": "e93bbbda5e79d1875827a1650933ba3aecf62a27715a25ae4187acdd10e1681b"},
+    {"path": "schemas/list-entities.response.schema.json", "sha256": "91faa241e927d1f5ec4916f3718de6b2caaefb17bf65cd164b7f243dfea0ec05"},
+    {"path": "schemas/list-sources.input.schema.json", "sha256": "d2e8a5bf60eaecae3720499ca5a572bc543135ccd8971ba0747dceb3286fa770"},
+    {"path": "schemas/list-sources.response.schema.json", "sha256": "e7b4fcbb54ffb9f47d3434cc4e8ce141a14a58f44ec67da53b8202e63079b494"},
+    {"path": "schemas/meta.schema.json", "sha256": "fa2d0d308711ef1f9e5c32e679f41408d73297878f883bb27b56613f2ff67c7e"},
+    {"path": "schemas/replay-context.input.schema.json", "sha256": "38550fb089c6ed07d20b127bbce759b330b59df7509b9502f5545f62cd6c7e75"},
+    {"path": "schemas/replay-context.response.schema.json", "sha256": "413a7ab91c0d79fac53ea17a426971d3b9176a544a42e255d5bbc926a7e7ffb2"},
+    {"path": "schemas/resolve-incident.input.schema.json", "sha256": "3483d4f5f43d488943f2843486f39ceeb979f61f0ffe8fa6c2f56a80b07e68aa"},
+    {"path": "schemas/resolve-incident.response.schema.json", "sha256": "bdb888f3b41e8a668407729dede01196e7a9213a52f4461918efcec491c7d591"},
+    {"path": "schemas/response.schema.json", "sha256": "ed51057ee4ace6965094a63771d736a80f6910faabded1c0ea4c38764aacbee8"},
+    {"path": "schemas/search.input.schema.json", "sha256": "3f7a0c77522c5812a7902b9876f87c52f9e6d775412ddbf5e4f0c90a78b8686b"},
+    {"path": "schemas/search.response.schema.json", "sha256": "7b2aacc50aa6aeda976a423f04b4899c0f970af6feb87a4b2789caef52b33892"},
+    {"path": "schemas/source-stats.input.schema.json", "sha256": "efc64fcbdfd090833ca2cb71d5ba52bee190a7c62eb4b8f3e423e6bee4a9c4bf"},
+    {"path": "schemas/source-stats.response.schema.json", "sha256": "c4fb0df43d9396e587af2094e1f1acb10c9bc3aa7f01c654c482b966e9b75aa9"},
+    {"path": "schemas/suggest-runbook.input.schema.json", "sha256": "eb7c53c9ea27dc9cdd8b312dbcf76d67c9920ff1c7f6b6ecc111ce3631e7739b"},
+    {"path": "schemas/suggest-runbook.response.schema.json", "sha256": "1988d0fcf7d991a736850516e1d3124e52d4b8088e9e04b265ebcbba35f4171a"}
+  ],
+  "source_commit": {
+    "environment_variable": "OMNISCIENCE_MCP_SOURCE_COMMIT",
+    "release_required": true,
+    "strategy": "runtime-injection"
+  },
+  "token_profile_id": "omniscience-mcp-read-v1",
+  "tool_descriptions": "non-normative",
+  "tool_count": 15,
+  "tool_registry": {
+    "path": "tool-registry.json",
+    "sha256": "316db6deefc0fd076c1c1e2a7f98584b71d2242273fcbe9ec62dc6cf43d5ad84"
+  }
+}
