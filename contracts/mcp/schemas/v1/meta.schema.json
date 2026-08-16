@@ -1,0 +1,64 @@
+{
+  "$id": "https://omniscience.dev/mcp/v1/schemas/meta.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "properties": {
+    "consistency": {
+      "additionalProperties": false,
+      "properties": {
+        "degraded_subsystems": {"items": {"type": "string"}, "type": "array"},
+        "projection_lag_versions": {"minimum": 0, "type": "integer"},
+        "status": {"enum": ["converged", "degraded", "unknown"]}
+      },
+      "required": ["status", "degraded_subsystems", "projection_lag_versions"],
+      "type": "object"
+    },
+    "contract": {
+      "additionalProperties": false,
+      "properties": {
+        "commit": {"pattern": "^[0-9a-f]{40}$", "type": "string"},
+        "schema_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "version": {"const": "1.0.0"}
+      },
+      "required": ["version", "commit", "schema_sha256"],
+      "type": "object"
+    },
+    "effective_as_of": {"format": "date-time", "type": "string"},
+    "fallback": {
+      "additionalProperties": false,
+      "properties": {
+        "reason": {
+          "enum": [
+            null,
+            "consistency_unknown",
+            "contract_mismatch",
+            "freshness_sla_unknown",
+            "missing_lineage",
+            "never_synced",
+            "projection_divergence",
+            "source_degraded",
+            "stale_source"
+          ]
+        },
+        "required": {"type": "boolean"}
+      },
+      "required": ["required", "reason"],
+      "type": "object"
+    },
+    "freshness": {
+      "additionalProperties": true,
+      "properties": {
+        "evaluated_at": {"format": "date-time", "type": "string"},
+        "oldest_source_age_seconds": {"minimum": 0, "type": ["integer", "null"]},
+        "stale_source_ids": {"items": {"format": "uuid", "type": "string"}, "type": "array"},
+        "status": {"enum": ["fresh", "stale", "unknown", "degraded"]}
+      },
+      "required": ["status", "evaluated_at", "oldest_source_age_seconds", "stale_source_ids"],
+      "type": "object"
+    },
+    "generated_at": {"format": "date-time", "type": "string"},
+    "workspace_id": {"format": "uuid", "type": "string"}
+  },
+  "required": ["contract", "workspace_id", "generated_at", "effective_as_of", "freshness", "consistency", "fallback"],
+  "type": "object"
+}

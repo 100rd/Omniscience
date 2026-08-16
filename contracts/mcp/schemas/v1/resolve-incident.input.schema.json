@@ -1,0 +1,1 @@
+{"properties":{"alert_id":{"title":"Alert Id","type":"string"},"as_of":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"As Of"},"max_depth":{"default":2,"title":"Max Depth","type":"integer"}},"required":["alert_id"],"title":"resolve_incidentArguments","type":"object"}

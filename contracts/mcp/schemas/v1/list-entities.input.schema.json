@@ -1,0 +1,1 @@
+{"properties":{"as_of":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"As Of"},"cluster":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Cluster"},"kind":{"title":"Kind","type":"string"},"name":{"anyOf":[{"type":"string"},{"type":"null"}],"default":null,"title":"Name"}},"required":["kind"],"title":"list_entitiesArguments","type":"object"}

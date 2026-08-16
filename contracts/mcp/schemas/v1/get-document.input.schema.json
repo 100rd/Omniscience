@@ -1,0 +1,1 @@
+{"properties":{"document_id":{"title":"Document Id","type":"string"}},"required":["document_id"],"title":"get_documentArguments","type":"object"}
