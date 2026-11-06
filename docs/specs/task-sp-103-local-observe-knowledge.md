@@ -2,6 +2,12 @@
 id: task-sp-103-local-observe-knowledge
 title: Provide isolated synthetic knowledge and scoped reads for local Observe
 status: ready
+readiness:
+  approvedBy: "@100rd"
+  approvedAt: 2026-11-06
+source: {kind: human, ref: "User-approved management-local-observe-v1 implementation plan (2026-11-06)"}
+sddMode: full
+capabilitySpecs: [SPEC-IN, SPEC-SOT, SPEC-ACL, SPEC-EV, SPEC-OPS, SPEC-KP, SPEC-MCP, SPEC-PII, SPEC-MCTX]
 approvedBy: platform-owner-via-implementation-request
 approvedAt: 2026-11-06
 repo: 100rd/Omniscience
