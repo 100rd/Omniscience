@@ -1,0 +1,95 @@
+fullnameOverride: "omniscience-api"
+replicaCount: 1
+
+image:
+  repository: omniscience-local/omniscience-server
+  tag: "observe-source"
+  pullPolicy: IfNotPresent
+
+service:
+  port: 8000
+
+admin:
+  enabled: true
+  replicaCount: 1
+  image:
+    repository: omniscience-local/omniscience-admin
+    tag: "observe-source"
+    pullPolicy: IfNotPresent
+  port: 80
+  httpRoute:
+    enabled: false
+    hostname: "splatform-omniscience.nonprod.betterix.io"
+    gatewayName: "gw-vpn"
+    gatewayNamespace: "envoy-gateway"
+    sectionName: "https"
+
+migration:
+  enabled: true
+
+bootstrap:
+  enabled: true
+
+config:
+  environment: "development"
+  logLevel: "info"
+  mcpSourceCommit: "639c52dac220b461d286b86a6fdeb36cf89300a4"
+  embeddingModel: "all-MiniLM-L6-v2"
+  natsUrl: "nats://omniscience-nats:4222"
+  neo4jUri: "bolt://omniscience-neo4j:7687"
+  neo4jUser: "neo4j"
+  qdrantHost: "omniscience-qdrant"
+
+# All secrets are required at install time; no credential defaults in values.yaml.
+secrets:
+  existingSecret: ""
+  migrationDatabaseUrl: ""
+  runtimeDatabaseUrl: ""
+  neo4jPassword: ""
+  qdrantApiKey: ""
+  brokerToken: ""
+
+postgresql:
+  enabled: false
+  fullnameOverride: "omniscience-postgres"
+  auth:
+    database: omniscience
+    username: omniscience
+
+nats:
+  enabled: false
+  fullnameOverride: "omniscience-nats"
+  natsBox:
+    enabled: false
+  config:
+    jetstream:
+      enabled: true
+      fileStorage:
+        enabled: false
+      memoryStorage:
+        enabled: true
+
+neo4j:
+  enabled: false
+  fullnameOverride: "omniscience-neo4j"
+  neo4j:
+    name: "omniscience-neo4j"
+    edition: "community"
+    resources:
+      cpu: "500m"
+      memory: "2Gi"
+  services:
+    neo4j:
+      enabled: false
+  volumes:
+    data:
+      mode: "volume"
+      volume:
+        emptyDir: {}
+
+qdrant:
+  enabled: false
+  fullnameOverride: "omniscience-qdrant"
+
+networkPolicy:
+  enabled: true

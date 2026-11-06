@@ -1,0 +1,89 @@
+{{- if .Values.networkPolicy.enabled }}
+# 1. omniscience-api readnet & intra-owner egress
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omniscience.fullname" . }}-readnet
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: omniscience
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: omniscience } }
+        - podSelector: { matchLabels: { app.kubernetes.io/name: barbarossa } }
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: platform-portal
+              app.kubernetes.io/component: backend
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: platform-portal
+              app.kubernetes.io/component: bootstrap-mappings
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: envoy-gateway
+      ports:
+        - { protocol: TCP, port: {{ int .Values.service.port }} }
+        - { protocol: TCP, port: {{ int .Values.admin.port }} }
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 4222 }
+        - { protocol: TCP, port: 7687 }
+        - { protocol: TCP, port: 7474 }
+        - { protocol: TCP, port: 6333 }
+        - { protocol: TCP, port: 6334 }
+        - { protocol: TCP, port: {{ int .Values.service.port }} }
+---
+# 2. Omniscience private stores (Postgres, NATS, Neo4j, Qdrant): allow ingress ONLY from Omniscience pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omniscience.fullname" . }}-private-stores
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [postgresql, nats, neo4j, qdrant]
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: omniscience } }
+      ports:
+        - { protocol: TCP, port: 5432 }
+        - { protocol: TCP, port: 4222 }
+        - { protocol: TCP, port: 8222 }
+        - { protocol: TCP, port: 7687 }
+        - { protocol: TCP, port: 7474 }
+        - { protocol: TCP, port: 6333 }
+        - { protocol: TCP, port: 6334 }
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "omniscience.fullname" . }}-neo4j-private
+spec:
+  podSelector:
+    matchLabels:
+      app: omniscience-neo4j
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector: { matchLabels: { app.kubernetes.io/name: omniscience } }
+      ports:
+        - { protocol: TCP, port: 7687 }
+        - { protocol: TCP, port: 7474 }
+  egress:
+    - ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+{{- end }}

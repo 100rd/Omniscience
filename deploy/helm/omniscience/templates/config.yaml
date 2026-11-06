@@ -1,0 +1,137 @@
+{{- if ne .Values.config.environment "development" }}
+{{- fail "omniscience local_observe bootstrap is restricted to ENVIRONMENT=development" }}
+{{- end }}
+{{- if not .Values.secrets.existingSecret }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "omniscience.secretName" . }}
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  MIGRATION_DATABASE_URL: {{ required "secrets.migrationDatabaseUrl is required" .Values.secrets.migrationDatabaseUrl | quote }}
+  DATABASE_URL: {{ required "secrets.runtimeDatabaseUrl is required" .Values.secrets.runtimeDatabaseUrl | quote }}
+  NEO4J_PASSWORD: {{ required "secrets.neo4jPassword is required" .Values.secrets.neo4jPassword | quote }}
+  QDRANT_API_KEY: {{ required "secrets.qdrantApiKey is required" .Values.secrets.qdrantApiKey | quote }}
+  OMNISCIENCE_LOCAL_OBSERVE_BROKER_TOKEN: {{ required "secrets.brokerToken is required" .Values.secrets.brokerToken | quote }}
+---
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "omniscience.fullname" . }}
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+data:
+  ENVIRONMENT: "development"
+  LOCAL_OBSERVE_ENABLED: "true"
+  GRAPH_BITEMPORAL: "enabled"
+  OMNISCIENCE_MCP_SOURCE_COMMIT: {{ required "config.mcpSourceCommit is required" .Values.config.mcpSourceCommit | quote }}
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}
+  NATS_URL: {{ .Values.config.natsUrl | quote }}
+  STORAGE_GRAPH_BACKEND: "neo4j"
+  STORAGE_VECTOR_BACKEND: "qdrant"
+  NEO4J_URI: {{ .Values.config.neo4jUri | quote }}
+  NEO4J_USERNAME: {{ .Values.config.neo4jUser | quote }}
+  NEO4J_DATABASE: "neo4j"
+  QDRANT_HOST: {{ .Values.config.qdrantHost | quote }}
+  QDRANT_GRPC_PORT: "6334"
+  QDRANT_HTTP_PORT: "6333"
+  QDRANT_PREFER_GRPC: "true"
+  EMBEDDING_PROVIDER: "local"
+  LOCAL_MODEL_NAME: {{ .Values.config.embeddingModel | quote }}
+  LOCAL_MODEL_DEVICE: "cpu"
+  HF_HUB_OFFLINE: "1"
+  TRANSFORMERS_OFFLINE: "1"
+  DISCOVERY_ENABLED: "false"
+  RECONCILE_ENABLED: "false"
+  SCHEDULER_ENABLED: "false"
+  RETENTION_ENABLED: "false"
+  OTLP_ENDPOINT: ""
+{{- if .Values.migration.enabled }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "omniscience.fullname" . }}-migrate
+  labels:
+    {{- include "omniscience.labels" . | nindent 4 }}
+    app.kubernetes.io/component: migrate
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omniscience
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          workingDir: /app/packages/core
+          command: ["alembic", "upgrade", "head"]
+          envFrom:
+            - configMapRef: { name: {{ include "omniscience.fullname" . }} }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omniscience.secretName" . }}
+                  key: MIGRATION_DATABASE_URL
+{{- end }}
+{{- if .Values.bootstrap.enabled }}
+---
+# Post-install/post-upgrade owner seed job: waits for omniscience-api /ready,
+# then runs `python -m omniscience_server.local_observe` with the broker token.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "omniscience.fullname" . }}-bootstrap
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: omniscience
+        app.kubernetes.io/component: bootstrap
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: bootstrap
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - sh
+            - -ec
+            - |
+              until curl -fsS http://omniscience-api:8000/ready >/dev/null; do sleep 2; done
+              python -m omniscience_server.local_observe >/dev/null
+          envFrom:
+            - configMapRef: { name: {{ include "omniscience.fullname" . }} }
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omniscience.secretName" . }}
+                  key: DATABASE_URL
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omniscience.secretName" . }}
+                  key: NEO4J_PASSWORD
+            - name: QDRANT_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omniscience.secretName" . }}
+                  key: QDRANT_API_KEY
+            - name: OMNISCIENCE_LOCAL_OBSERVE_BROKER_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "omniscience.secretName" . }}
+                  key: OMNISCIENCE_LOCAL_OBSERVE_BROKER_TOKEN
+{{- end }}
