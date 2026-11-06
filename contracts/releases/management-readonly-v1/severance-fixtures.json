@@ -1,0 +1,62 @@
+{
+  "schema": "management-readonly-v1-severance-fixture-matrix-v1",
+  "note": "AC-SP86-4 severance fixture kit. Single source of truth consumed by both tests/release/management_readonly/severance_fixtures.py (Python, exercises the live packages/core producers) and consumer-kit-go (Go, structural/decision-shape verification only -- see contracts/releases/management-readonly-v1/consumer-kit-go/README.md). Every scenario's expected_decision is 'fallback_required': SPEC-MCTX REQ-MCTX-7/8 and ADR-0022 OMR-6 forbid a loss/expiry/skew scenario from validating as healthy, empty, or cached-current. reason values are drawn from the closed omniscience_core.management.taxonomy.FALLBACK_REASONS enum.",
+  "fixtures": [
+    {
+      "id": "sev-loss-001",
+      "scenario": "loss",
+      "description": "Evidence source is unreachable (raises on health()). Consumer must not treat a severed producer as an empty-but-valid answer.",
+      "reason": "producer_unavailable",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    },
+    {
+      "id": "sev-loss-002",
+      "scenario": "loss",
+      "description": "Evidence source reports unhealthy explicitly (health().healthy == false). Same fail-closed outcome as an exception.",
+      "reason": "source_severed",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    },
+    {
+      "id": "sev-token-expiry-001",
+      "scenario": "token_expiry",
+      "description": "Consumer's omniscience-mcp-read-v1 token profile has expired or been revoked before the request boundary. A revoked token cannot be treated as still-authorized-but-stale.",
+      "reason": "token_revoked",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    },
+    {
+      "id": "sev-freshness-expiry-001",
+      "scenario": "freshness_expiry",
+      "description": "reference_now minus request.evidence_cut exceeds request.max_age_seconds. Expired freshness cannot be silently promoted to current truth.",
+      "reason": "evidence_stale",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    },
+    {
+      "id": "sev-contract-skew-001",
+      "scenario": "contract_skew",
+      "description": "Consumer's ManagementContractPin.contract_major no longer matches the live ManagementContextCapabilityManifest.contract_major.",
+      "reason": "contract_major_mismatch",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    },
+    {
+      "id": "sev-contract-skew-002",
+      "scenario": "contract_skew",
+      "description": "Consumer's pinned schema_revision_pin no longer matches any schema_revisions value the live manifest publishes.",
+      "reason": "schema_digest_mismatch",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    },
+    {
+      "id": "sev-contract-skew-003",
+      "scenario": "contract_skew",
+      "description": "Consumer's pinned producer_manifest_digest_pin no longer matches the live producer_manifest_digest.",
+      "reason": "producer_manifest_mismatch",
+      "expected_decision": "fallback_required",
+      "must_not_validate_as": ["healthy", "empty", "cached_current"]
+    }
+  ]
+}

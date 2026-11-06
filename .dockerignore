@@ -1,6 +1,11 @@
 .git
 .github
 .venv
+.cache/
+.worktrees/
+.local-observe/
+contracts/releases/management-readonly-v1/consumer-kit-go/management-readonly-v1-consumer-kit
+contracts/releases/management-readonly-v1/consumer-kit-go/management-readonly-v1-consumer-kit.exe
 __pycache__
 *.pyc
 .mypy_cache

@@ -1,0 +1,141 @@
+# Qualification workflow for the management-readonly-v1 release candidate
+# (task-sp-86-management-readonly-release, ADR-0022).
+#
+# This workflow packages ALREADY-MERGED SP-10/SP-61/SP-81 slices into one
+# release-lock evidence report; it never builds a live container, never
+# pushes to a registry, and never deploys anything (see
+# contracts/releases/management-readonly-v1/README.md "External / pending
+# gates" -- the real OCI push is a separate, later, human-authorized step).
+#
+# Runs on every push/PR that touches the release's writable scope, plus a
+# manual dispatch for on-demand re-qualification.
+
+name: management-readonly-v1 release qualification
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'helm/omniscience/**'
+      - 'apps/server/src/omniscience_server/app.py'
+      - 'apps/server/src/omniscience_server/routes/health.py'
+      - 'apps/server/src/omniscience_server/management/**'
+      - 'apps/server/src/omniscience_server/privacy/**'
+      - 'packages/core/src/omniscience_core/management/**'
+      - 'packages/core/src/omniscience_core/privacy/**'
+      - 'contracts/mcp/**'
+      - 'contracts/management/**'
+      - 'contracts/pii/**'
+      - 'contracts/releases/management-readonly-v1/**'
+      - 'scripts/qualify_management_readonly_release.py'
+      - 'tests/release/management_readonly/**'
+      - 'tests/test_management_readonly_release*.py'
+      - '.github/workflows/management-readonly-release.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Dockerfile'
+      - 'helm/omniscience/**'
+      - 'apps/server/src/omniscience_server/app.py'
+      - 'apps/server/src/omniscience_server/routes/health.py'
+      - 'apps/server/src/omniscience_server/management/**'
+      - 'apps/server/src/omniscience_server/privacy/**'
+      - 'packages/core/src/omniscience_core/management/**'
+      - 'packages/core/src/omniscience_core/privacy/**'
+      - 'contracts/mcp/**'
+      - 'contracts/management/**'
+      - 'contracts/pii/**'
+      - 'contracts/releases/management-readonly-v1/**'
+      - 'scripts/qualify_management_readonly_release.py'
+      - 'tests/release/management_readonly/**'
+      - 'tests/test_management_readonly_release*.py'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  qualify:
+    name: Qualify release lock (AC-SP86-1..5)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.2"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --frozen
+
+      - name: AC-SP86-1 -- release-lock digest re-derivation
+        run: uv run python scripts/qualify_management_readonly_release.py --write
+
+      - name: Upload release-lock evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: management-readonly-v1-release-lock
+          path: contracts/releases/management-readonly-v1/evidence/
+          if-no-files-found: error
+
+      - name: AC-SP86-2..5 -- runtime conformance, PW0 seeded-leak, severance kit, ops/rollback
+        run: >
+          uv run pytest tests/release/management_readonly
+          tests/test_management_readonly_release_lock.py -v
+
+      - name: No-regression -- SP-61 PW0 and SP-81 management-context suites
+        run: >
+          uv run pytest
+          tests/test_pii_wall_admission.py tests/test_pii_wall_fail_closed.py
+          tests/test_pii_wall_lifecycle.py tests/test_pii_contracts_pin.py tests/privacy
+          tests/test_management_context_scope_and_replay.py
+          tests/test_management_context_authority_and_pii.py
+          tests/test_management_context_severance.py
+          tests/test_management_context_boundary.py tests/management
+          tests/test_health.py -v
+
+  language-neutral-consumer-kit:
+    name: AC-SP86-6 -- Go consumer kit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: contracts/releases/management-readonly-v1/consumer-kit-go/go.mod
+      - name: go vet
+        working-directory: contracts/releases/management-readonly-v1/consumer-kit-go
+        run: go vet ./...
+      - name: go build
+        working-directory: contracts/releases/management-readonly-v1/consumer-kit-go
+        run: go build -o "$RUNNER_TEMP/management-readonly-v1-consumer-kit" ./...
+      - name: go test (the AC-SP86-6 probe itself)
+        working-directory: contracts/releases/management-readonly-v1/consumer-kit-go
+        run: go test ./... -v
+
+  helm-and-docker:
+    name: Chart lint + Dockerfile build gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: "v3.15.0"
+      - name: helm lint
+        run: helm lint helm/omniscience --set secrets.postgresPassword=ci-placeholder
+      - name: helm template (managementReadonly disabled -- default install)
+        run: helm template omniscience helm/omniscience --set secrets.postgresPassword=ci-placeholder
+      - name: helm template (managementReadonly enabled -- guard smoke test)
+        run: |
+          helm template omniscience helm/omniscience \
+            --set secrets.postgresPassword=ci-placeholder \
+            --set managementReadonly.enabled=true \
+            --set managementReadonly.profileRevision=1.0.0 \
+            --set managementReadonly.domainPacks='{reliability}' \
+            --set managementReadonly.dependencyDigests.sp10McpDigest=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
+            --set managementReadonly.dependencyDigests.sp60PolicyDigest=sha256:fa312387e5fa4b3980b085e20033fc8d947474c62c15dd9e3836372dea01f038 \
+            --set managementReadonly.dependencyDigests.sp81ManifestDigest=sha256:0000000000000000000000000000000000000000000000000000000000000000
+      - name: Docker build (buildable image digest; NOT pushed -- see release README)
+        run: docker build -t omniscience:management-readonly-v1-ci .

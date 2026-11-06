@@ -1,0 +1,15 @@
+{
+  "kind": "revert-pr",
+  "probe": "restore-prior-omniscience-release-digests-and-reject-unqualified-candidate",
+  "profile_id": "management-readonly-v1",
+  "prior_release_digest": null,
+  "prior_release_reason": "no_prior_release_exists_v1_is_first_candidate",
+  "procedure": [
+    "identify the exact prior release-lock evidence file under contracts/releases/management-readonly-v1/evidence/ (by its own content digest, never by a mutable tag)",
+    "revert the merge PR that introduced the candidate digests being rolled back (rollback.kind=revert-pr): git, image, chart, MCP, management-context, schema, PW0-policy, and dependency digests all move together as one unit -- never a partial rollback of only some fields",
+    "re-run scripts/qualify_management_readonly_release.py against the reverted commit and confirm the resulting release-lock reproduces the prior digests exactly",
+    "confirm the reverted state's rejects-unqualified-candidate probe: attempting to qualify any commit between the rolled-back release and the prior one must fail RED, proving the rollback did not silently accept an intermediate unqualified state",
+    "record the rollback event as a new evidence_refs entry; do not overwrite or delete the prior evidence file"
+  ],
+  "note": "task-sp-86-management-readonly-release is the first Omniscience release under management-readonly-v1 (ADR-0022). There is no earlier immutable OmniscienceManagementReadOnlyRelease to roll back to yet, so prior_release_digest is null and the rollback probe currently exercises only the revert-PR + re-qualify + reject-unqualified-intermediate steps against this repository's own git history. Once a second release-lock exists, this file's prior_release_digest must be updated to that release's own content digest -- never inferred from a branch name or tag."
+}

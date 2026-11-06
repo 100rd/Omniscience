@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -231,6 +232,25 @@ async def test_empty_database_bootstrap_allows_only_exact_admin() -> None:
 
     assert rejected.status_code == 403
     assert accepted.status_code == 201
+
+
+@pytest.mark.asyncio
+async def test_local_observe_never_exposes_unauthenticated_admin_bootstrap() -> None:
+    session = _make_session(scalars=[])
+    app = _build_app(session, authenticated=False)
+    app.state.settings = SimpleNamespace(environment="development", local_observe_enabled=True)
+    transport = ASGITransport(app=app)
+    with patch.object(
+        token_routes.ApiTokenRead,
+        "model_validate",
+        return_value=_make_read_model(_make_token_obj(scopes=["admin"])),
+    ):
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            response = await client.post(
+                "/api/v1/tokens", json={"name": "untrusted", "scopes": ["admin"]}
+            )
+    assert response.status_code == 401
+    session.add.assert_not_called()
 
 
 @pytest.mark.asyncio

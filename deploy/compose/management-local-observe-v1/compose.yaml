@@ -1,0 +1,37 @@
+# Layer over both management-readonly-local owner fragments. The orchestrator
+# owns the Compose project name and adds the Portal to omniscience-readnet.
+services:
+  omniscience-api:
+    image: omniscience-local/omniscience-server:observe-source
+    environment:
+      LOCAL_OBSERVE_ENABLED: "true"
+      GRAPH_BITEMPORAL: enabled
+      OMNISCIENCE_MCP_SOURCE_COMMIT: ${OMNISCIENCE_OBSERVE_SOURCE_COMMIT:-}
+    ports:
+      - "127.0.0.1:${OMNISCIENCE_OBSERVE_API_PORT:-18000}:8000"
+
+  omniscience-migrate:
+    image: omniscience-local/omniscience-server:observe-source
+
+  omniscience-admin:
+    image: omniscience-local/omniscience-admin:observe-source
+    ports: !override
+      - "127.0.0.1:${OMNISCIENCE_OBSERVE_ADMIN_PORT:-13001}:80"
+
+networks:
+  omniscience-readnet:
+    name: management-local-observe-v1-omniscience-readnet
+  omniscience-private:
+    name: management-local-observe-v1-omniscience-private
+
+volumes:
+  omniscience-pgdata:
+    name: management-local-observe-v1-omniscience-pgdata
+  omniscience-natsdata:
+    name: management-local-observe-v1-omniscience-natsdata
+  omniscience-neo4jdata:
+    name: management-local-observe-v1-omniscience-neo4jdata
+  omniscience-neo4jlogs:
+    name: management-local-observe-v1-omniscience-neo4jlogs
+  omniscience-qdrantdata:
+    name: management-local-observe-v1-omniscience-qdrantdata

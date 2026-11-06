@@ -790,3 +790,41 @@ def test_every_registered_tool_response_validates_against_its_schema(
             registry=registry,
         )
         assert list(validator.iter_errors(payload)) == [], tool["name"]
+
+
+@pytest.mark.asyncio
+async def test_observe_compose_host_keeps_mcp_rebinding_protection(monkeypatch) -> None:
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+    from mcp.server.fastmcp import FastMCP
+    from omniscience_server.mcp import mount
+
+    server = FastMCP("observe-test", json_response=True)
+    monkeypatch.setattr(mount, "mcp_server", server)
+    monkeypatch.setattr(mount, "set_fastapi_app", lambda _: None)
+    app = FastAPI()
+    app.state.settings = SimpleNamespace(environment="development", local_observe_enabled=True)
+    transport = ASGITransport(app=mount.create_mcp_asgi_app(app))
+    init = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "observe-test", "version": "1"},
+        },
+    }
+    headers = {"Accept": "application/json, text/event-stream"}
+    async with (
+        server.session_manager.run(),
+        AsyncClient(transport=transport, base_url="http://omniscience-api:8000") as client,
+    ):
+        assert (await client.post("/", headers=headers, json=init)).status_code == 200
+        wrong_host = {**headers, "Host": "example.invalid:8000"}
+        assert (await client.post("/", headers=wrong_host, json=init)).status_code == 421
+        wrong_origin = {**headers, "Origin": "http://example.invalid"}
+        assert (await client.post("/", headers=wrong_origin, json=init)).status_code == 403
+        app.state.settings.local_observe_enabled = False
+        mount.create_mcp_asgi_app(app)
+        assert (await client.post("/", headers=headers, json=init)).status_code == 421

@@ -113,7 +113,7 @@ def _profile_app() -> tuple[FastAPI, AsyncMock]:
     app = FastAPI()
     app.state.db_session_factory = MagicMock(return_value=session)
     app.include_router(routes.router)
-    app.dependency_overrides[routes._admin_dep.dependency] = _admin_token
+    app.dependency_overrides[routes.get_current_token] = _admin_token
     return app, session
 
 
@@ -472,3 +472,68 @@ async def test_profile_revoke_is_immediate_and_validator_rejects_token() -> None
     assert token.is_active is False
     with pytest.raises(McpReadTokenValidationError, match="token_revoked"):
         validate_mcp_read_token(token, now=NOW)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("slug", "ttl", "enabled", "environment", "expected"),
+    [
+        ("alpha", 600, True, "development", 201),
+        ("beta", 600, True, "development", 201),
+        ("foreign", 600, True, "development", 403),
+        ("alpha", 1200, True, "development", 422),
+        ("alpha", None, True, "development", 422),
+        ("alpha", 600, False, "development", 403),
+        ("alpha", 600, True, "production", 403),
+    ],
+)
+async def test_local_observe_broker_is_bounded_to_disposable_workspaces(
+    slug: str, ttl: int | None, enabled: bool, environment: str, expected: int
+) -> None:
+    from omniscience_server.local_observe_policy import (
+        BROKER_ID,
+        BROKER_SCOPE,
+        PROFILE_ID,
+        WORKSPACES,
+    )
+    from omniscience_server.routes import tokens as routes
+
+    app, session = _profile_app()
+    app.state.settings = SimpleNamespace(environment=environment, local_observe_enabled=enabled)
+    broker = _token(id=BROKER_ID, scopes=[BROKER_SCOPE], workspace_id=None)
+    app.dependency_overrides[routes.get_current_token] = lambda: broker
+    session.get.return_value = SimpleNamespace(settings={"synthetic_profile": PROFILE_ID})
+    workspace_id = WORKSPACES.get(slug, WORKSPACE_ID)
+    expiry = datetime.now(UTC) + timedelta(seconds=ttl) if ttl is not None else None
+    read_model = _read_model().model_copy(
+        update={"workspace_id": workspace_id, "expires_at": expiry}
+    )
+    with patch.object(
+        routes, "create_mcp_read_token", new_callable=AsyncMock, return_value=(read_model, "once")
+    ) as create:
+        transport = ASGITransport(app=app)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            result = await client.post(
+                "/api/v1/tokens/profiles/omniscience-mcp-read-v1",
+                json={
+                    "name": "local-observe-test",
+                    "workspace_id": str(workspace_id),
+                    "expires_at": expiry.isoformat() if expiry else None,
+                },
+            )
+            generic = await client.get("/api/v1/tokens")
+
+    assert result.status_code == expected
+    assert generic.status_code == 403
+    if expected == 201:
+        assert result.json()["token"]["workspace_id"] == str(workspace_id)
+        assert result.json()["token"]["scopes"] == ["search"]
+        create.assert_awaited_once_with(
+            session,
+            name="local-observe-test",
+            workspace_id=workspace_id,
+            env="development",
+            expires_at=expiry,
+        )
+    else:
+        create.assert_not_awaited()

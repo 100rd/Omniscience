@@ -1,0 +1,112 @@
+{
+  "title": "OmniscienceManagementReadOnlyRelease",
+  "description": "task-sp-86-management-readonly-release required output shape (see docs/specs/task-sp-86-management-readonly-release.md 'Required output'). Producer evidence only -- not a deployment activation, privacy verdict, or production-readiness claim.",
+  "type": "object",
+  "required": [
+    "profile_id",
+    "profile_revision",
+    "git_commit",
+    "git_worktree_scope_clean",
+    "image_digest",
+    "source_input_digest",
+    "chart_digest",
+    "configuration_digest",
+    "mcp_manifest_digest",
+    "management_context_manifest_digest",
+    "schema_set_digest",
+    "pii_policy_revision",
+    "pii_policy_digest",
+    "pw0_receipt_refs",
+    "auth_token_profile",
+    "dependency_profile",
+    "readiness_contract",
+    "severance_fixture_digest",
+    "language_neutral_consumer_kit_digest",
+    "evidence_refs",
+    "rollback_release_digest",
+    "pending",
+    "status",
+    "reasons"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "profile_id": { "type": "string", "const": "management-readonly-v1" },
+    "profile_revision": { "type": "string", "minLength": 1 },
+    "git_commit": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "git_worktree_scope_clean": { "type": "boolean" },
+    "image_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Legacy Dockerfile digest; not an OCI image digest."
+    },
+    "source_input_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Digest of tracked and non-ignored untracked files copied into the Docker build."
+    },
+    "chart_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "configuration_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "mcp_manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "management_context_manifest_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "schema_set_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "pii_policy_revision": { "type": "string", "minLength": 1 },
+    "pii_policy_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "pw0_receipt_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "auth_token_profile": { "type": "string", "const": "omniscience-mcp-read-v1" },
+    "dependency_profile": {
+      "type": "object",
+      "required": [
+        "sp10_mcp_digest",
+        "sp60_policy_digest",
+        "sp61_pw0_ref",
+        "sp81_manifest_digest",
+        "omnius_status"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "sp10_mcp_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "sp60_policy_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "sp61_pw0_ref": { "type": "string", "minLength": 1 },
+        "sp81_manifest_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "omnius_status": { "type": "string", "const": "not_deployed" }
+      }
+    },
+    "readiness_contract": {
+      "type": "object",
+      "required": ["health_path", "ready_path", "metrics_path"],
+      "additionalProperties": false,
+      "properties": {
+        "health_path": { "type": "string", "minLength": 1 },
+        "ready_path": { "type": "string", "minLength": 1 },
+        "metrics_path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "severance_fixture_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "language_neutral_consumer_kit_digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "rollback_release_digest": { "type": "string", "minLength": 1 },
+    "pending": {
+      "type": "object",
+      "required": ["image_registry_digest"],
+      "properties": {
+        "image_registry_digest": { "type": "string", "minLength": 1 }
+      }
+    },
+    "status": { "type": "string", "enum": ["GREEN", "RED"] },
+    "reasons": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+  }
+}
