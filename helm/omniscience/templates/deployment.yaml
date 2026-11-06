@@ -1,5 +1,6 @@
 {{- include "omniscience.productionGuards" . }}
 {{- include "omniscience.admissionGuards" . }}
+{{- include "omniscience.managementReadonlyGuards" . }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

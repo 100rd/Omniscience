@@ -43,6 +43,7 @@ log = structlog.get_logger(__name__)
 
 #: Header value that indicates the client wants a streaming response.
 _SSE_ACCEPT_VALUE: Final[str] = "text/event-stream"
+_LOCAL_OBSERVE_MCP_HOST: Final[str] = "omniscience-api:8000"
 
 
 def _is_streaming(scope: Scope) -> bool:
@@ -126,6 +127,20 @@ def create_mcp_asgi_app(app: FastAPI) -> ASGIApp:
     # doubles under the mount). Starlette redirects the non-canonical
     # "/mcp" path; credentialed clients must use "/mcp/" directly.
     mcp_server.settings.streamable_http_path = "/"
+    # Keep MCP DNS rebinding protection active for local Compose. The Portal
+    # uses this exact service host without a browser Origin header.
+    settings = getattr(app.state, "settings", None)
+    security = mcp_server.settings.transport_security
+    if security is not None:
+        allowed_hosts = [
+            host for host in security.allowed_hosts if host != _LOCAL_OBSERVE_MCP_HOST
+        ]
+        if (
+            getattr(settings, "local_observe_enabled", False) is True
+            and getattr(settings, "environment", None) == "development"
+        ):
+            allowed_hosts.append(_LOCAL_OBSERVE_MCP_HOST)
+        security.allowed_hosts = allowed_hosts
     starlette_app = mcp_server.streamable_http_app()
     return McpSessionTelemetryMiddleware(starlette_app)
 

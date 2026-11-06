@@ -198,6 +198,11 @@ class Settings(BaseSettings):
         description="Deployment environment: development, staging, production.",
     )
 
+    local_observe_enabled: bool = Field(
+        default=False,
+        description="Enable the dedicated read-token broker in the local Observe profile.",
+    )
+
     # --- Storage backend selection (Epic #96 — Neo4j + Qdrant) ---
     storage_graph_backend: str = Field(
         default="neo4j",

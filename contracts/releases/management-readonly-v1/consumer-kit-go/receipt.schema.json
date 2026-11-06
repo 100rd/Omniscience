@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "ManagementReadOnlyConsumerReceiptV1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "release_lock_digest",
+    "auth",
+    "observed_at",
+    "expires_at",
+    "freshness_max_age_seconds"
+  ],
+  "properties": {
+    "schema": { "const": "management-readonly-v1-consumer-receipt-v1" },
+    "release_lock_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["token_profile", "scopes", "token_issued_at", "token_expires_at"],
+      "properties": {
+        "token_profile": { "type": "string", "minLength": 1 },
+        "scopes": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "token_issued_at": { "type": "string", "format": "date-time" },
+        "token_expires_at": { "type": "string", "format": "date-time" }
+      }
+    },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "freshness_max_age_seconds": { "type": "integer", "minimum": 1, "maximum": 2592000 }
+  }
+}

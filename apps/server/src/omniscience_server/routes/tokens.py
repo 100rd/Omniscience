@@ -13,7 +13,7 @@ DELETE /api/v1/tokens/{id}  — deactivate a token by id
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -25,7 +25,11 @@ from omniscience_core.auth.audit import (
     audit_token_created,
     audit_token_deleted,
 )
-from omniscience_core.auth.middleware import get_optional_current_token, require_scope
+from omniscience_core.auth.middleware import (
+    get_current_token,
+    get_optional_current_token,
+    require_scope,
+)
 from omniscience_core.auth.scopes import Scope, check_scopes
 from omniscience_core.auth.tokens import (
     MCP_READ_PROFILE_ID,
@@ -37,16 +41,25 @@ from omniscience_core.auth.tokens import (
     revoke_mcp_read_token,
     rotate_mcp_read_token,
 )
-from omniscience_core.db.models import ApiToken
+from omniscience_core.db.models import ApiToken, Workspace
 from omniscience_core.db.schemas import ApiTokenRead
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omniscience_server.local_observe_policy import (
+    BROKER_ID,
+    BROKER_MAX_SECONDS,
+    BROKER_SCOPE,
+    PROFILE_ID,
+    WORKSPACES,
+)
+
 log = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/api/v1/tokens", tags=["tokens"])
 _admin_dep = Depends(require_scope(Scope.admin))
+_current_token_dep = Depends(get_current_token)
 _optional_token_dep = Depends(get_optional_current_token)
 
 # Arbitrary but fixed Postgres advisory-lock key used to serialize concurrent
@@ -117,6 +130,12 @@ async def create_token(
     """
     factory = _get_db_factory(request)
     env = _get_env(request)
+    # The isolated Observe profile provisions its scoped broker directly.
+    # Its HTTP listener must never offer the generic first-admin bootstrap,
+    # including while the seed is still preparing the synthetic corpus.
+    settings = getattr(request.app.state, "settings", None)
+    if current_token is None and getattr(settings, "local_observe_enabled", False) is True:
+        raise HTTPException(status_code=401, detail="Admin token required")
 
     db: AsyncSession
     async with factory() as db:
@@ -173,11 +192,38 @@ async def create_token(
 async def create_mcp_read_profile_token(
     payload: McpReadTokenCreateRequest,
     request: Request,
-    admin_token: ApiToken = _admin_dep,
+    actor: ApiToken = _current_token_dep,
 ) -> TokenCreateResponse:
-    """Mint the exact bounded MCP read profile; admin authorization required."""
+    """Mint an exact MCP read token as admin or as the isolated local broker."""
+    settings = getattr(request.app.state, "settings", None)
+    is_local_broker = (
+        _get_env(request) == "development"
+        and getattr(settings, "local_observe_enabled", False) is True
+        and actor.id == BROKER_ID
+        and actor.scopes == [BROKER_SCOPE]
+        and actor.workspace_id is None
+    )
+    if not is_local_broker and Scope.admin not in actor.scopes:
+        raise HTTPException(
+            status_code=403,
+            detail={"code": "forbidden", "message": "Insufficient token scopes"},
+        )
+    if is_local_broker:
+        if payload.workspace_id not in WORKSPACES.values():
+            raise HTTPException(status_code=403, detail="Local Observe workspace required")
+        expiry = payload.expires_at
+        ceiling = datetime.now(UTC) + timedelta(seconds=BROKER_MAX_SECONDS)
+        if expiry is None or expiry.utcoffset() is None or expiry > ceiling:
+            raise HTTPException(
+                status_code=422, detail="Local Observe token expiry must be bounded"
+            )
+
     factory = _get_db_factory(request)
     async with factory() as db:
+        if is_local_broker:
+            workspace = await db.get(Workspace, payload.workspace_id)
+            if workspace is None or workspace.settings.get("synthetic_profile") != PROFILE_ID:
+                raise HTTPException(status_code=403, detail="Local Observe workspace required")
         try:
             read_model, plaintext = await create_mcp_read_token(
                 db,
@@ -196,8 +242,8 @@ async def create_mcp_read_profile_token(
         read_model.token_prefix,
         str(payload.workspace_id),
         expires_at=read_model.expires_at.isoformat(),
-        actor_id=str(admin_token.id),
-        actor_prefix=admin_token.token_prefix,
+        actor_id=str(actor.id),
+        actor_prefix=actor.token_prefix,
     )
     return TokenCreateResponse(token=read_model, secret=plaintext)
 

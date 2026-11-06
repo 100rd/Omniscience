@@ -69,3 +69,6 @@ Thumbs.db
 
 # Claude Code agent worktrees / local state
 .claude/
+.cache/
+.worktrees/
+.local-observe/

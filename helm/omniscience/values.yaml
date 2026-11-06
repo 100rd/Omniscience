@@ -171,3 +171,39 @@ production:
     latencyThresholdMs: 0
     errorRateThreshold: 0
     failureReserveFraction: 0
+
+# management-readonly-v1 release profile (task-sp-86-management-readonly-release,
+# ADR-0022). Opt-in and additive, same shape as production.admission above: the
+# default install (managementReadonly.enabled=false) is unaffected. When
+# enabled, the chart fails closed (Helm `fail`) unless the release identity and
+# every ADR-0022 configuration invariant is supplied -- see
+# docs/runbooks/management-readonly-release.md and
+# templates/_management_readonly_guards.tpl. Digest fields are references to
+# the content-addressed digests scripts/qualify_management_readonly_release.py
+# re-derives -- never a literal credential.
+managementReadonly:
+  enabled: false
+  profileId: "management-readonly-v1"
+  profileRevision: ""
+  # ADR-0022 configuration invariant 4: select only the Reliability domain pack.
+  domainPacks: []
+  # ADR-0022 invariant 7: every owner/component/management/privacy mutation
+  # route this deployment exposes must be disabled under this profile.
+  mutationRoutesDisabled: true
+  # ADR-0022 invariant 2: network traffic only among selected runtime owners,
+  # declared owner-local support services, and explicit read-only sources.
+  networkPolicy:
+    restrictToSelectedOwners: true
+  # ADR-0022 invariant 3/9: Omnius is a deferred runtime owner in this
+  # profile -- no endpoint/credential/service-discovery entry, and its status
+  # is reported as "not_deployed", never a live mock.
+  omnius:
+    status: "not_deployed"
+    endpoint: ""
+  # ADR-0022 invariant 5: pin exact SP-60 policy and SP-10/SP-81 producer
+  # digests (see contracts/pii/pin.json, contracts/mcp/pin.json,
+  # contracts/management/pin.json).
+  dependencyDigests:
+    sp10McpDigest: ""
+    sp60PolicyDigest: ""
+    sp81ManifestDigest: ""
