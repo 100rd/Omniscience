@@ -183,11 +183,7 @@ def test_source_inputs_and_dependency_lock_are_in_digest_and_cleanliness_scope(
 
 def test_severance_receipt_rejects_duplicate_ids_and_malformed_field_types() -> None:
     fixture_path = (
-        ROOT
-        / "contracts"
-        / "releases"
-        / "management-readonly-v1"
-        / "severance-fixtures.json"
+        ROOT / "contracts" / "releases" / "management-readonly-v1" / "severance-fixtures.json"
     )
     fixture_rows = json.loads(fixture_path.read_text(encoding="utf-8"))["fixtures"]
     receipt_rows = [

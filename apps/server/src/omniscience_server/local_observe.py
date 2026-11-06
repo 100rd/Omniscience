@@ -121,7 +121,7 @@ async def _ensure_workspaces(db: AsyncSession) -> None:
 
 def _documents(slug: str) -> tuple[tuple[str, str, str], ...]:
     label = f"Observe {slug.title()}"
-    documents = (
+    documents: tuple[tuple[str, str, str], ...] = (
         (
             "topology.md",
             f"{label} topology evidence",
